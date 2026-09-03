@@ -7,7 +7,7 @@ Planned shape:
 - **Triage acquisitions**: one-click collection packages from an endpoint — process
   listing, autoruns/persistence points, browser artifacts, prefetch/shimcache (Win),
   shell history, targeted file/memory-region grabs. Every acquisition rides the
-  `live-response` channel and its policy/audit gates — forensics adds packages and
+  `response::live` channel and its policy/audit gates — forensics adds packages and
   parsing, never a second remote-access mechanism.
 - **Timeline**: unified, filterable timeline for a case — sensor events, detections,
   acquisition artifacts, and analyst annotations on one axis.

@@ -16,7 +16,7 @@ a normal-looking process lineage across a fleet over time has no cheap rewrite).
 | 7 | Cross-endpoint correlation | server | `server/fleet`: fleet cases + adaptive posture | drafted (#62) |
 | 8 | Identity / network / cloud | server | XDR scope: identity signals arrive with `server/disruption` connectors; network/cloud ingestion is post-v1 (kept deliberately out of the agent) | direction |
 | 9 | Threat intelligence | server → device | `intel` feed pipeline (STIX/TAXII/MISP → indicator sets + IOA→content conversion) | drafted (#60) |
-| 10 | Human / MDR intelligence | server | `server/hunt` (hunts graduating into content) · `live-response` · `server/forensics` · `server/assistant` · case workflow | drafted |
+| 10 | Human / MDR intelligence | server | `server/hunt` (hunts graduating into content) · `response::live` · `server/forensics` · `server/assistant` · case workflow | drafted |
 
 Cross-cutting spine, not a layer: **MITRE ATT&CK mapping** — every detection carries
 technique identifiers (rules/sigma/correlator already emit them; formalized as
