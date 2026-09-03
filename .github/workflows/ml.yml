@@ -20,11 +20,9 @@ jobs:
       - name: ruff
         run: ruff check ml
       - name: pytest
-        # The pipeline has no tests yet; this step becomes unconditional once
-        # code is migrated from old/ml (including the ONNX parity check).
+        # The dev extra carries numpy/onnx so the Rust/Python attribution parity
+        # tests really run here (they importorskip otherwise, silently weakening
+        # the seam).
         run: |
-          if ls ml/tests/test_*.py >/dev/null 2>&1; then
-            pip install -e ml && pytest ml/tests
-          else
-            echo "no tests yet — skipping"
-          fi
+          pip install -e "ml[dev]"
+          pytest ml/tests
