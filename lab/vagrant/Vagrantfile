@@ -1,0 +1,3 @@
+# Placeholder — the machine matrix described in README.md.
+# Migrated from old/lab/vagrant/Vagrantfile after review (boxes, per-machine SSH
+# ports, QEMU provider settings, one-way rsync of the repo into each VM).
