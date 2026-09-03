@@ -1,63 +1,61 @@
-# ADR-0002: ML models ship as data; inference is a native Rust evaluator, ONNX is the reference format
+# ADR-0002: ML models ship as data; inference is onnxruntime (`ort`), statically linked
 
 - **Status**: accepted
 - **Date**: 2026-09-03
 
 ## Context
 
-The `ml/` pipeline trains the on-device tiers (T0–T2) and exports them for inference by
-`crates/ml`. Two coupled decisions were left open by the old iteration:
+The `ml/` pipeline trains the on-device tiers (T0–T2) and exports them to ONNX for
+inference by `crates/ml`. Two coupled decisions were left open by the old iteration:
 
 **Delivery.** The old agent embedded models at compile time (`include_bytes!`), so every
 model update was an agent release. The new ML space plans canary-ring shipping via the
 `updater`/`registry` machinery, which is incompatible with compile-time embedding.
 
-**Inference runtime.** All current and planned on-device models are tree ensembles
-(Isolation Forests) or similarly simple classical models. `skl2onnx` exports these using
-the `ai.onnx.ml` operator set (`TreeEnsembleRegressor` et al.), not the neural-network
-core opset. That quietly constrains the runtime choice: the `ai.onnx.ml` ops are fully
-supported by `ort` (bindings to Microsoft's onnxruntime, a large C++ library), but only
-partially and unreliably by pure-Rust runtimes such as `tract`. "We ship ONNX" therefore
-means "the agent links onnxruntime" — megabytes of C++ in a binary deployed to every
-endpoint, a native library to build or fetch per target (3 OSes × x86_64/aarch64), for
-models whose inference is walking if/else trees.
+**Inference runtime.** `skl2onnx` exports tree models using the `ai.onnx.ml` operator
+set (`TreeEnsembleRegressor` et al.). Those ops are fully supported by `ort` (bindings
+to Microsoft's onnxruntime, a large C++ library) but only partially by pure-Rust
+runtimes such as `tract`. The considered alternative — a hand-rolled native tree
+evaluator with ONNX kept as reference format — was rejected: it ties every new model
+family to bespoke evaluator work in `crates/ml`, while `ort` runs anything the Python
+side can export, keeping the training side free to evolve (including beyond trees)
+without touching the agent.
 
-Meanwhile the pipeline already has the machinery that makes a hand-rolled evaluator safe:
-`verify_onnx`-style parity checks and golden fixtures enforced in CI on both sides of the
-Rust/Python seam.
+Linking mode matters more than usual because the agent runs as SYSTEM/root: a
+dynamically loaded onnxruntime is a library-hijack/side-loading surface inside the EDR
+itself, and it makes the updater version two artifacts in lockstep. Dynamic linking
+also saves nothing: it moves bytes from the executable into a shipped library, leaving
+the install footprint identical.
 
 ## Decision
 
-1. **Models are data, not code.** Agents load model artifacts from the update channel
-   (signed, versioned, shipped via canary rings from `ml/registry/`). `crates/ml` never
-   embeds a model via `include_bytes!`. Absence of a model artifact means the
-   corresponding scorer is disabled, not a fallback model.
-2. **Inference is a native Rust evaluator in `crates/ml`.** The shipped artifact is a
-   flat encoding of the model (for tree ensembles: node arrays of feature index,
-   threshold, children, leaf value, plus normalization constants), emitted by
-   `synthaea_ml/export/` alongside the ONNX file. `crates/ml` implements a small
-   dependency-free walker per model family, not a general ONNX runtime.
-3. **ONNX remains the reference format and verification oracle.** Training still exports
-   ONNX; onnxruntime (Python side only) remains the oracle. Golden fixtures pin three
-   points to identical scores (within epsilon): scikit-learn ↔ ONNX (existing
-   `verify_onnx`) and ONNX ↔ the flat artifact as evaluated by the Rust walker. A CI
-   failure on either seam blocks the model, same policy as feature parity.
+1. **Models are data, not code.** Agents load ONNX model artifacts from the update
+   channel (signed, versioned, shipped via canary rings from `ml/registry/`).
+   `crates/ml` never embeds a model via `include_bytes!`. Absence of a model artifact
+   means the corresponding scorer is disabled, not a fallback model.
+2. **Inference is onnxruntime via the `ort` crate, statically linked** into the agent
+   binary. Dynamic linking (build-time or `load-dynamic`/dlopen) is rejected for the
+   endpoint agent: no separate native library to hijack, sign, or version.
+3. **Binary size is managed with onnxruntime's reduced-ops build, not linking mode.**
+   Start on the standard static binaries and measure; if the agent outgrows its size
+   budget, pin a custom onnxruntime build compiled with only the operators our models
+   use (a cached per-target CI artifact). `verify_onnx` remains the oracle that the
+   shipped runtime + model reproduce scikit-learn's scores.
 
 ## Consequences
 
 - Model updates decouple from agent releases: retrain → registry → canary ring, no
   rebuild. The FP-governance gate applies to the artifact, not the binary.
-- The agent stays pure Rust: no C++ toolchain in agent builds, no per-target onnxruntime
-  binaries, smaller attack/audit surface, and `cargo test --workspace` exercises
-  inference on all three OSes without native fixtures.
-- We commit to one evaluator per model *family* (~100 lines each; one tree walker covers
-  every forest across T0–T2). A future model type outside the flat format's reach —
-  e.g. a real neural net — needs either a new evaluator or a revisit of this ADR;
-  adopting `ort` at that point is the documented fallback and touches only `crates/ml`
-  and `export/`, since ONNX artifacts are already produced and verified today.
-- The flat format is a new versioned contract between `synthaea_ml/export/` and
-  `crates/ml`: golden fixtures required (parity-seam rule), and a format change is a
-  version bump, not a silent edit — same policy as the event schema.
+- Any model type the Python side can export to ONNX ships with zero agent changes —
+  tree ensembles today, other families later — at the cost of carrying onnxruntime
+  (tens of MB statically linked before op reduction) on every endpoint.
+- Agent builds gain a native C++ dependency: prebuilt or CI-built onnxruntime static
+  libs per target (3 OSes, x86_64/aarch64). `cargo test --workspace` on the ML crate
+  needs those libs available in CI.
+- One signed agent binary: no runtime library search path, no side-loading surface, no
+  updater lockstep between agent and runtime. Upgrading onnxruntime is an agent
+  release — acceptable, since runtime upgrades are rare and model upgrades (the
+  frequent case) ride the data channel.
 - Signing/verification of model artifacts becomes a hard prerequisite for shipping ML:
   a model is agent-controlling input, so the `updater` trust chain must cover it before
   the first canary ring, not after.
