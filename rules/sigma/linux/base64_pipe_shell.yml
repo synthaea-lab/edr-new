@@ -1,0 +1,20 @@
+title: Base64-encoded command piped to a shell
+description: >
+  Detects a base64-encoded payload being decoded and executed directly through a shell —
+  the Linux equivalent of the encoded PowerShell command on Windows. A common obfuscation
+  technique used to hide a malicious command. T1027 / T1059.004.
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - attack.defense_evasion
+  - attack.t1027
+detection:
+  selection:
+    CommandLine|contains:
+      - 'base64 -d | sh'
+      - 'base64 -d | bash'
+      - 'base64 --decode | sh'
+      - 'base64 --decode | bash'
+      - 'base64 -D | sh'
+      - 'base64 -D | bash'
+  condition: selection

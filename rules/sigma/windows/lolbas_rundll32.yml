@@ -1,0 +1,16 @@
+title: Rundll32 with suspicious argument
+description: >
+  Detects the use of rundll32.exe with arguments frequently used to execute
+  arbitrary code (Living Off The Land Binary). T1218.011.
+tags:
+  - attack.defense_evasion
+  - attack.t1218.011
+detection:
+  selection:
+    Image|endswith: '\rundll32.exe'
+    CommandLine|contains:
+      - 'javascript:'
+      - 'vbscript:'
+      - shell32.dll,ShellExec_RunDLL
+      - url.dll,FileProtocolHandler
+  condition: selection
