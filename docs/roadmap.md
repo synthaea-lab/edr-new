@@ -38,6 +38,8 @@ flowchart LR
 | #34 audit fallback sensor | independent; second Linux sensor → makes #35 conformance meaningful |
 | #80 container context | Linux sensor + schema; feeds #72/#76 later but standalone now |
 | #36 packaging: Linux | unblocks realistic lab installs for every later phase's validation |
+| **Source collection** — #90 uprobes · #91 lsm · #92 netlink · #93 journal | new Linux telemetry taps: agent-local, parallel-safe, validated on the existing lab; #91 additionally opens the Linux inline-blocking path #25 will use |
+| #84 device-control (Linux telemetry half) · #86 JA4/SNI | sensor-side collection, same profile; control/policy halves return in later phases |
 
 ## Phase 2 — Control-plane spine (the great unblocker; mostly serial)
 
@@ -77,10 +79,10 @@ flowchart LR
 | #63 response::live | #24 + #28 + #89 identities |
 | #70 forensics | #63 (acquisitions channel) + #77 (artifact storage) |
 | #64 disruption | #25 + #62 + #89 (+ directory connector) |
-| #71 tamper | heartbeat half: now; integrity half: #30 manifest |
+| #71 tamper | heartbeat half + #92 cross-check: after Phase 1; integrity half: #30 manifest |
 | #81 deception → #82 ransomware | #81 first; #82 also wants Windows rename/delete events (#39 driver or #21 partials) and #25 reflex |
-| #84 device-control · #86 JA4 · #90–#93 source crates | sensor-team parallel work, any time after Phase 1; #92's cross-check feeds #71 |
-| #85 memory scanning | Linux half after #91; Windows half gated on #39 (TI-ETW/PPL) |
+| #84 (policy-enforcement half) | #23 policy; telemetry half done in Phase 1 |
+| #85 memory scanning | Linux half after #91 (Phase 1); Windows half gated on #39 (TI-ETW/PPL) |
 | #75 assistant | #72 + cases in #28; pairs with #50 |
 | #39 windows driver | long-term: signing/MVI gates; unblocks #85-win, #82 fidelity, handle-access |
 
