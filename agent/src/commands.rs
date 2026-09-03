@@ -3,10 +3,10 @@
 //! without a wired sensor (macOS today, Windows until the M3 migration), the commands
 //! compile and fail cleanly at runtime instead of breaking the workspace build.
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use schema::sensor::Sensor as _;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", windows))]
 use crate::sink::DetectionSink;
 
 /// `RuleState` pre-filled with the processes already running at startup — without
@@ -17,6 +17,46 @@ fn seeded_rule_state() -> rules::RuleState {
     let mut rule_state = rules::RuleState::new();
     rule_state.seed_from_proc();
     rule_state
+}
+
+/// Windows equivalent: pid → comm via `tasklist` (carried over from the old agent —
+/// no extra API surface; the sensor keeps its own richer store independently).
+#[cfg(windows)]
+fn seeded_rule_state() -> rules::RuleState {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(output) = std::process::Command::new("tasklist")
+        .args(["/fo", "csv", "/nh"])
+        .output()
+    {
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            // CSV: "Image Name","PID",...
+            let parts: Vec<&str> = line.splitn(3, ',').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let comm = parts[0].trim_matches('"').to_string();
+            if let Ok(pid) = parts[1].trim_matches('"').parse::<u32>() {
+                map.insert(pid, comm);
+            }
+        }
+    }
+    let mut rule_state = rules::RuleState::new();
+    rule_state.seed_pid_comm(map);
+    rule_state
+}
+
+/// Runs a Windows sensor to completion with Ctrl-C wired to its stop flag.
+#[cfg(windows)]
+fn run_windows_sensor(sink: Box<dyn schema::sensor::EventSink>) -> anyhow::Result<()> {
+    let mut sensor = sensor_windows::WindowsSensor::new();
+    let stop = sensor.stop_handle();
+    ctrlc::set_handler(move || {
+        eprintln!("\n[!] Shutdown requested...");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    })?;
+    sensor
+        .run(sink)
+        .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
 }
 
 // ── status ────────────────────────────────────────────────────────────────────
