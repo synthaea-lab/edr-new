@@ -751,6 +751,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "deception"
+version = "0.1.0"
+
+[[package]]
+name = "device-control"
+version = "0.1.0"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -823,7 +831,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1052,6 +1060,10 @@ version = "0.1.0"
 
 [[package]]
 name = "inventory"
+version = "0.1.0"
+
+[[package]]
+name = "inventory"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
@@ -1141,10 +1153,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "live-response"
-version = "0.1.0"
-
-[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1223,6 +1231,10 @@ checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
+
+[[package]]
+name = "mesh"
+version = "0.1.0"
 
 [[package]]
 name = "mio"
@@ -1528,7 +1540,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1607,6 +1619,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-linux-journal"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-lsm"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-netlink"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-uprobes"
+version = "0.1.0"
+
+[[package]]
 name = "sensor-linux-wire"
 version = "0.1.0"
 
@@ -1619,7 +1647,15 @@ name = "sensor-macos-network-extension"
 version = "0.1.0"
 
 [[package]]
+name = "sensor-macos-unifiedlog"
+version = "0.1.0"
+
+[[package]]
 name = "sensor-windows"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-windows-eventlog"
 version = "0.1.0"
 
 [[package]]
@@ -1806,6 +1842,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "tamper"
+version = "0.1.0"
 
 [[package]]
 name = "tap"
@@ -2309,7 +2349,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2521,7 +2561,7 @@ dependencies = [
  "hex",
  "indexmap",
  "intaglio",
- "inventory",
+ "inventory 0.3.24",
  "itertools 0.15.0",
  "js-sys",
  "memchr",

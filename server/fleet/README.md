@@ -15,6 +15,12 @@ Two halves:
   telemetry, shortened heartbeat interval, optional stricter response gates), with
   automatic expiry so heightened states decay instead of accumulating.
 
+Posture reaches agents on two paths: the signed `policy` channel (authoritative) and
+peer gossip via `crates/mesh` (fast inside a segment, resilient when the control
+plane is unreachable) — mesh hints carry the originating signature and are advisory
+until verified. The mesh also feeds correlation upward: peer attestation reports
+("host X went silent") are fleet-case evidence.
+
 Guardrails: posture changes are audited like response actions; an attacker must not
 be able to weaponize them (posture never *disables* anything, only heightens; expiry
-is server-enforced).
+is server-enforced — and the same heighten-only rule binds mesh gossip).
