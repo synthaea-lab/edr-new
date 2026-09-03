@@ -5,7 +5,7 @@ The golden file locks the central contract of the ML scoring: `features.extract_
 produce the same vector for the same cmdline. Both test suites consume it:
 
   - ml/tests/test_features_golden.py           (pytest — drift on the Python side)
-  - crates/synthaea-ml/tests/features_golden.rs (cargo test — drift on the Rust side)
+  - crates/ml/tests/features_golden.rs         (cargo test — drift on the Rust side)
 
 Python is the reference: it is what defines the model's input space at training time.
 After ANY change to features.py, regenerate the file (and retrain the models):

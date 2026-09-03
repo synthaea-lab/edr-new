@@ -118,6 +118,23 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
 }
 
+// ── capture-baseline ──────────────────────────────────────────────────────────
+
+/// Linux: rules-filtered benign capture via BaselineSink (Ctrl-C handled by the
+/// sensor). Platform-neutral by construction — other platforms join as their
+/// sensors land.
+#[cfg(target_os = "linux")]
+pub(crate) fn cmd_capture_baseline(output: &std::path::Path) -> anyhow::Result<()> {
+    let sink = crate::sink::BaselineSink::new(seeded_rule_state(), output)?;
+    eprintln!("Synthaea — baseline capture (Ctrl-C to stop)");
+    eprintln!("Output: {}", output.display());
+    eprintln!("Perform normal activity on a CLEAN host for ~10 minutes.");
+    let mut sensor = sensor_linux::LinuxSensor::new();
+    sensor
+        .run(Box::new(sink))
+        .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
+}
+
 // ── capture-events ────────────────────────────────────────────────────────────
 
 /// Linux: raw capture, no detection — `sinks::JsonlEventSink` verbatim.
@@ -164,6 +181,14 @@ pub(crate) fn cmd_capture_events(output: &std::path::Path) -> anyhow::Result<()>
     run_windows_sensor(Box::new(sink))
 }
 
+#[cfg(windows)]
+pub(crate) fn cmd_capture_baseline(output: &std::path::Path) -> anyhow::Result<()> {
+    let sink = crate::sink::BaselineSink::new(seeded_rule_state(), output)?;
+    eprintln!("Synthaea — baseline capture (Ctrl-C to stop)");
+    eprintln!("Output: {}", output.display());
+    run_windows_sensor(Box::new(sink))
+}
+
 // ── unsupported platforms ─────────────────────────────────────────────────────
 
 #[cfg(not(any(target_os = "linux", windows)))]
@@ -183,5 +208,10 @@ pub(crate) fn cmd_run(_alerts: &std::path::Path, _events: &std::path::Path) -> a
 
 #[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn cmd_capture_events(_output: &std::path::Path) -> anyhow::Result<()> {
+    anyhow::bail!(UNSUPPORTED_PLATFORM)
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+pub(crate) fn cmd_capture_baseline(_output: &std::path::Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM)
 }

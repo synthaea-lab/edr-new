@@ -43,9 +43,11 @@ which T0–T2 are recalibrated per deployment — see "Per-site adaptation" in
 1. **Feature parity is enforced, not hoped for.** Every feature has a definition here
    and in `crates/ml`; both test against the same fixture vectors. Drift is a CI
    failure, and drift in production is a silent model lobotomy. The same discipline
-   covers score attribution: `tests/attribution_reference.py` and `crates/ml`'s
-   forest walk are pinned to one golden fixture
-   (`crates/ml/tests/fixtures/attribution_golden.json`).
+   covers score attribution (`tests/attribution_reference.py` vs `crates/ml`'s forest
+   walk, pinned by `attribution_golden.json`) and the inference path itself
+   (`crates/ml`'s `ort` scorer vs onnxruntime, pinned by `scorer_golden.json`): the
+   Rust feature vector, its explanation, and the score the shipped runtime computes
+   from it are each locked to the Python reference.
 2. **No model ships without an evaluation record.** Each registry entry carries a model
    card: training data provenance, metrics, FP rate against benign baselines, and the
    scenario-replay results — plus a **robustness card**: measured score degradation
