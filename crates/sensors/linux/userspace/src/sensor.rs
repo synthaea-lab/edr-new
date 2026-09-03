@@ -8,7 +8,7 @@
 
 use std::sync::Arc;
 
-use log::{debug, warn};
+use log::warn;
 use schema::sensor::{Capabilities, EventSink, Sensor, SensorError};
 use tokio::sync::Notify;
 
@@ -38,7 +38,7 @@ pub fn load_ebpf() -> Result<aya::Ebpf, SensorError> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {ret}");
+        log::debug!("remove limit on locked memory failed, ret is: {ret}");
     }
 
     let ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
