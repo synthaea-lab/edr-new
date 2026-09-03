@@ -17,8 +17,8 @@ use windows_sys::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ, QueryFullProcessImageNameW,
+    OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_VM_READ, QueryFullProcessImageNameW,
 };
 
 // ── F-1: real command line from the target's PEB ─────────────────────────────
@@ -147,17 +147,16 @@ unsafe fn read_cmdline_from_handle(handle: HANDLE) -> Option<String> {
 pub(crate) fn read_process_user(pid: u32) -> User {
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        let process = if process.is_null() {
-            // The event may describe our own process before the store knows it.
-            GetCurrentProcess()
-        } else {
-            process
-        };
+        if process.is_null() {
+            // Exited or protected target: attribution honestly failed. Never fall
+            // back to our own token — the agent runs as SYSTEM, and stamping SYSTEM
+            // onto exactly the processes we could not open would corrupt identity
+            // where it matters most (review finding on #100).
+            return User::Unknown;
+        }
         let mut token: HANDLE = core::ptr::null_mut();
         if OpenProcessToken(process, TOKEN_QUERY, &mut token) == 0 {
-            if process != GetCurrentProcess() {
-                CloseHandle(process);
-            }
+            CloseHandle(process);
             return User::Unknown;
         }
 
@@ -165,9 +164,7 @@ pub(crate) fn read_process_user(pid: u32) -> User {
         let integrity_level = token_integrity_rid(token);
 
         CloseHandle(token);
-        if process != GetCurrentProcess() {
-            CloseHandle(process);
-        }
+        CloseHandle(process);
         match sid {
             Some(sid) => User::Windows {
                 sid,

@@ -61,6 +61,12 @@ struct SharedState {
     dedup: Mutex<normalize::ConnectDedup>,
     /// F-2: events observed — the silence watchdog reads this.
     events_seen: AtomicU64,
+    /// The liveness canary file: the run loop touches it every heartbeat, which
+    /// MUST produce a Kernel-File event (our pid is tracked) — so sensor liveness
+    /// is deterministic instead of traffic-dependent (a quiet host produces no
+    /// guaranteed events in 30s; review finding on #100). Canary events are
+    /// filtered from emission below.
+    canary_path: String,
 }
 
 impl SharedState {
@@ -193,6 +199,7 @@ fn network_provider(sink: Arc<dyn EventSink>, state: Arc<SharedState>) -> Provid
         let parser = Parser::create(record, &schema_def);
         let pid: u32 = parser.try_parse("PID").unwrap_or(0);
         let dport = parser.try_parse::<u16>("dport").unwrap_or(0).swap_bytes();
+        let sport = parser.try_parse::<u16>("sport").unwrap_or(0).swap_bytes();
         let timestamp_ns = normalize::filetime_to_ns(record.raw_timestamp());
 
         let daddr: std::net::IpAddr = if is_v6 {
@@ -210,13 +217,13 @@ fn network_provider(sink: Arc<dyn EventSink>, state: Arc<SharedState>) -> Provid
             std::net::IpAddr::V4(raw.to_ne_bytes().into())
         };
 
-        // F-7: one logical connection = one event, even when the stack emits both
-        // Connect and the first Send.
+        // F-7: one logical connection = one event — flow-keyed (sport included) so
+        // parallel connections stay distinct and chatty flows never re-emit.
         if state
             .dedup
             .lock()
             .unwrap()
-            .is_duplicate(pid, daddr, dport, timestamp_ns)
+            .is_duplicate(pid, sport, daddr, dport, timestamp_ns)
         {
             return;
         }
@@ -276,9 +283,14 @@ fn file_provider(sink: Arc<dyn EventSink>, state: Arc<SharedState>) -> Provider 
         if raw_path.is_empty() {
             return;
         }
+        let path = state.normalize_path(&raw_path);
+        // The liveness canary proves the trace is alive; it is not telemetry.
+        if path.ends_with(&state.canary_path) {
+            return;
+        }
         sink.on_event(Event::FileOpen(FileOpenEvent {
             meta: meta(pid, 0, comm, timestamp_ns),
-            path: state.normalize_path(&raw_path),
+            path,
             flags,
         }));
     };
@@ -331,11 +343,17 @@ impl Sensor for WindowsSensor {
         self.stop.store(false, Ordering::SeqCst);
         let sink: Arc<dyn EventSink> = Arc::from(sink);
 
+        let canary_file =
+            std::env::temp_dir().join(format!("synthaea-canary-{}", std::process::id()));
         let state = Arc::new(SharedState {
             pids: Mutex::new(HashMap::new()),
             volumes: Mutex::new(winapi::build_volume_map()),
-            dedup: Mutex::new(normalize::ConnectDedup::new(2_000_000_000)),
+            dedup: Mutex::new(normalize::ConnectDedup::new(60_000_000_000)),
             events_seen: AtomicU64::new(0),
+            canary_path: canary_file
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
         });
 
         // Seed before the trace: already-running processes resolve from the very
@@ -374,22 +392,27 @@ impl Sensor for WindowsSensor {
             .start_and_process()
             .map_err(|e| -> SensorError { format!("ETW startup error: {e:?}").into() })?;
 
-        // F-2: the silence watchdog. A live Windows system always produces process
-        // events; a trace stopped out from under us (logman by an attacker) makes
-        // the counter freeze — that is a sensor error, loud, and the watchdog
-        // restarts us with a fresh randomized session.
+        // F-2: the silence watchdog, made deterministic by a canary: every
+        // heartbeat the loop touches our own temp file, which MUST produce a
+        // Kernel-File event (our pid is tracked and create-dispositions pass the
+        // filter). A healthy-but-idle host therefore still advances the counter —
+        // only a trace actually stopped out from under us (logman by an attacker)
+        // freezes it, and that is a loud sensor error the watchdog restarts.
         let mut last_seen = state.events_seen.load(Ordering::Relaxed);
         let mut silent_intervals = 0u32;
         while !self.stop.load(Ordering::SeqCst) {
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            let _ = std::fs::write(&canary_file, b"synthaea liveness canary");
+            std::thread::sleep(std::time::Duration::from_millis(2_000));
             let seen = state.events_seen.load(Ordering::Relaxed);
             if seen == last_seen {
                 silent_intervals += 1;
-                // 60 × 500ms = 30s of total silence.
-                if silent_intervals >= 60 {
+                // 15 × 2s = 30s with zero events despite the canary writes.
+                if silent_intervals >= 15 {
                     let _ = trace.stop();
+                    let _ = std::fs::remove_file(&canary_file);
                     return Err(format!(
-                        "sensor silent for 30s (session {session}) — trace stopped or tampered"
+                        "sensor produced no events for 30s despite liveness canary \
+                         writes (session {session}) — trace stopped or tampered"
                     )
                     .into());
                 }
@@ -400,6 +423,7 @@ impl Sensor for WindowsSensor {
         }
 
         let _ = trace.stop();
+        let _ = std::fs::remove_file(&canary_file);
         let _ = std::fs::remove_file(&state_path);
         Ok(())
     }
