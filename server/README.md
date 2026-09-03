@@ -10,6 +10,10 @@ One modern Next.js (App Router, TypeScript) + PostgreSQL application — see
 | `console/` | Analyst console — case-centric triage UI, fleet health, content/model distribution |
 | `hunt/` | Threat hunting — saved/scheduled hunts over fleet telemetry, graduation into detection content |
 | `fleet/` | Cross-machine case correlation + adaptive posture (a detection on one host raises the alertness of related hosts) |
+| `graph/` | Entity graph — fleet-wide entities/relations projection backing cases, fleet correlation, hunting, prevalence |
+| `prevalence/` | Reputation/prevalence (Layer 5): fleet first-seen/rarity counters feeding detection and triage |
+| `forensics/` | DFIR workbench — triage acquisitions (via live-response), case timeline, artifact parsing, chain of custody |
+| `assistant/` | Analyst AI assistant — grounded narratives/navigation over cases and the graph; never scores |
 | `disruption/` | Attack disruption — case-level playbooks: isolate device, suspend user, block indicators |
 | (planned) `export/` | SIEM forwarding — vendor connectors (Splunk HEC, Sentinel, Elastic) shipping cases/detections fleet-wide; agents only ever emit neutral formats via `sinks` |
 
