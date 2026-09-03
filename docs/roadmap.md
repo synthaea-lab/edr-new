@@ -40,6 +40,7 @@ flowchart LR
 | #36 packaging: Linux | unblocks realistic lab installs for every later phase's validation |
 | **Source collection** — #90 uprobes · #91 lsm · #92 netlink · #93 journal | new Linux telemetry taps: agent-local, parallel-safe, validated on the existing lab; #91 additionally opens the Linux inline-blocking path #25 will use |
 | #84 device-control (Linux telemetry half) · #86 JA4/SNI | sensor-side collection, same profile; control/policy halves return in later phases |
+| #87 inventory (agent half) | diffed collectors are agent-local; graph/prevalence consumers arrive with Phase 5 |
 
 ## Phase 2 — Control-plane spine (the great unblocker; mostly serial)
 
