@@ -12,9 +12,11 @@ rules = { path = "../crates/rules" }
 correlator = { path = "../crates/correlator" }
 sigma = { path = "../crates/sigma" }
 enrich = { path = "../crates/enrich" }
+yara = { path = "../crates/yara" }
 sinks = { path = "../crates/sinks" }
 
 anyhow = "1"
+serde = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 env_logger = { version = "0.11", default-features = false, features = ["auto-color"] }
 log = "0.4"

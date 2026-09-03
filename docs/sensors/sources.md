@@ -11,7 +11,7 @@ issue filed), **rejected** (deliberate, reason given).
 | --- | --- | --- |
 | eBPF tracepoints/kprobes | used | `sensors/linux/ebpf` + `userspace` |
 | eBPF uprobes (TLS plaintext, readline) | planned | `sensors/linux/uprobes` |
-| BPF-LSM hooks (io_uring-proof observation + inline blocking) | planned | `sensors/linux/lsm` |
+| BPF-LSM hooks (io_uring-proof observation + inline blocking; timestomping via utimensat/inode_setattr) | planned | `sensors/linux/lsm` |
 | audit netlink + fanotify | planned | `sensors/linux/audit` (fallback) |
 | netlink: sock_diag / conntrack / proc connector | planned | `sensors/linux/netlink` |
 | journald (auth, service lifecycle) | planned | `sensors/linux/journal` |
@@ -30,10 +30,11 @@ issue filed), **rejected** (deliberate, reason given).
 | Windows Event Log channels (EvtSubscribe) | planned | `sensors/windows/eventlog` |
 | Kernel callbacks: process/image/registry (driver) | planned | `sensors/windows/driver` |
 | ObRegisterCallbacks — handle access (LSASS credential-theft signal) | planned | driver scope (#39) |
-| Minifilter (file deletes/renames/pipes) + WFP | planned | `sensors/windows/driver` |
+| Minifilter (file deletes/renames/pipes, timestomping via SetInformation, Alternate Data Streams, raw volume access) + WFP | planned | `sensors/windows/driver` (#39) |
 | Threat-Intelligence ETW (injection; needs PPL) | planned | driver scope (#39) |
 | WMI/CIM queries | used (inventory) | `inventory` collectors |
 | Userland API hooking / detours | **rejected** | stability, AV conflicts, trivially unhookable — ETW + kernel callbacks only |
+| Clipboard capture | **rejected** | privacy/noise cost exceeds detection value; commercial norm agrees |
 
 ## macOS
 
