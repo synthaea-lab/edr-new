@@ -15,8 +15,9 @@ generalization, and that only holds if this pipeline is reproducible and measure
 | T2 — correlation | on-device | case scorer over correlated detections (with Bayesian LLR calibration) | labeled correlation traces |
 | T3 — fleet | server-side | rarity / per-tenant baselines | fleet telemetry (control plane) |
 
-T0–T2 export to ONNX and ship to agents via canary rings; T3 lives with the control
-plane and never ships to endpoints.
+T0–T2 export to ONNX (the reference format) plus a flat inference artifact that ships to
+agents via canary rings and is evaluated natively by `crates/ml` (ADR-0002); T3 lives
+with the control plane and never ships to endpoints.
 
 ## Layout
 
@@ -29,7 +30,7 @@ plane and never ships to endpoints.
 | `synthaea_ml/training/` | Training entry points per tier/platform |
 | `synthaea_ml/calibration/` | Bayesian LLR calibration |
 | `synthaea_ml/evaluation/` | Metrics, FP governance, scenario-replay evaluation |
-| `synthaea_ml/export/` | ONNX export + parity verification (`verify_onnx`) |
+| `synthaea_ml/export/` | ONNX export, flat inference artifacts (ADR-0002), parity verification (`verify_onnx`) |
 | `datasets/` | Data on disk (not committed) — documented layout below |
 | `registry/` | Versioned model artifacts + model cards — what ships |
 | `notebooks/` | Experiments; anything load-bearing graduates into the package |
