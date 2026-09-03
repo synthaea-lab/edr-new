@@ -16,7 +16,7 @@ use ferrisetw::{
     trace::UserTrace,
 };
 use schema::{
-    ConnectEvent, Event, EventMeta, ExecEvent, FileOpenEvent, User,
+    ConnectEvent, Event, EventMeta, ExecEvent, FileOpenEvent,
     sensor::{Capabilities, EventSink, Sensor, SensorError},
 };
 
