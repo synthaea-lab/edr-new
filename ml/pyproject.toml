@@ -7,7 +7,15 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["ruff", "pytest"]
+# numpy/onnx power the attribution parity tests (tests/attribution_reference.py);
+# training-side deps (scikit-learn, skl2onnx, onnxruntime) arrive with the pipeline
+# migration and are only needed locally to regenerate fixtures.
+dev = ["ruff", "pytest", "numpy", "onnx"]
+
+# The package is `synthaea_ml` alone — sibling directories (datasets/, registry/,
+# notebooks/) hold data and docs, not code, and must not be auto-discovered.
+[tool.setuptools.packages.find]
+include = ["synthaea_ml*"]
 
 [tool.ruff]
 line-length = 100
