@@ -17,8 +17,12 @@ use std::time::Duration;
 use anyhow::{Context as _, bail};
 use clap::{Parser, Subcommand};
 
+// The service constants are consumed by the Windows/SCM and Linux/systemd arms only.
+#[cfg_attr(not(windows), allow(dead_code))]
 const SERVICE_NAME: &str = "SynthaEDR";
+#[cfg_attr(not(windows), allow(dead_code))]
 const SERVICE_DISPLAY: &str = "Synthaea EDR Agent";
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 const SERVICE_DESC: &str =
     "Synthaea Endpoint Detection & Response — real-time behavioral monitoring";
 const DEFAULT_ALERTS: &str = "alerts.ndjson";
