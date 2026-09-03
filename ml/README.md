@@ -54,6 +54,8 @@ which T0–T2 are recalibrated per deployment — see "Per-site adaptation" in
 3. **Reproducibility.** A registry model can be rebuilt from its recorded dataset
    versions and config. Notebooks are for exploration only.
 
-Migration source: `old/ml` (features, train*, calibrate_llr, verify_onnx,
-capture_to_baseline, aggregate_correlation, tests) — issue #14 maps files to this
-layout.
+Migrated from `old/ml` (issue #14): features, training entry points, LLR calibration,
+capture/aggregation, `verify_onnx` (now a registry-wide oracle:
+`python -m synthaea_ml.export.verify_onnx`), and the Rust/Python parity fixtures under
+`tests/fixtures/`. The two old models live in `registry/` with reference-only cards —
+they predate the evaluation gates and do not meet ship criteria.
