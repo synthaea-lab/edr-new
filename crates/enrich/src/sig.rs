@@ -4,7 +4,11 @@
 //!   — the API surface is one function and two structs, stable since XP; a manual
 //!   binding avoids pulling the whole windows-sys surface into a detection-tier
 //!   crate). Revocation checks run offline-only: the event path must never wait on
-//!   the network.
+//!   the network. **Known limitation** (discovered on CI: notepad.exe reads
+//!   Unsigned): this checks EMBEDDED signatures only — most System32 binaries are
+//!   catalog-signed, which needs the CryptCATAdmin lookup chain; tracked with the
+//!   Windows telemetry expansion (#21, P7). Until then a Windows "Unsigned" verdict
+//!   means "no embedded signature", and rules must not treat it as tampering.
 //! - **macOS**: `codesign --verify` as a subprocess — Apple's supported CLI for
 //!   exactly this check; distinguishing "not signed at all" from "signed but
 //!   invalid" uses `codesign --display`.
@@ -105,6 +109,9 @@ mod windows_impl {
     /// Offline-only: never fetch revocation data on the event path.
     const WTD_CACHE_ONLY_URL_RETRIEVAL: u32 = 0x1000;
     const TRUST_E_NOSIGNATURE: i32 = 0x800B_0100u32 as i32;
+    /// No SIP recognizes the file type (plain data files, extensionless scripts).
+    const TRUST_E_PROVIDER_UNKNOWN: i32 = 0x800B_0001u32 as i32;
+    const TRUST_E_SUBJECT_FORM_UNKNOWN: i32 = 0x800B_0003u32 as i32;
 
     #[link(name = "wintrust")]
     unsafe extern "system" {
@@ -153,6 +160,9 @@ mod windows_impl {
         match status {
             0 => Signature::Valid,
             TRUST_E_NOSIGNATURE => Signature::Unsigned,
+            // Not a signable file type — a verdict of Invalid would brand every
+            // text/data file as tampered.
+            TRUST_E_PROVIDER_UNKNOWN | TRUST_E_SUBJECT_FORM_UNKNOWN => Signature::Unsupported,
             _ => Signature::Invalid,
         }
     }
