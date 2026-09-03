@@ -17,6 +17,9 @@ generalization, and that only holds if this pipeline is reproducible and measure
 
 T0–T2 export to ONNX and ship to agents as signed data via canary rings, never embedded
 in the binary (ADR-0002); T3 lives with the control plane and never ships to endpoints.
+T3 also closes the loop: it curates per-site benign corpora from fleet telemetry, from
+which T0–T2 are recalibrated per deployment — see "Per-site adaptation" in
+`docs/detection/ml.md` for the loop and its safety constraints.
 
 ## Layout
 
@@ -27,7 +30,7 @@ in the binary (ADR-0002); T3 lives with the control plane and never ships to end
 | `synthaea_ml/data/` | Capture parsing, dataset building, labeling |
 | `synthaea_ml/models/` | Model definitions per tier |
 | `synthaea_ml/training/` | Training entry points per tier/platform |
-| `synthaea_ml/calibration/` | Bayesian LLR calibration |
+| `synthaea_ml/calibration/` | Bayesian LLR calibration, conformal FP-budget thresholds, OOD guards |
 | `synthaea_ml/evaluation/` | Metrics, FP governance, scenario-replay evaluation |
 | `synthaea_ml/export/` | ONNX export + parity verification (`verify_onnx`) |
 | `datasets/` | Data on disk (not committed) — documented layout below |
@@ -42,7 +45,9 @@ in the binary (ADR-0002); T3 lives with the control plane and never ships to end
    failure, and drift in production is a silent model lobotomy.
 2. **No model ships without an evaluation record.** Each registry entry carries a model
    card: training data provenance, metrics, FP rate against benign baselines, and the
-   scenario-replay results. FP governance is a release gate.
+   scenario-replay results — plus a **robustness card**: measured score degradation
+   under attacker-style mutations of known-bad samples (`docs/detection/ml.md`). FP
+   governance and robustness regression are both release gates.
 3. **Reproducibility.** A registry model can be rebuilt from its recorded dataset
    versions and config. Notebooks are for exploration only.
 
