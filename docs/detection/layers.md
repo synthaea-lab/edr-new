@@ -27,3 +27,10 @@ Reading the table operationally: layers 1–4 and 6 are the on-device budgeted p
 (verdicts in milliseconds, works offline); 5, 7–10 are where the control plane earns
 its keep — and layers 5+7 together are the fleet-derived half of the thesis: the part
 an attacker cannot reproduce by downloading our binaries and content.
+
+The server-side layers share one substrate: the telemetry lake
+(`server/datalake`) with `server/cloud-detection` running on it in three modes —
+streaming on ingest, scheduled sweeps for windows no device buffer can hold, and
+**retrospective detection**: new content replayed over history, turning yesterday's
+unknown into today's case. Cloud detection augments the device; it is never an
+excuse to thin layers 1–4/6, which are what protect an offline endpoint.
