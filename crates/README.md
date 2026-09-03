@@ -26,13 +26,17 @@ its code comes from. Dependency direction between them is enforced by
 | `policy` | Policy model shared by agent and control plane (versioned, signed) | skeleton | new development |
 | `config` | Local agent configuration loading and validation | skeleton | new development |
 | `store` | Bounded local state: LRU-bounded maps (BoundedMap) + durable event spool | **built** | issue #15 |
-| `response` | Response actions — kill, quarantine, isolate | skeleton | new development |
-| `live-response` | Live response: analyst-driven interactive sessions (fixed command set, audited) | skeleton | new development |
+| `response` | Endpoint actions: automated (kill/quarantine/isolate) + live-response sessions (`response::live`) | skeleton | new development |
 | `transport` | Agent ↔ control-plane comms — mTLS, store-and-forward | skeleton | new development |
 | `ipc` | Local IPC: agent ↔ endpoint UI/CLI (named pipe / Unix socket) | skeleton | new development |
 | `sinks` | Local outputs: JSONL, syslog/CEF export | **migrated** | `old/agent` (issue #7) |
 | `updater` | Agent self-update + content/model distribution client (canary rings) | skeleton | new development |
 | `conformance` | Sensor conformance suite — generates the capability matrix | skeleton | new development |
+| `tamper` | Runtime tamper protection: self-integrity, sensor-silence, protected resources | skeleton | new development |
+| `mesh` | Agent peer mesh: signed attestation heartbeats + heighten-only posture gossip | skeleton | new development |
+| `deception` | Per-host canaries and decoy credentials — near-zero-FP tripwires | skeleton | new development |
+| `device-control` | Removable-media telemetry + policy-gated control (USB first) | skeleton | new development |
+| `inventory` | Diffed asset inventory: packages, services, autoruns, ports | skeleton | new development |
 
 The binaries live outside this folder: `agent/` (the pipeline host), `watchdog/`, and
 `cli/` (admin tool, an `ipc` client).

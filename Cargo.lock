@@ -442,6 +442,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "deception"
+version = "0.1.0"
+
+[[package]]
 name = "der"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -450,6 +454,10 @@ dependencies = [
  "pem-rfc7468",
  "zeroize",
 ]
+
+[[package]]
+name = "device-control"
+version = "0.1.0"
 
 [[package]]
 name = "digest"
@@ -631,6 +639,10 @@ name = "intel"
 version = "0.1.0"
 
 [[package]]
+name = "inventory"
+version = "0.1.0"
+
+[[package]]
 name = "ipc"
 version = "0.1.0"
 
@@ -665,10 +677,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 
 [[package]]
-name = "live-response"
-version = "0.1.0"
-
-[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -695,6 +703,10 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
+
+[[package]]
+name = "mesh"
+version = "0.1.0"
 
 [[package]]
 name = "mio"
@@ -1161,6 +1173,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-linux-journal"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-lsm"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-netlink"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-linux-uprobes"
+version = "0.1.0"
+
+[[package]]
 name = "sensor-linux-wire"
 version = "0.1.0"
 
@@ -1173,7 +1201,15 @@ name = "sensor-macos-network-extension"
 version = "0.1.0"
 
 [[package]]
+name = "sensor-macos-unifiedlog"
+version = "0.1.0"
+
+[[package]]
 name = "sensor-windows"
+version = "0.1.0"
+
+[[package]]
+name = "sensor-windows-eventlog"
 version = "0.1.0"
 
 [[package]]
@@ -1343,6 +1379,10 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "tamper"
+version = "0.1.0"
 
 [[package]]
 name = "tempfile"
