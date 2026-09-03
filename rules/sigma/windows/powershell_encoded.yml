@@ -1,0 +1,18 @@
+title: PowerShell Base64-encoded command
+description: >
+  Detects the use of PowerShell's -EncodedCommand or -enc flag, used to
+  obfuscate malicious commands in Base64. Technique T1027 / T1059.001.
+tags:
+  - attack.execution
+  - attack.t1059.001
+  - attack.defense_evasion
+  - attack.t1027
+detection:
+  selection:
+    Image|endswith:
+      - '\powershell.exe'
+      - '\pwsh.exe'
+    CommandLine|contains:
+      - -EncodedCommand
+      - -enc
+  condition: selection

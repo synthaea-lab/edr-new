@@ -1,0 +1,22 @@
+title: Persistence via cron, SSH authorized_keys or systemd service
+description: >
+  Detects common persistence techniques beyond monitored file writes (interactive
+  crontab, adding a key to authorized_keys, enabling a systemd service) —
+  complements, on the execution side, the existing deterministic rule based on the
+  written file path (~/.bashrc, /etc/cron.d/, etc., see synthaea-rules).
+  T1053.003 / T1098.004 / T1543.002.
+tags:
+  - attack.persistence
+  - attack.t1053.003
+  - attack.t1098.004
+  - attack.t1543.002
+detection:
+  selection:
+    CommandLine|contains:
+      - 'crontab -e'
+      - '>> ~/.ssh/authorized_keys'
+      - '>> /root/.ssh/authorized_keys'
+      - '>> ~/.bashrc'
+      - '>> /etc/rc.local'
+      - 'systemctl enable'
+  condition: selection

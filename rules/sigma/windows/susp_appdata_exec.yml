@@ -1,0 +1,19 @@
+title: Executable from AppData or Temp
+description: >
+  Detects execution of a binary from a non-standard user directory
+  (AppData, Temp, Downloads, Desktop, Public). A technique frequently used by
+  RATs and droppers to persist outside monitored system directories.
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense_evasion
+  - attack.t1036
+detection:
+  selection:
+    Image|contains:
+      - \AppData\
+      - \Temp\
+      - \Downloads\
+      - \Desktop\
+      - \Public\
+  condition: selection

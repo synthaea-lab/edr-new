@@ -1,0 +1,21 @@
+title: Reverse shell via /dev/tcp or nc/ncat with execution
+description: >
+  Detects the classic bash reverse shell patterns (/dev/tcp) or nc/ncat/socat launched
+  with direct shell execution (-e, exec) — no direct Windows equivalent among the 3
+  initial rules; added as a complement because it is Linux-specific and high-signal.
+  T1059.004 / T1071.
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - attack.command_and_control
+  - attack.t1071
+detection:
+  selection:
+    CommandLine|contains:
+      - '/dev/tcp/'
+      - 'nc -e /bin/sh'
+      - 'nc -e /bin/bash'
+      - 'ncat -e /bin/sh'
+      - 'ncat -e /bin/bash'
+      - 'socat exec'
+  condition: selection

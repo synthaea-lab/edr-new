@@ -1,0 +1,22 @@
+title: GTFOBins - system binary used to spawn a shell
+description: >
+  Detects legitimate binaries (find, python, vim/less/more...) being used to break out
+  into an interactive shell — the Linux equivalent of LOLBAS/rundll32 on Windows. A
+  classic technique for bypassing shell restrictions (GTFOBins). T1059.004 / T1548.
+tags:
+  - attack.defense_evasion
+  - attack.t1059.004
+  - attack.privilege_escalation
+  - attack.t1548
+detection:
+  selection:
+    CommandLine|contains:
+      - '-exec /bin/sh'
+      - '-exec /bin/bash'
+      - 'pty.spawn("/bin/sh")'
+      - 'pty.spawn("/bin/bash")'
+      - "pty.spawn('/bin/sh')"
+      - "pty.spawn('/bin/bash')"
+      - '!/bin/sh'
+      - '!/bin/bash'
+  condition: selection

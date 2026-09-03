@@ -1,0 +1,20 @@
+title: Executable launched from a temporary or world-writable directory
+description: >
+  Detects execution of a binary from /tmp, /var/tmp, /dev/shm or a non-standard user
+  directory (Downloads, .cache) — the Linux equivalent of the Windows AppData/Temp
+  rule. A frequent pattern used by droppers and RATs to persist outside monitored
+  system paths. T1059 / T1036 / T1105.
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense_evasion
+  - attack.t1036
+detection:
+  selection:
+    Image|contains:
+      - '/tmp/'
+      - '/var/tmp/'
+      - '/dev/shm/'
+      - '/Downloads/'
+      - '/.cache/'
+  condition: selection
