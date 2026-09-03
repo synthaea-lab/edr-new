@@ -49,8 +49,14 @@ pub const FEATURE_NAMES: [&str; 8] = [
 pub fn extract_features(bus: &EventBus, pid: u32) -> [f32; 8] {
     let events: Vec<&Event> = bus.events_for_pid(pid).collect();
 
-    let spawn_count = events.iter().filter(|e| matches!(e, Event::Exec(_))).count();
-    let connect_count = events.iter().filter(|e| matches!(e, Event::Connect(_))).count();
+    let spawn_count = events
+        .iter()
+        .filter(|e| matches!(e, Event::Exec(_)))
+        .count();
+    let connect_count = events
+        .iter()
+        .filter(|e| matches!(e, Event::Connect(_)))
+        .count();
     let filewrite_count = events.iter().filter(|e| is_file_write(e)).count();
 
     let mut daddrs = HashSet::new();
@@ -62,8 +68,11 @@ pub fn extract_features(bus: &EventBus, pid: u32) -> [f32; 8] {
         }
     }
 
-    let has_full_chain =
-        if spawn_count >= 1 && connect_count >= 1 && filewrite_count >= 1 { 1.0 } else { 0.0 };
+    let has_full_chain = if spawn_count >= 1 && connect_count >= 1 && filewrite_count >= 1 {
+        1.0
+    } else {
+        0.0
+    };
 
     let span_s = match (
         events.iter().map(|e| e.meta().timestamp_ns).min(),

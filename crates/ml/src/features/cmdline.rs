@@ -77,7 +77,10 @@ fn shannon_entropy(s: &str) -> f32 {
 }
 
 fn suspicious_token_count(cmdline: &str) -> f32 {
-    SUSPICIOUS_TOKENS.iter().filter(|t| cmdline.contains(*t)).count() as f32
+    SUSPICIOUS_TOKENS
+        .iter()
+        .filter(|t| cmdline.contains(*t))
+        .count() as f32
 }
 
 fn token_count(cmdline: &str) -> f32 {
@@ -94,7 +97,10 @@ fn max_token_length(cmdline: &str) -> f32 {
 }
 
 fn shell_metachar_count(cmdline: &str) -> f32 {
-    cmdline.chars().filter(|c| SHELL_METACHARS.contains(*c)).count() as f32
+    cmdline
+        .chars()
+        .filter(|c| SHELL_METACHARS.contains(*c))
+        .count() as f32
 }
 
 fn digit_ratio(cmdline: &str) -> f32 {
@@ -108,7 +114,10 @@ fn digit_ratio(cmdline: &str) -> f32 {
 }
 
 fn contains_any_ci(cmdline_lower: &str, needles: &[&str]) -> f32 {
-    if needles.iter().any(|p| cmdline_lower.contains(&p.to_lowercase())) {
+    if needles
+        .iter()
+        .any(|p| cmdline_lower.contains(&p.to_lowercase()))
+    {
         1.0
     } else {
         0.0
@@ -157,7 +166,10 @@ mod tests {
 
     #[test]
     fn win_path_matching_is_case_insensitive() {
-        assert_eq!(extract_features("c:\\users\\bob\\appdata\\local\\temp\\x.exe\0")[7], 1.0);
+        assert_eq!(
+            extract_features("c:\\users\\bob\\appdata\\local\\temp\\x.exe\0")[7],
+            1.0
+        );
         assert_eq!(extract_features("C:\\WINDOWS\\SYSTEM32\\cmd.exe\0")[8], 1.0);
     }
 

@@ -46,7 +46,10 @@ fn score_explained_agrees_with_score_and_attributes() {
         let cmdline = case["cmdline"].as_str().unwrap();
         let bare = scorer.score(cmdline).unwrap();
         let explained = scorer.score_explained(cmdline, 3).unwrap();
-        assert_eq!(bare, explained.value, "explained score must equal bare score");
+        assert_eq!(
+            bare, explained.value,
+            "explained score must equal bare score"
+        );
         assert!(explained.attributions.len() <= 3);
         // Attributions are ordered by |contribution| and name real features.
         for w in explained.attributions.windows(2) {
