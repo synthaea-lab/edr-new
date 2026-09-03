@@ -133,24 +133,55 @@ pub(crate) fn cmd_capture_events(output: &std::path::Path) -> anyhow::Result<()>
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
 }
 
+// ── Windows commands ──────────────────────────────────────────────────────────
+
+/// Windows: administrator privileges are required by the ETW kernel providers.
+#[cfg(windows)]
+pub(crate) fn cmd_status() -> anyhow::Result<()> {
+    println!("Synthaea agent — platform: Windows");
+    println!("Sensor: ETW (Kernel-Process + Kernel-Network + Kernel-File)");
+    println!("Run as administrator for the kernel providers.");
+    Ok(())
+}
+
+#[cfg(windows)]
+pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> anyhow::Result<()> {
+    let sink = DetectionSink::new(seeded_rule_state(), alerts, events)?;
+    eprintln!("Synthaea agent — detection active (Ctrl-C to stop)");
+    eprintln!(
+        "alerts: {} · events: {}",
+        alerts.display(),
+        events.display()
+    );
+    run_windows_sensor(Box::new(sink))
+}
+
+#[cfg(windows)]
+pub(crate) fn cmd_capture_events(output: &std::path::Path) -> anyhow::Result<()> {
+    let sink = sinks::JsonlEventSink::open(output)?;
+    eprintln!("Synthaea — raw event capture (Ctrl-C to stop)");
+    eprintln!("Output: {}", output.display());
+    run_windows_sensor(Box::new(sink))
+}
+
 // ── unsupported platforms ─────────────────────────────────────────────────────
 
-#[cfg(not(target_os = "linux"))]
-const UNSUPPORTED_PLATFORM: &str = "no sensor is wired for this platform yet — Linux (eBPF) is the walking skeleton; \
-     Windows (ETW) returns with the M3 migration, macOS (EndpointSecurity) with M5. \
-     This build is for development only (cargo check/test).";
+#[cfg(not(any(target_os = "linux", windows)))]
+const UNSUPPORTED_PLATFORM: &str = "no sensor is wired for this platform yet — Linux (eBPF) and Windows (ETW) are \
+     live; macOS (EndpointSecurity) arrives with M5. This build is for development \
+     only (cargo check/test).";
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn cmd_status() -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn cmd_run(_alerts: &std::path::Path, _events: &std::path::Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", windows)))]
 pub(crate) fn cmd_capture_events(_output: &std::path::Path) -> anyhow::Result<()> {
     anyhow::bail!(UNSUPPORTED_PLATFORM)
 }
