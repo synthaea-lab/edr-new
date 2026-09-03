@@ -1,3 +1,70 @@
-# Placeholder — the machine matrix described in README.md.
-# Migrated from old/lab/vagrant/Vagrantfile after review (boxes, per-machine SSH
-# ports, QEMU provider settings, one-way rsync of the repo into each VM).
+# Multi-VM Vagrant lab — implements the machine matrix from ../MATRIX.md.
+#
+# macOS Apple Silicon host (QEMU/HVF provider): only the arm64 Linux machines
+# run here. The Windows machines (amd64 boxes, VirtualBox/Hyper-V/libvirt)
+# are defined for an x86 lab machine — see README.md.
+#
+#   vagrant up                    # primary machine (ubuntu2404) only
+#   vagrant up debian13           # one machine from the matrix
+#   vagrant ssh debian13
+#   vagrant destroy -f debian13   # rollback = destroy + up (no QEMU snapshots)
+
+# Linux machines: name => [box, local SSH port (the QEMU plugin can't
+# auto-allocate, each machine needs a unique host port), RAM].
+LINUX_MACHINES = {
+  "ubuntu2404" => { box: "perk/ubuntu-24.04-arm64", ssh_port: 50022, primary: true },
+  "ubuntu2204" => { box: "perk/ubuntu-2204-arm64",  ssh_port: 50122 },
+  "debian12"   => { box: "cloud-image/debian-12",   ssh_port: 50222 },
+  "debian13"   => { box: "cloud-image/debian-13",   ssh_port: 50322 },
+  "fedora41"   => { box: "fedora/41-cloud-base",    ssh_port: 50422 },
+  "rocky9"     => { box: "rockylinux/9",            ssh_port: 50522 },
+}.freeze
+
+# Windows machines (amd64 — unusable under QEMU arm64, see README.md).
+WINDOWS_MACHINES = {
+  "win11"     => { box: "gusztavvargadr/windows-11" },
+  "win10"     => { box: "gusztavvargadr/windows-10" },
+  "winserver" => { box: "gusztavvargadr/windows-server" },
+}.freeze
+
+Vagrant.configure("2") do |config|
+  # The QEMU provider has no native file sharing: the repository root is
+  # pushed via rsync to /synthaea at `vagrant up` (push again afterwards
+  # with `vagrant rsync <machine>`). Build artifacts stay inside the VM.
+  config.vm.synced_folder "../..", "/synthaea", type: "rsync",
+    rsync__exclude: [".git/", "target/", "old/", "ml/.venv/", "ml/datasets/"]
+
+  LINUX_MACHINES.each do |name, opts|
+    config.vm.define name, primary: opts[:primary], autostart: !!opts[:primary] do |m|
+      m.vm.box = opts[:box]
+      m.vm.hostname = "synthaea-#{name}"
+
+      m.vm.provider "qemu" do |qe|
+        qe.memory = "4G"
+        qe.smp = "4"
+        qe.ssh_port = opts[:ssh_port]
+        # Plugin defaults already correct on Apple Silicon: arch aarch64,
+        # machine virt + highmem, cpu host, HVF acceleration,
+        # qemu_dir /opt/homebrew/share/qemu.
+      end
+
+      # Provisioning is provider-neutral and shared by every harness.
+      m.vm.provision "shell", path: "../provisioning/linux-toolchain.sh", privileged: false
+    end
+  end
+
+  WINDOWS_MACHINES.each do |name, opts|
+    config.vm.define name, autostart: false do |m|
+      m.vm.box = opts[:box]
+      m.vm.communicator = "winrm"
+      # Windows provisioning lands as ../provisioning/windows-toolchain.ps1
+      # with the M3 Windows lab work (issue #22).
+      ["virtualbox", "hyperv", "vmware_desktop"].each do |p|
+        m.vm.provider p do |v|
+          v.memory = 8192 if v.respond_to?(:memory=)
+          v.cpus = 4 if v.respond_to?(:cpus=)
+        end
+      end
+    end
+  end
+end
