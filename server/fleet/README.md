@@ -1,4 +1,4 @@
-# server/fleet-correlation — Cross-Machine Correlation & Adaptive Posture
+# server/fleet — Cross-Machine Correlation & Adaptive Posture
 
 Incident correlation across the fleet: detections from one machine change how the
 rest of the pool is watched. A case on one host raises the alertness of related hosts

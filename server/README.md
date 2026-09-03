@@ -9,7 +9,7 @@ One modern Next.js (App Router, TypeScript) + PostgreSQL application — see
 | `api/` | Management API — enrollment/PKI, policy distribution, fleet inventory, case queries, audit log |
 | `console/` | Analyst console — case-centric triage UI, fleet health, content/model distribution |
 | `hunt/` | Threat hunting — saved/scheduled hunts over fleet telemetry, graduation into detection content |
-| `fleet-correlation/` | Cross-machine case correlation + adaptive posture (a detection on one host raises the alertness of related hosts) |
+| `fleet/` | Cross-machine case correlation + adaptive posture (a detection on one host raises the alertness of related hosts) |
 | `disruption/` | Attack disruption — case-level playbooks: isolate device, suspend user, block indicators |
 | (planned) `export/` | SIEM forwarding — vendor connectors (Splunk HEC, Sentinel, Elastic) shipping cases/detections fleet-wide; agents only ever emit neutral formats via `sinks` |
 
