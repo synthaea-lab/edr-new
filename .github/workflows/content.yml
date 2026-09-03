@@ -3,9 +3,9 @@ name: Content
 on:
   push:
     branches: [main]
-    paths: ["rules/**", "crates/sigma/**", ".github/workflows/content.yml"]
+    paths: ["rules/**", "crates/sigma/**", "crates/yara/**", ".github/workflows/content.yml"]
   pull_request:
-    paths: ["rules/**", "crates/sigma/**", ".github/workflows/content.yml"]
+    paths: ["rules/**", "crates/sigma/**", "crates/yara/**", ".github/workflows/content.yml"]
 
 jobs:
   validate:
@@ -14,9 +14,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The sigma crate's content suite loads the whole rules/sigma tree through the
-      # real engine: every shipped rule must parse inside the supported subset AND
-      # fire on its crafted matching sample (crates/sigma/tests/content.rs).
-      # YARA content validation joins here when rules/yara gains content (#17).
+      # Each engine's content suite loads its whole rules/ tree through the real
+      # engine: every shipped rule must compile/validate AND fire on its crafted
+      # matching sample (crates/{sigma,yara}/tests/content.rs).
       - name: sigma content suite
         run: cargo test -p sigma --test content
+      - name: yara content suite
+        run: cargo test -p yara --test content
