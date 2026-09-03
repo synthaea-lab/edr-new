@@ -102,6 +102,94 @@ not to hope.
   contract is missing something.
 - Float comparisons in tests use an explicit epsilon, never `==`.
 
+## File and module layout
+
+- One responsibility per file. When a file accumulates a second concern, split it —
+  the pattern used across the codebase:
+  - `sigma`: `engine.rs` (loading) / `validate.rs` (load-time rejection) /
+    `eval.rs` (matching) / `tests.rs`
+  - `watchdog`: `paths.rs` / `supervise.rs` / `service/{windows,linux,macos}.rs` —
+    one submodule per platform mechanism, each exporting the same
+    `cmd_install`/`cmd_uninstall` pair
+  - `ml::forest`: `mod.rs` (the model + attribution walk) / `onnx.rs` (protobuf
+    extraction), split at the parse/consume seam
+  - `rules`: `state.rs` (the rules) / `sliding.rs` (the counter) /
+    `exclusions.rs` (calibration catalogues)
+  - windows sensor: `sensor.rs` (lifecycle: session, liveness) / `providers.rs`
+    (the three ETW callbacks) / `normalize.rs` / `winapi.rs`
+- Layering in the web-dev sense maps onto Rust naturally, at two levels:
+  **crates** are the coarse layers (the dependency-direction rules are exactly a
+  layered architecture: `schema`/`policy` = domain contracts, sensors = adapters
+  in, detection = services, `sinks`/`transport` = adapters out, binaries =
+  composition roots that wire everything), and **modules** are the fine layers
+  within a crate. There is no service-container/DI framework; the binary's `main`
+  does the dependency injection by constructing engines and handing them to the
+  sink — plain constructor injection, checked at compile time.
+- Test placement: unit tests in a `#[cfg(test)] mod tests` (or `tests.rs` module)
+  next to the code; cross-crate/content/golden suites in the crate's `tests/`
+  directory; put a test in the file that owns the behavior it pins.
+
+## Rust practice (the canon, applied here)
+
+Distilled from the Rust API Guidelines, the Book, and Effective Rust — the subset
+this project holds as rules:
+
+**Ownership and types**
+- Take `&str`/`&Path`/`&[T]` parameters, return owned types; take `self` by the
+  least powerful mode that works (`&self` > `&mut self` > `self`).
+- Make invalid states unrepresentable: enums over flag booleans
+  (`Signature::{Valid,Invalid,Unsigned,Unsupported}`, `User::{Unix,Windows,Unknown}`
+  — not `is_signed: bool` + `sid: Option<String>`).
+- Newtypes and enums over primitive obsession where a value has rules; plain
+  primitives where it doesn't (`pid: u32` is fine — the kernel's type).
+- `#[non_exhaustive]` on public types that will grow (`schema::Event`).
+
+**Traits**
+- Prefer composition + traits over inheritance-style OOP. The codebase's OOP
+  boundary is deliberate and small: `Sensor`/`EventSink` are trait objects
+  (`dyn`) because sensors are true plugins chosen at runtime per platform;
+  everything else is concrete types and generics. No trait hierarchies, no
+  "base struct" emulation.
+- Implement the standard traits where they're honest: `Debug` everywhere
+  (redacting sensitive payloads), `Default` only when a no-argument value is
+  meaningful, `Clone` only when cloning is cheap or clearly needed. Derive,
+  don't hand-write, unless there's a reason (a reason worth a comment).
+- Accept `impl Trait`/generics for flexibility in inputs; return concrete types.
+
+**Error handling (beyond the thiserror/anyhow rule)**
+- `?` all the way up; never `.ok()` away an error the caller should see.
+- Error enums carry what the handler needs (the path, the rule name), not
+  formatted prose; `#[error(...)]` renders the prose.
+- Distinguish the three failure stances explicitly: degrade (enrichment),
+  shed-and-count (queues, spool), fail loudly (content loading, model parsing —
+  "model files come from the update channel; parsing must fail closed").
+
+**Concurrency**
+- Share state as `Arc<Mutex<_>>`/atomics behind a type that owns the policy
+  (`ScanQueue`, `SharedState`) — never leak lock discipline to callers.
+- Channels bounded (`sync_channel`), overflow counted. Threads named
+  (`.name("yara-scan")`).
+- `Ordering::SeqCst` for stop flags (correctness first); `Relaxed` only for
+  counters where staleness is harmless.
+
+**API hygiene**
+- `#[must_use]` on value-returning methods; builders and constructors included.
+- No `panic!` in library paths reachable from event data — panics are for
+  violated internal invariants only, documented under `# Panics`.
+- Iterators over index loops; `collect` into the right container directly;
+  avoid needless `clone` (clippy's pedantic set patrols this).
+- `matches!`, `let-else`, and early returns to keep the happy path unindented.
+
+**Unsafe**
+- Unsafe only at FFI boundaries, in `sensors/*` and `enrich::sig` — never in
+  detection logic. Every block: `// SAFETY:` (enforced), smallest possible scope,
+  checked return codes, handles closed on every path.
+
+**Dependencies**
+- Every new dependency is a decision: prefer std, then a small pinned crate;
+  `cargo deny` gates licenses and advisories; wildcard/path deps only inside the
+  workspace. `schema` stays dependency-light by contract.
+
 ## Enforcement summary
 
 | Rule | Enforced by |
