@@ -1,19 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "synthaea-ml"
 version = "0.1.0"
 description = "Synthaea ML space: features, training, calibration, evaluation, ONNX export"
 requires-python = ">=3.11"
-# Dependencies are added as code is migrated (numpy, scikit-learn, onnx, onnxruntime, ...).
-dependencies = []
+# The feature/calibration modules are pure stdlib; the heavier deps serve training,
+# export, and the ONNX oracle.
+dependencies = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+    "skl2onnx>=1.16",
+    "onnxruntime>=1.17",
+]
 
 [project.optional-dependencies]
-# numpy/onnx power the attribution parity tests (tests/attribution_reference.py);
-# training-side deps (scikit-learn, skl2onnx, onnxruntime) arrive with the pipeline
-# migration and are only needed locally to regenerate fixtures.
-dev = ["ruff", "pytest", "numpy", "onnx"]
+dev = ["ruff>=0.6", "pytest>=8"]
 
-# The package is `synthaea_ml` alone — sibling directories (datasets/, registry/,
-# notebooks/) hold data and docs, not code, and must not be auto-discovered.
 [tool.setuptools.packages.find]
 include = ["synthaea_ml*"]
 
