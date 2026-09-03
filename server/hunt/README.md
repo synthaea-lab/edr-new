@@ -9,5 +9,5 @@ Planned shape:
 - Hunt = a saved, versioned query with an owner, a schedule, and a result history —
   a hunt that matches repeatedly graduates into detection content (a Sigma rule or
   IOC set), closing the loop from hunting to automated detection
-- Live endpoint queries (ask one host "what is running right now?") ride the `rtr`
+- Live endpoint queries (ask one host "what is running right now?") ride the `live-response`
   channel with its policy gates, not a separate mechanism
