@@ -1,7 +1,16 @@
-# Python project manifest for the ML training pipeline.
-# Dependencies and tooling (ruff, pytest) are declared here once code is migrated from old/ml.
 [project]
-name = "synthaea-ml-pipeline"
+name = "synthaea-ml"
 version = "0.1.0"
-description = "Offline training pipeline: features, training, calibration, ONNX export"
+description = "Synthaea ML space: features, training, calibration, evaluation, ONNX export"
 requires-python = ">=3.11"
+# Dependencies are added as code is migrated (numpy, scikit-learn, onnx, onnxruntime, ...).
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff", "pytest"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
