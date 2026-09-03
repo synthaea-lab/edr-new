@@ -1,0 +1,30 @@
+name: ML
+
+on:
+  push:
+    branches: [main]
+    paths: ["ml/**", ".github/workflows/ml.yml"]
+  pull_request:
+    paths: ["ml/**", ".github/workflows/ml.yml"]
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install tooling
+        run: pip install ruff pytest
+      - name: ruff
+        run: ruff check ml
+      - name: pytest
+        # The pipeline has no tests yet; this step becomes unconditional once
+        # code is migrated from old/ml (including the ONNX parity check).
+        run: |
+          if ls ml/tests/test_*.py >/dev/null 2>&1; then
+            pip install -e ml && pytest ml/tests
+          else
+            echo "no tests yet — skipping"
+          fi
