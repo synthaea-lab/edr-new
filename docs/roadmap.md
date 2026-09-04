@@ -5,6 +5,25 @@ backlog #107–#114 from the migration PR reviews slotted in on 2026-09-04). Rul
 work *within* a phase is parallel-safe; a phase's start depends only on the arrows
 into it. Issue numbers are the source of truth for scope; this file only orders them.
 
+## Milestones map 1:1 to these phases
+
+GitHub milestones are the roadmap phases, so an issue's milestone *is* its phase:
+
+| Milestone | Phase |
+| --- | --- |
+| M1 — Linux walking skeleton | Phase 0 (done) |
+| M2 — Foundation completion | Phase 1 (incl. self-protection #71/#101–104 and the distro labs #123/#124) |
+| M4 — Control-plane spine | Phase 2 |
+| M3 — Windows parity | Phase 3 |
+| M5 — macOS | Phase 4 |
+| M6 — Data & analytics platform | Phase 5 |
+| M7 — Fleet & advanced response | Phase 6 |
+| M8 — ML track | the parallel ML thread (below) |
+
+(The M3/M4 numbers predate this ordering — Windows parity was numbered before the
+control-plane spine; the *phase* is what governs sequence, and Phase 2 precedes
+Phase 3.) Any new issue is filed straight into its phase's milestone.
+
 ## The critical path in one sentence
 
 **`#23 policy → #24 transport + #28 server(+#89 auth) → #30 updater/rings → #77
