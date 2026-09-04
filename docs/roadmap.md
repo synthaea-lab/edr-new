@@ -23,9 +23,12 @@ flowchart LR
     ML -.-> P6
 ```
 
-## Phase 0 — In flight
+## Phase 0 — Done since this plan was drawn
 
-- #17 yara (PR green, awaiting merge) · #13 ml inference (parallel session)
+- #17 yara ✅ · #13 ml inference ✅ · #67 baseline capture ✅ · #20 Windows ETW
+  migration ✅ (landed ahead of its Phase 3 slot — the sensor exists; Phase 3 keeps
+  the lab-validation and expansion work) · migration series complete · review-findings
+  hardening + Clean Code passes merged (PRs #106, #115–#117)
 
 ## Phase 1 — Foundation completion (all parallel, agent-local, no blockers)
 
@@ -33,7 +36,6 @@ flowchart LR
 | --- | --- |
 | #19 config | agent/watchdog/cli all want it; tiny; blocks nothing but tidies everything |
 | #53 CO-RE ppid fix | every lineage rule is unreliable off the binding kernel until this lands; also prerequisite for trusting #62 blast-radius and #48 lineage features |
-| #67 baseline capture | small; unblocks #44's benign campaign |
 | #74 ATT&CK structured fields | schema+engines only; the earlier it lands, the less content needs retrofitting; #73 metadata lint depends on it |
 | #73 (metadata + negative samples half) | content-side only; ring half moves to Phase 2 (#30) |
 | #34 audit fallback sensor | independent; second Linux sensor → makes #35 conformance meaningful |
@@ -61,8 +63,8 @@ flowchart LR
 ## Phase 3 — Windows parity (needs Phase 1 lab discipline; independent of Phase 5)
 
 1. **#22 Windows lab harness** — gate for everything Windows; needs the x86 host
-2. **#20 ETW migration (F-1..F-7)** — validated on #22
-3. **#21 P2–P8 expansion · #94 eventlog · #97 DotNET/SMB providers** — parallel after #20
+2. **#20 ETW migration ✅** (code landed; lab validation on #22 still owed)
+3. **#21 P2–P8 expansion · #94 eventlog · #97 DotNET/SMB providers** — parallel; code-unblocked now, validation wants #22
 4. **#37 packaging: Windows** — after #20 (services to install)
 5. **#35 conformance suite** — becomes honest once Linux(2 sensors)+Windows exist; generates the public matrix
 
@@ -97,7 +99,7 @@ flowchart LR
 
 ## ML track (parallel throughout, owned alongside #13)
 
-**#13 → {#109 format parity, #110 ort static linking} → #44 corpus (wants #67, #36) →
+**#13 ✅ → {#109 format parity, #110 ort static linking} → #44 corpus (#67 ✅; wants #36) →
 {#45 robustness, #46 conformal/OOD, #48 lineage features (wants #53)} → #49 per-site
 adaptation (wants #28 + #77) → #50 narratives (with #75)**. #47 attributions is
 partially landed. #109/#110 come first: the corpus pipeline must read real agent
