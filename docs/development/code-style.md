@@ -204,8 +204,20 @@ this project holds as rules:
 | License/advisory hygiene | `cargo deny` (CI) |
 | Shipped content compiles and fires | content suites (`sigma`, `yara` tests, CI) |
 
-Cross-target note: local clippy only lints the code compiled for the host. Before
-touching platform-gated code, lint it for its platform
-(`cargo clippy -p sensor-windows --target x86_64-pc-windows-msvc`,
-`cargo clippy -p sensor-linux --target x86_64-unknown-linux-gnu`) — this caught a
-Windows-only compile break that a macOS-only check missed.
+Cross-target note: local clippy only lints the code compiled for the host — a
+macOS-only check misses every `cfg(windows)`/`cfg(linux)` item (it caught a real
+Windows compile break, and doc-lint misses in Linux-only code). The full matrix
+runs locally:
+
+```bash
+rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-gnu
+# Linux needs a cross C toolchain for the wasmtime (yara-x) build:
+brew install messense/macos-cross-toolchains/x86_64-unknown-linux-gnu
+
+cargo clippy --workspace --exclude sensor-linux-ebpf --all-targets \
+  --target x86_64-pc-windows-msvc -- -D warnings
+CC_x86_64_unknown_linux_gnu=x86_64-unknown-linux-gnu-gcc \
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER=x86_64-unknown-linux-gnu-gcc \
+cargo clippy --workspace --exclude sensor-linux-ebpf --all-targets \
+  --target x86_64-unknown-linux-gnu -- -D warnings
+```
