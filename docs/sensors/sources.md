@@ -12,7 +12,7 @@ issue filed), **rejected** (deliberate, reason given).
 | eBPF tracepoints/kprobes | used | `sensors/linux/ebpf` + `userspace` |
 | eBPF uprobes (TLS plaintext, readline) | planned | `sensors/linux/uprobes` |
 | BPF-LSM hooks (io_uring-proof observation + inline blocking; timestomping via utimensat/inode_setattr) | planned | `sensors/linux/lsm` |
-| audit netlink + fanotify | planned | `sensors/linux/audit` (fallback) |
+| audit netlink + fanotify | planned | `sensors/linux/audit` (fallback, #34) |
 | netlink: sock_diag / conntrack / proc connector | planned | `sensors/linux/netlink` |
 | journald (auth, service lifecycle) | planned | `sensors/linux/journal` |
 | /proc, /sys polling | used | seeding + fallbacks only |
@@ -26,12 +26,13 @@ issue filed), **rejected** (deliberate, reason given).
 | --- | --- | --- |
 | ETW kernel providers (Process/File/Network) | used | `sensors/windows/etw` |
 | ETW expansion (Registry, DNS, image load, AMSI, PowerShell, WMI) | planned | #21 |
-| ETW: DotNETRuntime (in-memory assemblies), SMB/RPC/TCPIP | planned | ETW provider issue |
-| Windows Event Log channels (EvtSubscribe) | planned | `sensors/windows/eventlog` |
+| ETW: DotNETRuntime (in-memory assemblies), SMB/RPC/TCPIP | planned | #97 |
+| Windows Event Log channels (EvtSubscribe) | planned | `sensors/windows/eventlog` (#94) |
 | Kernel callbacks: process/image/registry (driver) | planned | `sensors/windows/driver` |
-| ObRegisterCallbacks — handle access (LSASS credential-theft signal) | planned | driver scope (#39) |
-| Minifilter (file deletes/renames/pipes, timestomping via SetInformation, Alternate Data Streams, raw volume access) + WFP | planned | `sensors/windows/driver` (#39) |
-| Threat-Intelligence ETW (injection; needs PPL) | planned | driver scope (#39) |
+| ObRegisterCallbacks — handle access (LSASS credential-theft signal) | planned | #137 (on driver #39) |
+| Minifilter (file deletes/renames/pipes, timestomping via SetInformation, Alternate Data Streams, raw volume access) | planned | #136 (on driver #39) |
+| WFP (network filtering + inline block) | planned | #138 (on driver #39) |
+| Threat-Intelligence ETW (injection; needs PPL) | planned | #137 (on driver #39) |
 | WMI/CIM queries | used (inventory) | `inventory` collectors |
 | Userland API hooking / detours | **rejected** | stability, AV conflicts, trivially unhookable — ETW + kernel callbacks only |
 | Clipboard capture | **rejected** | privacy/noise cost exceeds detection value; commercial norm agrees |
@@ -41,7 +42,7 @@ issue filed), **rejected** (deliberate, reason given).
 | Mechanism | Status | Where / why |
 | --- | --- | --- |
 | EndpointSecurity (core events) | planned | `sensors/macos/endpoint-security` (#32) |
-| ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | planned | ES widening issue |
+| ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | planned | #96 |
 | NetworkExtension: filter-data + DNS-proxy | planned | `sensors/macos/network-extension` |
 | NetworkExtension: packet-tunnel provider | rejected (revisit) | full-packet capture is cost without need given filter-data + DNS |
 | Unified log (OSLog predicates) | planned | `sensors/macos/unifiedlog` |
