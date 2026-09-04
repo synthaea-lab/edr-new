@@ -1,6 +1,7 @@
 # Roadmap — Dependency-Ordered Development Plan
 
-Derived from the interdependencies of all open issues (2026-09-03). Rule of reading:
+Derived from the interdependencies of all open issues (2026-09-03; hardening
+backlog #107–#114 from the migration PR reviews slotted in on 2026-09-04). Rule of reading:
 work *within* a phase is parallel-safe; a phase's start depends only on the arrows
 into it. Issue numbers are the source of truth for scope; this file only orders them.
 
@@ -41,12 +42,18 @@ flowchart LR
 | **Source collection** — #90 uprobes · #91 lsm · #92 netlink · #93 journal | new Linux telemetry taps: agent-local, parallel-safe, validated on the existing lab; #91 additionally opens the Linux inline-blocking path #25 will use |
 | #84 device-control (Linux telemetry half) · #86 JA4/SNI | sensor-side collection, same profile; control/policy halves return in later phases |
 | #87 inventory (agent half) | diffed collectors are agent-local; graph/prevalence consumers arrive with Phase 5 |
+| #114 schema version-bump contract | doc-only decision; the earlier it lands, the fewer schema additions get re-litigated |
+| #111 probe filename capture | same eBPF probe rebuild as #53 — do together; kills argv[0] spoofing and fixes enrich hashing the wrong file |
+| #112 watchdog service hardening | agent-local (service args, quoting, absolute paths); pairs naturally with #36/#37 packaging |
+| #113 lab provisioning fixes | restores the scenario reliability every later phase's validation leans on |
 
 ## Phase 2 — Control-plane spine (the great unblocker; mostly serial)
 
 1. **#23 policy** — response gating, posture overlays, content rings all speak it; first
 2. **#28 server scaffold + #89 better-auth/tenancy** — one PR train: tenancy shapes migration one (ADR-0003)
-3. **#24 transport** — enrollment + spool flush against #28; mTLS in front per ADR-0001
+3. **#24 transport + #108 spool ack** — enrollment + spool flush against #28; mTLS in
+   front per ADR-0001. The spool's two-phase drain/ack (#108) lands here: the server is
+   the first real consumer of drained segments, and the ack protocol is its contract
 4. **#30 updater + rings** — needs #24/#28; completes #73 (content rings); prerequisite for #71's integrity manifest
 5. **#25 response** — needs #23 only; can run parallel to 2–4; Linux kill/quarantine first (the LSM block path arrives with #91)
 6. **#26 ipc → #27 cli → #31 ui** — strictly after #26; ui also wants #25 (notifications)
@@ -86,12 +93,16 @@ flowchart LR
 | #85 memory scanning | Linux half after #91 (Phase 1); Windows half gated on #39 (TI-ETW/PPL) |
 | #75 assistant | #72 + cases in #28; pairs with #50 |
 | #39 windows driver | long-term: signing/MVI gates; unblocks #85-win, #82 fidelity, handle-access |
+| #107 trusted-process identity | the path-trust gate already shipped (PR #106); the durable signature + expected-parent verification wants publisher identity from enrich (#21 catalog chain on Windows) |
 
 ## ML track (parallel throughout, owned alongside #13)
 
-**#13 → #44 corpus (wants #67, #36) → {#45 robustness, #46 conformal/OOD, #48 lineage
-features (wants #53)} → #49 per-site adaptation (wants #28 + #77) → #50 narratives
-(with #75)**. #47 attributions is partially landed.
+**#13 → {#109 format parity, #110 ort static linking} → #44 corpus (wants #67, #36) →
+{#45 robustness, #46 conformal/OOD, #48 lineage features (wants #53)} → #49 per-site
+adaptation (wants #28 + #77) → #50 narratives (with #75)**. #47 attributions is
+partially landed. #109/#110 come first: the corpus pipeline must read real agent
+captures, and the deployed scorer must match ADR-0002 before anything is trained
+against it.
 
 ## Suggested batch order (if one thread does everything)
 
