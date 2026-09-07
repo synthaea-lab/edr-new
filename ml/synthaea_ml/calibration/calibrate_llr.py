@@ -36,46 +36,49 @@ FEATURE_NAMES = [
     "dest_is_external",
 ]
 
-# Current LLRs (hand-calibrated) — reference for comparison.
-LLR_ACTUELS = [0.0, 0.3, 0.7, "0.8/<500ms,0.3/<2s", 0.6, 2.0, "0.1*n,max1.5", 0.5, 1.5]
+# Hand-calibrated LLRs — kept as reference for comparison in the report.
+LLR_CURRENT = [0.0, 0.3, 0.7, "0.8/<500ms,0.3/<2s", 0.6, 2.0, "0.1*n,max1.5", 0.5, 1.5]
 
-# Laplace smoothing — avoids log(0) when a bin is empty in a small sample.
+# Laplace smoothing — prevents log(0) when a bin is unseen in a small sample.
 LAPLACE_ALPHA = 0.5
 
 
 # ── Parsing ────────────────────────────────────────────────────────────────────
 
 
-def _normaliser_event(e: dict) -> dict:
-    """Normalise le format edr-new (meta imbriqué) vers le format flat attendu.
+def _normalize_event(e: dict) -> dict:
+    """Flatten the edr-new nested event format to the flat format expected downstream.
 
-    Nouveau format (edr-new) :
+    edr-new format:
         {"type": "exec",      "meta": {"pid": ..., "timestamp_ns": ...}, "cmdline": ...}
         {"type": "connect",   "meta": {...}, "daddr_v4": [...], "dport": ..., "is_ipv6": ...}
+        {"type": "connect",   "meta": {...}, "daddr": "1.2.3.4", "dport": ...}  (NAT captures)
         {"type": "file_open", "meta": {...}, "flags": ..., "path": ...}
-    Format flat attendu :
+    Flat format:
         {"type": "exec",     "pid": ..., "ts_ns": ..., "cmdline": ...}
         {"type": "connect",  "pid": ..., "ts_ns": ..., "daddr_v4": [...], "dport": ...}
         {"type": "fileopen", "pid": ..., "ts_ns": ..., "flags": ...}
     """
     meta = e.get("meta")
-    if meta is not None:
-        e = dict(e)  # shallow copy — ne pas muter l'original
-        e["pid"] = meta.get("pid", 0)
-        e["ts_ns"] = meta.get("timestamp_ns", 0)
-        if e.get("type") == "file_open":
-            e["type"] = "fileopen"
-        # Normalise daddr string → daddr_v4 list[int] (format NAT vs Host-Only)
-        if "daddr" in e and "daddr_v4" not in e:
-            try:
-                e["daddr_v4"] = [int(b) for b in e["daddr"].split(".")]
-            except (ValueError, AttributeError):
-                e["daddr_v4"] = [0, 0, 0, 0]
+    if meta is None:
+        return e
+    e = dict(e)  # shallow copy — do not mutate the caller's dict
+    e["pid"] = meta.get("pid", 0)
+    e["ts_ns"] = meta.get("timestamp_ns", 0)
+    if e.get("type") == "file_open":
+        e["type"] = "fileopen"
+    # NAT captures emit daddr as a dotted-decimal string; Host-Only captures use
+    # daddr_v4 as a list of ints.  Normalise to daddr_v4 so behavior.py is uniform.
+    if "daddr" in e and "daddr_v4" not in e:
+        try:
+            e["daddr_v4"] = [int(b) for b in e["daddr"].split(".")]
+        except (ValueError, AttributeError):
+            e["daddr_v4"] = [0, 0, 0, 0]
     return e
 
 
-def charger_events(path: Path) -> list[dict]:
-    """Loads the raw events from events.jsonl."""
+def load_events(path: Path) -> list[dict]:
+    """Load and normalize raw events from an events.jsonl file."""
     events = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -84,7 +87,7 @@ def charger_events(path: Path) -> list[dict]:
                 if not line:
                     continue
                 try:
-                    events.append(_normaliser_event(json.loads(line)))
+                    events.append(_normalize_event(json.loads(line)))
                 except json.JSONDecodeError as e:
                     print(f"[warn] events.jsonl line {i} invalid: {e}", file=sys.stderr)
     except FileNotFoundError:
@@ -93,8 +96,8 @@ def charger_events(path: Path) -> list[dict]:
     return events
 
 
-def charger_pids_malveillants(path: Path) -> set[int]:
-    """Extracts the alerted PIDs from alerts.ndjson."""
+def load_malicious_pids(path: Path) -> set[int]:
+    """Extract the alerted PIDs from an alerts.ndjson file."""
     pids: set[int] = set()
     if not path.exists():
         print(f"[warn] {path} not found — no known malicious PIDs.", file=sys.stderr)
@@ -107,7 +110,6 @@ def charger_pids_malveillants(path: Path) -> set[int]:
             try:
                 alert = json.loads(line)
                 msg = alert.get("message", "")
-                # Extract pid=... from the alert message
                 for token in msg.split():
                     if token.startswith("pid="):
                         with contextlib.suppress(ValueError):
@@ -120,50 +122,50 @@ def charger_pids_malveillants(path: Path) -> set[int]:
 # ── Sliding windowing ──────────────────────────────────────────────────────────
 
 
-def grouper_par_pid_et_fenetre(events: list[dict], window_ns: int) -> dict[int, list[list[float]]]:
-    """Groups the events by PID, slices them into windows of window_ns, and returns
-    the BehaviorVectors per PID (several vectors if the PID has events across
-    several disjoint windows)."""
-    # Group by pid
-    par_pid: dict[int, list[dict]] = defaultdict(list)
+def group_by_pid_and_window(
+    events: list[dict], window_ns: int
+) -> dict[int, list[list[float]]]:
+    """Group events by PID, slice into windows of window_ns nanoseconds, and
+    return the BehaviorVectors per PID (one vector per non-empty window)."""
+    by_pid: dict[int, list[dict]] = defaultdict(list)
     for e in events:
         if e.get("type") in ("exec", "connect", "fileopen"):
-            par_pid[e["pid"]].append(e)
+            by_pid[e["pid"]].append(e)
 
-    bv_par_pid: dict[int, list[list[float]]] = {}
+    bv_by_pid: dict[int, list[list[float]]] = {}
 
-    for pid, pid_events in par_pid.items():
+    for pid, pid_events in by_pid.items():
         pid_events.sort(key=lambda e: e["ts_ns"])
         if not pid_events:
             continue
-        # Sliding windows: slice the events into chunks of window_ns
-        vecteurs = []
-        debut = pid_events[0]["ts_ns"]
-        fenetre: list[dict] = []
+        vectors = []
+        window_start = pid_events[0]["ts_ns"]
+        window: list[dict] = []
         for e in pid_events:
-            if e["ts_ns"] - debut > window_ns:
-                if fenetre:
-                    vecteurs.append(extract_behavior_features(fenetre))
-                debut = e["ts_ns"]
-                fenetre = [e]
+            if e["ts_ns"] - window_start > window_ns:
+                if window:
+                    vectors.append(extract_behavior_features(window))
+                window_start = e["ts_ns"]
+                window = [e]
             else:
-                fenetre.append(e)
-        if fenetre:
-            vecteurs.append(extract_behavior_features(fenetre))
-        bv_par_pid[pid] = vecteurs
+                window.append(e)
+        if window:
+            vectors.append(extract_behavior_features(window))
+        bv_by_pid[pid] = vectors
 
-    return bv_par_pid
+    return bv_by_pid
 
 
 # ── Calibration ────────────────────────────────────────────────────────────────
 
 
-def _discretiser(feature_idx: int, value: float) -> str:
-    """Discretizes a continuous feature into bins for the LLR computation.
-    Binary features (0.0/1.0) are left as-is.
-    Continuous features are split into intervals."""
+def _discretize(feature_idx: int, value: float) -> str:
+    """Discretize a continuous feature value into a named bin.
+
+    Binary features (0.0/1.0) pass through as "0"/"1".
+    Continuous features are split into empirically chosen intervals.
+    """
     if feature_idx in (0, 1, 2, 5, 8):
-        # Binary
         return "1" if value > 0.5 else "0"
     elif feature_idx == 3:  # time_exec_to_connect_ms
         if value == 0.0:
@@ -200,52 +202,48 @@ def _discretiser(feature_idx: int, value: float) -> str:
     return str(value)
 
 
-def calculer_llr_empiriques(
-    bv_par_pid: dict[int, list[list[float]]],
-    pids_malveillants: set[int],
+def compute_empirical_llrs(
+    bv_by_pid: dict[int, list[list[float]]],
+    malicious_pids: set[int],
     alpha: float = LAPLACE_ALPHA,
 ) -> dict[int, dict[str, float]]:
-    """Computes the empirical LLRs for each feature.
+    """Compute empirical LLRs for each feature bin via Laplace-smoothed counts.
 
-    Returns a dict feature_idx → {bin → llr}.
+    Returns feature_idx → {bin_name → llr}.
     """
-    # Count occurrences per class
-    benin: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
-    malveil: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    benign: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+    malicious: dict[int, dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
-    n_benin = 0
-    n_malveil = 0
+    n_benign = 0
+    n_malicious = 0
 
-    for pid, vecteurs in bv_par_pid.items():
-        classe = malveil if pid in pids_malveillants else benin
-        if pid in pids_malveillants:
-            n_malveil += len(vecteurs)
+    for pid, vectors in bv_by_pid.items():
+        bucket = malicious if pid in malicious_pids else benign
+        if pid in malicious_pids:
+            n_malicious += len(vectors)
         else:
-            n_benin += len(vecteurs)
-        for bv in vecteurs:
+            n_benign += len(vectors)
+        for bv in vectors:
             for i, val in enumerate(bv):
-                bin_key = _discretiser(i, val)
-                classe[i][bin_key] += 1.0
+                bucket[i][_discretize(i, val)] += 1.0
 
-    if n_benin == 0 or n_malveil == 0:
+    if n_benign == 0 or n_malicious == 0:
         print(
-            f"[warn] n_benin={n_benin}, n_malveil={n_malveil} — not enough data to calibrate.",
+            f"[warn] n_benign={n_benign}, n_malicious={n_malicious}"
+            " — not enough data to calibrate.",
             file=sys.stderr,
         )
         return {}
 
     llr: dict[int, dict[str, float]] = {}
-    all_bins_per_feat: dict[int, set[str]] = {}
-
     for i in range(9):
-        all_bins = set(benin[i].keys()) | set(malveil[i].keys())
-        all_bins_per_feat[i] = all_bins
-        total_b = sum(benin[i].values()) + alpha * len(all_bins)
-        total_m = sum(malveil[i].values()) + alpha * len(all_bins)
+        all_bins = set(benign[i].keys()) | set(malicious[i].keys())
+        total_b = sum(benign[i].values()) + alpha * len(all_bins)
+        total_m = sum(malicious[i].values()) + alpha * len(all_bins)
         llr[i] = {}
         for b in all_bins:
-            p_b = (benin[i].get(b, 0.0) + alpha) / total_b
-            p_m = (malveil[i].get(b, 0.0) + alpha) / total_m
+            p_b = (benign[i].get(b, 0.0) + alpha) / total_b
+            p_m = (malicious[i].get(b, 0.0) + alpha) / total_m
             llr[i][b] = math.log(p_m / p_b)
 
     return llr
@@ -254,16 +252,17 @@ def calculer_llr_empiriques(
 # ── Report ─────────────────────────────────────────────────────────────────────
 
 
-def generer_rapport(
+def generate_report(
     llr: dict[int, dict[str, float]],
-    n_benin: int,
-    n_malveil: int,
+    n_benign: int,
+    n_malicious: int,
 ) -> str:
+    """Render the calibration report as a human-readable string."""
     lines = []
     lines.append("=" * 70)
     lines.append("LLR CALIBRATION REPORT — Synthaea EDR")
-    lines.append(f"Benign samples    : {n_benin}")
-    lines.append(f"Malicious samples : {n_malveil}")
+    lines.append(f"Benign samples    : {n_benign}")
+    lines.append(f"Malicious samples : {n_malicious}")
     lines.append("=" * 70)
     lines.append("")
 
@@ -271,7 +270,7 @@ def generer_rapport(
         if i not in llr:
             continue
         lines.append(f"[{i}] {name}")
-        lines.append(f"    Current LLR : {LLR_ACTUELS[i]}")
+        lines.append(f"    Current LLR : {LLR_CURRENT[i]}")
         lines.append("    Empirical LLRs per bin:")
         for bin_key, val in sorted(llr[i].items()):
             lines.append(f"        {bin_key:12s} → {val:+.3f}")
@@ -280,12 +279,12 @@ def generer_rapport(
     lines.append("─" * 70)
     lines.append("SUGGESTED RUST CODE for log_likelihood_ratio():")
     lines.append("─" * 70)
-    lines.append(generer_rust(llr))
+    lines.append(generate_rust(llr))
     return "\n".join(lines)
 
 
-def generer_rust(llr: dict[int, dict[str, float]]) -> str:
-    """Generates the Rust match block for log_likelihood_ratio()."""
+def generate_rust(llr: dict[int, dict[str, float]]) -> str:
+    """Generate the Rust match block for log_likelihood_ratio()."""
     rust = ["fn log_likelihood_ratio(idx: usize, value: f32) -> f32 {", "    match idx {"]
 
     descs = {
@@ -308,7 +307,6 @@ def generer_rust(llr: dict[int, dict[str, float]]) -> str:
 
         bins = llr[i]
         if set(bins.keys()) <= {"0", "1"}:
-            # Binary feature
             llr_1 = bins.get("1", 0.0)
             llr_0 = bins.get("0", 0.0)
             rust.append(f"        {i} => if value > 0.5 {{ {llr_1:.2f} }} else {{ {llr_0:.2f} }},")
@@ -348,7 +346,6 @@ def generer_rust(llr: dict[int, dict[str, float]]) -> str:
                 f"else if value <= 3.0 {{ {v_23:.2f} }} else {{ {v_gte:.2f} }},"
             )
         else:
-            # Fallback: take the LLR of bin "1" if binary, else 0
             val = bins.get("1", 0.0)
             rust.append(f"        {i} => {val:.2f},")
 
@@ -370,15 +367,15 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="Report file (default: stdout)")
     args = parser.parse_args()
 
-    events = charger_events(Path(args.events))
-    pids_mal = charger_pids_malveillants(Path(args.alerts))
+    events = load_events(Path(args.events))
+    malicious_pids = load_malicious_pids(Path(args.alerts))
 
     print(
-        f"[info] {len(events)} events loaded, {len(pids_mal)} malicious PIDs: {pids_mal}",
+        f"[info] {len(events)} events loaded, {len(malicious_pids)} malicious PIDs: {malicious_pids}",
         file=sys.stderr,
     )
 
-    if len(pids_mal) < args.min_mal:
+    if len(malicious_pids) < args.min_mal:
         print(
             f"[error] fewer than {args.min_mal} malicious PID(s) in {args.alerts} — "
             "run AsyncRAT or another malware sample before calibrating.",
@@ -387,21 +384,20 @@ def main() -> None:
         sys.exit(1)
 
     window_ns = args.window * 1_000_000_000
-    bv_par_pid = grouper_par_pid_et_fenetre(events, window_ns)
+    bv_by_pid = group_by_pid_and_window(events, window_ns)
 
-    # Counts for the report
-    n_benin = sum(len(v) for pid, v in bv_par_pid.items() if pid not in pids_mal)
-    n_malveil = sum(len(v) for pid, v in bv_par_pid.items() if pid in pids_mal)
+    n_benign = sum(len(v) for pid, v in bv_by_pid.items() if pid not in malicious_pids)
+    n_malicious = sum(len(v) for pid, v in bv_by_pid.items() if pid in malicious_pids)
 
-    llr = calculer_llr_empiriques(bv_par_pid, pids_mal)
+    llr = compute_empirical_llrs(bv_by_pid, malicious_pids)
 
-    rapport = generer_rapport(llr, n_benin, n_malveil)
+    report = generate_report(llr, n_benign, n_malicious)
 
     if args.out:
-        Path(args.out).write_text(rapport, encoding="utf-8")
+        Path(args.out).write_text(report, encoding="utf-8")
         print(f"[info] report written to {args.out}", file=sys.stderr)
     else:
-        print(rapport)
+        print(report)
 
 
 if __name__ == "__main__":
