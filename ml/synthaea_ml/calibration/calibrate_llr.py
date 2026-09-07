@@ -46,6 +46,34 @@ LAPLACE_ALPHA = 0.5
 # ── Parsing ────────────────────────────────────────────────────────────────────
 
 
+def _normaliser_event(e: dict) -> dict:
+    """Normalise le format edr-new (meta imbriqué) vers le format flat attendu.
+
+    Nouveau format (edr-new) :
+        {"type": "exec",      "meta": {"pid": ..., "timestamp_ns": ...}, "cmdline": ...}
+        {"type": "connect",   "meta": {...}, "daddr_v4": [...], "dport": ..., "is_ipv6": ...}
+        {"type": "file_open", "meta": {...}, "flags": ..., "path": ...}
+    Format flat attendu :
+        {"type": "exec",     "pid": ..., "ts_ns": ..., "cmdline": ...}
+        {"type": "connect",  "pid": ..., "ts_ns": ..., "daddr_v4": [...], "dport": ...}
+        {"type": "fileopen", "pid": ..., "ts_ns": ..., "flags": ...}
+    """
+    meta = e.get("meta")
+    if meta is not None:
+        e = dict(e)  # shallow copy — ne pas muter l'original
+        e["pid"] = meta.get("pid", 0)
+        e["ts_ns"] = meta.get("timestamp_ns", 0)
+        if e.get("type") == "file_open":
+            e["type"] = "fileopen"
+        # Normalise daddr string → daddr_v4 list[int] (format NAT vs Host-Only)
+        if "daddr" in e and "daddr_v4" not in e:
+            try:
+                e["daddr_v4"] = [int(b) for b in e["daddr"].split(".")]
+            except (ValueError, AttributeError):
+                e["daddr_v4"] = [0, 0, 0, 0]
+    return e
+
+
 def charger_events(path: Path) -> list[dict]:
     """Loads the raw events from events.jsonl."""
     events = []
@@ -56,7 +84,7 @@ def charger_events(path: Path) -> list[dict]:
                 if not line:
                     continue
                 try:
-                    events.append(json.loads(line))
+                    events.append(_normaliser_event(json.loads(line)))
                 except json.JSONDecodeError as e:
                     print(f"[warn] events.jsonl line {i} invalid: {e}", file=sys.stderr)
     except FileNotFoundError:
