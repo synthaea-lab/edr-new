@@ -31,11 +31,38 @@ from pathlib import Path
 
 from synthaea_ml.features.correlation import FEATURE_NAMES, extract_features
 
-EVENT_TYPES = ("exec", "connect", "fileopen")
+# Wire tags as `crates/schema::Event` serializes them (serde `rename_all = "snake_case"`
+# on the `FileOpen` variant): distinct from `correlation.py`'s "fileopen" (see below).
+RAW_EVENT_TYPES = ("exec", "connect", "file_open")
+
+
+def _flatten(raw: dict) -> dict | None:
+    """Translates one wire event (`crates/schema::Event` JSON: identity nested under
+    `meta`, `daddr` a single address string) into the flat shape `correlation.py` was
+    written against (`pid`/`ts_ns` at top level, `fileopen` tag, `daddr_v4` as a
+    hashable destination key — the address family is never read by `extract_features`,
+    only used for counting distinct destinations, so the raw string is kept verbatim
+    inside a 1-element list rather than actually split into octets)."""
+    event_type = raw.get("type")
+    meta = raw.get("meta")
+    if event_type not in RAW_EVENT_TYPES or meta is None:
+        return None
+    e: dict = {
+        "type": "fileopen" if event_type == "file_open" else event_type,
+        "pid": meta["pid"],
+        "ts_ns": meta["timestamp_ns"],
+    }
+    if event_type == "connect":
+        e["daddr_v4"] = [raw["daddr"]]
+        e["dport"] = raw["dport"]
+    elif event_type == "file_open":
+        e["flags"] = raw["flags"]
+    return e
 
 
 def charger_events(path: Path) -> list[dict]:
-    """Loads the usable events from events.jsonl (exec/connect/fileopen)."""
+    """Loads the usable events from events.jsonl (exec/connect/file_open), flattened by
+    `_flatten` to the shape `correlation.py` expects."""
     events: list[dict] = []
     try:
         with open(path, encoding="utf-8") as f:
@@ -44,11 +71,12 @@ def charger_events(path: Path) -> list[dict]:
                 if not line:
                     continue
                 try:
-                    e = json.loads(line)
+                    raw = json.loads(line)
                 except json.JSONDecodeError as exc:
                     print(f"[warn] {path} line {i} invalid: {exc}", file=sys.stderr)
                     continue
-                if e.get("type") in EVENT_TYPES and "pid" in e and "ts_ns" in e:
+                e = _flatten(raw)
+                if e is not None:
                     events.append(e)
     except FileNotFoundError:
         print(
