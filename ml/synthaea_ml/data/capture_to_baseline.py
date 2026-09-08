@@ -1,81 +1,107 @@
-"""Converts a raw `edr-cli run` log (stdout, `ExecEvent { ... }` lines) into a benign JSONL
-baseline consumable by train.py.
+"""Converts a raw agent events.jsonl capture into a benign JSONL baseline
+consumable by train.py (cmdline isolation-forest).
 
-Context: week 8 (docs/PLAN.md) — replaces the 61-line synthetic baseline with a real capture
-of lab activity. The log is the `{event:?}` format produced by
-edr-agent/src/main.rs::println!("{event:?}") — not native JSON, hence the regex parsing below
-rather than direct deserialization.
+Reads the JSON-Lines format produced by the agent (edr-new schema v7+):
+    {"type": "exec", "meta": {...}, "cmdline": "...", "argv": [...], ...}
 
-Usage: `python3 capture_to_baseline.py <log_file> [--out data/baseline_benign.jsonl]`
+On Windows/ETW the "argv" field is empty — the raw "cmdline" string is used
+instead (split on NUL bytes if present, otherwise kept as a single token).
+On Linux/eBPF "argv" is populated and used directly.
+
+Duplicate command lines (same argv tuple) are dropped so the baseline stays
+compact and representative — a process that runs 10 000 times adds one sample.
+
+Usage:
+    python3 capture_to_baseline.py <events.jsonl> [--out baseline_benign.jsonl]
 """
 
 import argparse
 import json
-import re
+import sys
 from pathlib import Path
 
-# Captures the content of cmdline: "..." — the value may contain quotes/backslashes escaped
-# by Rust's Debug (\", \\, \0, \n, \r, \t), never an unescaped quote.
-EXEC_EVENT_RE = re.compile(
-    r'ExecEvent \{ pid: (\d+), ppid: (\d+), comm: "(?:[^"\\]|\\.)*", '
-    r'cmdline: "((?:[^"\\]|\\.)*)" \}'
-)
 
-# Same escapes as produced by Rust's Debug for a &str (see char::escape_debug):
-# \0, \n, \r, \t, \\, \" — a generic \u{XX} is not handled here (not expected on a normal
-# shell command line; extend if parsing misses lines containing exotic bytes).
-_UNESCAPE = {"0": "\0", "n": "\n", "r": "\r", "t": "\t", "\\": "\\", '"': '"'}
+def _argv_from_event(event: dict) -> list[str]:
+    """Extract argv tokens from an exec event.
 
+    Priority:
+    1. ``argv`` field if non-empty (Linux/eBPF captures).
+    2. ``cmdline`` split on NUL bytes (legacy Linux format).
+    3. ``cmdline`` as a single-element list (Windows/ETW).
+    """
+    argv = event.get("argv")
+    if argv:
+        return [str(t) for t in argv]
 
-def unescape_rust_debug_str(s: str) -> str:
-    out = []
-    i = 0
-    while i < len(s):
-        c = s[i]
-        if c == "\\" and i + 1 < len(s) and s[i + 1] in _UNESCAPE:
-            out.append(_UNESCAPE[s[i + 1]])
-            i += 2
-        else:
-            out.append(c)
-            i += 1
-    return "".join(out)
+    cmdline = event.get("cmdline", "")
+    if not cmdline:
+        return []
 
+    # NUL-separated (Linux eBPF legacy format).
+    if "\0" in cmdline:
+        tokens = cmdline.split("\0")
+        return [t for t in tokens if t]
 
-def extract_argv(cmdline: str) -> list[str]:
-    """cmdline is `\\0`-separated with a trailing `\\0` (see ExecEvent::cmdline_str on the
-    Rust side)."""
-    tokens = cmdline.split("\0")
-    return [t for t in tokens[:-1]] if tokens and tokens[-1] == "" else [t for t in tokens if t]
+    # Windows ETW: cmdline is a quoted string like "\"C:\\...\\foo.exe\" arg1".
+    # Keep it as a single token — the cmdline model operates on the whole string.
+    return [cmdline]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("log_file", type=Path)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("events_file", type=Path, help="Path to events.jsonl")
     parser.add_argument(
-        "--out", type=Path, default=Path(__file__).parent / "data" / "baseline_benign.jsonl"
+        "--out",
+        type=Path,
+        default=Path("baseline_benign.jsonl"),
+        help="Output path (default: baseline_benign.jsonl)",
     )
     args = parser.parse_args()
 
-    text = args.log_file.read_text(encoding="utf-8", errors="replace")
+    if not args.events_file.exists():
+        print(f"[error] {args.events_file} not found.", file=sys.stderr)
+        sys.exit(1)
+
     seen: set[tuple[str, ...]] = set()
     argv_list: list[list[str]] = []
+    n_lines = 0
+    n_exec = 0
 
-    for match in EXEC_EVENT_RE.finditer(text):
-        raw_cmdline = unescape_rust_debug_str(match.group(3))
-        argv = extract_argv(raw_cmdline)
-        if not argv:
-            continue
-        key = tuple(argv)
-        if key in seen:
-            continue
-        seen.add(key)
-        argv_list.append(argv)
+    with args.events_file.open(encoding="utf-8", errors="replace") as f:
+        for lineno, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            n_lines += 1
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"[warn] line {lineno}: {e}", file=sys.stderr)
+                continue
 
+            if event.get("type") != "exec":
+                continue
+
+            n_exec += 1
+            argv = _argv_from_event(event)
+            if not argv:
+                continue
+
+            key = tuple(argv)
+            if key in seen:
+                continue
+            seen.add(key)
+            argv_list.append(argv)
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
     with args.out.open("w", encoding="utf-8") as f:
         for argv in argv_list:
             f.write(json.dumps({"argv": argv}) + "\n")
 
-    print(f"{len(argv_list)} unique benign command lines written to {args.out}")
+    print(
+        f"[info] {n_lines} lines read, {n_exec} exec events, "
+        f"{len(argv_list)} unique command lines → {args.out}"
+    )
 
 
 if __name__ == "__main__":
