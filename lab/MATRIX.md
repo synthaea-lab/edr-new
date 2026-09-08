@@ -6,9 +6,13 @@ Windows and macOS rows carry their own host constraints.
 
 ## Why a kernel matrix
 
-The eBPF probes do not use CO-RE (offsets pinned per kernel), so every kernel version
-below is a genuine portability test case (BTF, `task_struct` offsets, tracepoints) —
-not redundancy.
+The eBPF probes are largely tracepoint-driven — parent lineage from `sched_process_fork`
+fields, the executed image from `sched_process_exec` (issues #53/#111), no per-kernel
+freeze for either. One frozen-offset read remains: `cmdline` via `mm->arg_start..arg_end`
+(the `vmlinux*` bindings), correct only on the kernel they were generated from. So every
+kernel row is a genuine portability test case — that `mm` read, plus tracepoint record
+layout, `__data_loc` handling, BTF at load, and verifier behaviour, all drift across
+versions. Not redundancy.
 
 | Machine | Family | Kernel | Proves |
 | --- | --- | --- | --- |
