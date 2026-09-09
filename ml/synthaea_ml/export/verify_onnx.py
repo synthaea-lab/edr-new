@@ -1,6 +1,19 @@
-"""Verifies that an exported ONNX model gives the same verdicts as scikit-learn before
-export. Validation bridge between the training entry points (scikit-learn) and the
-agent's inference (`ort` in crates/ml).
+"""Verifies an exported ONNX model behaves sanely under `onnxruntime` before it ships —
+the validation bridge between the training entry points (scikit-learn) and the agent's
+inference (`ort` in crates/ml).
+
+The training scripts already assert ONNX-vs-scikit-learn parity at export time (they
+still hold the fitted estimator). This runs on a registry model with no estimator in
+hand, so it checks the properties the agent relies on regardless of how the model was
+produced:
+
+- the model exposes a ``scores`` output;
+- every score is finite (no NaN/inf reaching the correlator's belief update);
+- inference is deterministic (same input, same output — twice);
+- when the model also emits ``label``, its sign agrees with ``scores`` (``label == -1``
+  iff ``score < 0``), the contract `IsolationForest.predict` guarantees.
+
+Exits non-zero on the first violation.
 
 Usage: python -m synthaea_ml.export.verify_onnx [model.onnx ...]
 Defaults to every `model.onnx` under ml/registry/.
@@ -18,28 +31,62 @@ from synthaea_ml.training.train_windows import SANITY_CHECK_SAMPLES
 REGISTRY = Path(__file__).resolve().parents[2] / "registry"
 
 
+class VerificationError(AssertionError):
+    """A shipped model failed a property the agent depends on."""
+
+
 def verify(model_path: Path) -> None:
     session = ort.InferenceSession(str(model_path))
     input_name = session.get_inputs()[0].name
     output_names = [o.name for o in session.get_outputs()]
     print(f"{model_path}: input {input_name}, outputs {output_names}")
 
-    for label, cmdline in SANITY_CHECK_SAMPLES.items():
-        feats = np.array([extract_features(cmdline)], dtype=np.float32)
-        outputs = session.run(None, {input_name: feats})
-        result = dict(zip(output_names, outputs, strict=True))
-        label_out = result.get("label")
-        score_out = result.get("scores")
-        verdict = "ANOMALY" if label_out is not None and label_out[0] == -1 else "normal"
-        print(f"  {label}: label={label_out} scores={score_out} -> {verdict}")
+    if "scores" not in output_names:
+        raise VerificationError(f"{model_path}: no 'scores' output (got {output_names})")
+
+    feats = np.array(
+        [extract_features(cmdline) for cmdline in SANITY_CHECK_SAMPLES.values()],
+        dtype=np.float32,
+    )
+    run1 = dict(zip(output_names, session.run(None, {input_name: feats}), strict=True))
+    run2 = dict(zip(output_names, session.run(None, {input_name: feats}), strict=True))
+
+    scores = np.asarray(run1["scores"]).reshape(-1)
+    if not np.all(np.isfinite(scores)):
+        raise VerificationError(f"{model_path}: non-finite score(s): {scores}")
+
+    if not np.array_equal(scores, np.asarray(run2["scores"]).reshape(-1)):
+        raise VerificationError(f"{model_path}: inference is not deterministic")
+
+    if "label" in run1:
+        labels = np.asarray(run1["label"]).reshape(-1)
+        anomalous_label = labels == -1
+        anomalous_score = scores < 0
+        if not np.array_equal(anomalous_label, anomalous_score):
+            raise VerificationError(
+                f"{model_path}: label/score sign disagree — "
+                f"labels={labels.tolist()} scores={scores.round(4).tolist()}"
+            )
+
+    for (label, cmdline), score in zip(SANITY_CHECK_SAMPLES.items(), scores, strict=True):
+        verdict = "ANOMALY" if score < 0 else "normal"
+        print(f"  {label}: score={score:+.4f} -> {verdict}")
+    print(f"  ok: {len(scores)} samples, finite, deterministic, label/score consistent")
 
 
 def main() -> None:
     models = [Path(p) for p in sys.argv[1:]] or sorted(REGISTRY.glob("*/*/model.onnx"))
     if not models:
         sys.exit(f"no model.onnx found under {REGISTRY} and none given on the command line")
+    failures = 0
     for model in models:
-        verify(model)
+        try:
+            verify(model)
+        except VerificationError as e:
+            print(f"FAIL {e}", file=sys.stderr)
+            failures += 1
+    if failures:
+        sys.exit(f"{failures}/{len(models)} model(s) failed verification")
 
 
 if __name__ == "__main__":

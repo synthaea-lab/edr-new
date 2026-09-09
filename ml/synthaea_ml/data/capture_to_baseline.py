@@ -1,12 +1,12 @@
 """Converts a raw agent events.jsonl capture into a benign JSONL baseline
 consumable by train.py (cmdline isolation-forest).
 
-Reads the JSON-Lines format produced by the agent (edr-new schema v7+):
+Reads the JSON-Lines format produced by the agent (`crates/schema::Event`):
     {"type": "exec", "meta": {...}, "cmdline": "...", "argv": [...], ...}
 
-On Windows/ETW the "argv" field is empty — the raw "cmdline" string is used
-instead (split on NUL bytes if present, otherwise kept as a single token).
-On Linux/eBPF "argv" is populated and used directly.
+argv is the canonical form (see `synthaea_ml.data.canonical`): on Linux/eBPF it is
+populated and used directly; on Windows/ETW it is empty and the flat "cmdline"
+string is used as one token.
 
 Duplicate command lines (same argv tuple) are dropped so the baseline stays
 compact and representative — a process that runs 10 000 times adds one sample.
@@ -20,31 +20,7 @@ import json
 import sys
 from pathlib import Path
 
-
-def _argv_from_event(event: dict) -> list[str]:
-    """Extract argv tokens from an exec event.
-
-    Priority:
-    1. ``argv`` field if non-empty (Linux/eBPF captures).
-    2. ``cmdline`` split on NUL bytes (legacy Linux format).
-    3. ``cmdline`` as a single-element list (Windows/ETW).
-    """
-    argv = event.get("argv")
-    if argv:
-        return [str(t) for t in argv]
-
-    cmdline = event.get("cmdline", "")
-    if not cmdline:
-        return []
-
-    # NUL-separated (Linux eBPF legacy format).
-    if "\0" in cmdline:
-        tokens = cmdline.split("\0")
-        return [t for t in tokens if t]
-
-    # Windows ETW: cmdline is a quoted string like "\"C:\\...\\foo.exe\" arg1".
-    # Keep it as a single token — the cmdline model operates on the whole string.
-    return [cmdline]
+from synthaea_ml.data.canonical import argv_from_record
 
 
 def main() -> None:
@@ -83,7 +59,7 @@ def main() -> None:
                 continue
 
             n_exec += 1
-            argv = _argv_from_event(event)
+            argv = argv_from_record(event)
             if not argv:
                 continue
 

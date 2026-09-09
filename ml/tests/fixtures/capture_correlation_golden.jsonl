@@ -1,0 +1,5 @@
+{"pid": 1001, "features": [3.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 3.0], "feature_names": ["spawn_count", "connect_count", "filewrite_count", "unique_daddr_count", "unique_dport_count", "has_full_chain", "span_s", "event_count"]}
+{"pid": 1002, "features": [1.0, 2.0, 0.0, 1.0, 1.0, 0.0, 1.0, 3.0], "feature_names": ["spawn_count", "connect_count", "filewrite_count", "unique_daddr_count", "unique_dport_count", "has_full_chain", "span_s", "event_count"]}
+{"pid": 1003, "features": [1.0, 2.0, 1.0, 1.0, 1.0, 1.0, 1.0, 4.0], "feature_names": ["spawn_count", "connect_count", "filewrite_count", "unique_daddr_count", "unique_dport_count", "has_full_chain", "span_s", "event_count"]}
+{"pid": 1004, "features": [1.0, 8.0, 0.0, 8.0, 8.0, 0.0, 0.8, 9.0], "feature_names": ["spawn_count", "connect_count", "filewrite_count", "unique_daddr_count", "unique_dport_count", "has_full_chain", "span_s", "event_count"]}
+{"pid": 1005, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], "feature_names": ["spawn_count", "connect_count", "filewrite_count", "unique_daddr_count", "unique_dport_count", "has_full_chain", "span_s", "event_count"]}
