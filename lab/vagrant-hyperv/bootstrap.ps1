@@ -3,8 +3,8 @@
   ("Run as Administrator"). Safe to re-run.
 
     1. Enables the Hyper-V platform + PowerShell module (may need a reboot)
-    2. Adds you to "Hyper-V Administrators" (so later `vagrant` runs need only
-       elevation, not a group change — log out/in once for it to take effect)
+    2. Adds you to "Hyper-V Administrators" (so later vagrant runs need only
+       elevation, not a group change -- log out/in once for it to take effect)
     3. Installs Vagrant if missing
     4. Checks the "Default Switch" (NAT) Vagrant uses for guest networking
 #>
@@ -24,7 +24,7 @@ if ($hv.State -ne "Enabled") {
 } else { Write-Host "Already enabled." }
 
 Write-Host "== 2. Hyper-V Administrators group ==" -ForegroundColor Cyan
-$grp = (Get-LocalGroup -SID "S-1-5-32-578").Name   # localized-safe
+$grp = (Get-LocalGroup -SID "S-1-5-32-578").Name
 $me  = "$env:USERDOMAIN\$env:USERNAME"
 if (-not (Get-LocalGroupMember -Group $grp -ErrorAction SilentlyContinue | Where-Object Name -eq $me)) {
   Add-LocalGroupMember -Group $grp -Member $env:USERNAME
@@ -43,9 +43,9 @@ Write-Host "== 4. Default Switch ==" -ForegroundColor Cyan
 if (Get-VMSwitch -ErrorAction SilentlyContinue | Where-Object Name -eq "Default Switch") {
   Write-Host "'Default Switch' present (NAT)."
 } else {
-  Write-Host "No 'Default Switch' — normally auto-created by Hyper-V; a reboot after step 1 restores it." -ForegroundColor Yellow
+  Write-Host "No 'Default Switch' -- normally auto-created by Hyper-V; a reboot after step 1 restores it." -ForegroundColor Yellow
 }
 
 Write-Host "`nNext: new elevated shell -> cd here ->" -ForegroundColor Green
-Write-Host '  $env:VAGRANT_HYPERV_SWITCH = "Default Switch"' -ForegroundColor Green
+Write-Host ('  $env:VAGRANT_HYPERV_SWITCH = "Default Switch"') -ForegroundColor Green
 Write-Host "  vagrant up ubuntu2204 --provider hyperv" -ForegroundColor Green
