@@ -7,9 +7,10 @@ WSL2 lab, week 8, see `capture_to_baseline.py`) had been waiting for this script
 2026-08-27 (see git blame of `train.py`).
 
 Input format differs from the Windows baseline: `{"argv": [...]}` (list of tokens), not
-`{"cmdline": "..."}`. Rebuilt here into the same `\\0`-joined representation as
-`synthaea_schema::ExecEvent::cmdline_str` on the Rust side, so that `extract_features`
-(shared with `train.py`) produces vectors consistent with what the agent computes at runtime.
+`{"cmdline": "..."}`. Rebuilt here through `synthaea_ml.data.canonical.cmdline_str` into
+the same NUL-terminated representation as `schema::ExecEvent::ml_cmdline` on the Rust
+side, so `extract_features` (shared with `train.py`) produces the vectors the agent
+scores at runtime.
 
 Usage: `python3 train_linux.py` (from a venv with scikit-learn/skl2onnx/onnx/onnxruntime
 installed — see `ml/.venv`).
@@ -22,6 +23,7 @@ import numpy as np
 from skl2onnx import to_onnx
 from sklearn.ensemble import IsolationForest
 
+from synthaea_ml.data.canonical import ml_cmdline_from_record
 from synthaea_ml.features.cmdline import extract_features
 
 DATA_PATH_LINUX = Path(__file__).parent / "data" / "baseline_benign.jsonl"
@@ -42,17 +44,17 @@ SANITY_CHECK_SAMPLES = {
 
 
 def load_baseline() -> list[str]:
-    """Loads the Linux baseline — `{"argv": [...]}` per line — and rebuilds the `\\0`-joined
-    representation (with trailing `\\0`) expected by `extract_features`, identical to
-    `ExecEvent::cmdline_str` on the Rust side."""
+    """Loads the Linux baseline — one exec record per line (`{"argv": [...]}`, or
+    `{"cmdline": "..."}` for the Windows fallback) — and rebuilds the NUL-terminated
+    representation `extract_features` expects, identical to `ExecEvent::ml_cmdline` on
+    the Rust side."""
     if not DATA_PATH_LINUX.exists():
         raise FileNotFoundError(f"Linux baseline not found: {DATA_PATH_LINUX}")
 
     cmdlines = []
     for line in DATA_PATH_LINUX.read_text(encoding="utf-8").splitlines():
         if line.strip():
-            argv = json.loads(line)["argv"]
-            cmdlines.append("\0".join(argv) + "\0")
+            cmdlines.append(ml_cmdline_from_record(json.loads(line)))
 
     # Deduplication — keep unique cmdlines only.
     seen = set()
