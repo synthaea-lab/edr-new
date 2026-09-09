@@ -85,7 +85,13 @@ fn run_service_logic() -> anyhow::Result<()> {
         })
         .context("set_service_status RUNNING")?;
 
-    watchdog_loop(&agent, &alerts, 5, &stop_flag);
+    // Hardcoded defaults matching the CLI's own `--heartbeat-interval-secs`/
+    // `--heartbeat-miss-limit` defaults (#102): `service_main`'s argument list
+    // isn't populated on ordinary auto-start (see `parse_persisted_args`'s
+    // doc), so — same as `restart_delay` above — these can't be threaded
+    // through `binPath` without a larger change; matching the existing
+    // `restart_delay` precedent rather than introducing a new asymmetry.
+    watchdog_loop(&agent, &alerts, 5, 5, 6, &stop_flag);
 
     // Report STOPPED
     let _ = status_handle.set_service_status(ServiceStatus {
@@ -284,4 +290,3 @@ mod tests {
         assert_eq!(alerts, PathBuf::from(DEFAULT_ALERTS));
     }
 }
-</content>
