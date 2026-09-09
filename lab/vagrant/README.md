@@ -1,8 +1,8 @@
-# lab/vagrant — Vagrant Harness
+# lab/vagrant — Vagrant Harness (QEMU / Apple Silicon)
 
 One of possibly several virtualization harnesses for the lab (see `../README.md`).
 Implements the machine matrix from `../MATRIX.md`; each VM runs the shared
-provisioning from `../provisioning/`.
+provisioning from `../provisioning/`. For Windows hosts, see `../vagrant-hyperv/`.
 
 ## Host setup (macOS / Apple Silicon)
 

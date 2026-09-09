@@ -1,0 +1,49 @@
+# lab/vagrant-hyperv — Hyper-V harness (Windows hosts)
+#
+# Sibling of ../vagrant (QEMU on Apple Silicon). Same machine matrix
+# (../MATRIX.md), same provisioning (../provisioning/linux-toolchain.sh).
+# The Debian-family x86_64 rows only — see README.md for the box situation.
+#
+#   # from an ELEVATED PowerShell (the Hyper-V provider requires it):
+#   $env:VAGRANT_HYPERV_SWITCH = "Default Switch"
+#   vagrant up ubuntu2204 --provider hyperv
+#   vagrant rsync ubuntu2204        # re-push the repo after host-side edits
+#   vagrant ssh ubuntu2204
+#   vagrant destroy -f ubuntu2204   # rollback = destroy + up
+
+# name => [box, kernel it proves]. Hyper-V box availability is thin; ubuntu2404
+# (6.8) and debian13 (6.12) have no ready box — see README.md, "Missing boxes".
+LINUX_MACHINES = {
+  "ubuntu2204" => { box: "generic/ubuntu2204", primary: true }, # 5.15 — oldest LTS
+  "debian12"   => { box: "generic/debian12" },                  # 6.1  — Debian stable
+}.freeze
+
+Vagrant.configure("2") do |config|
+  # No native Hyper-V file sharing without SMB creds; rsync the repo root to
+  # /synthaea (needs an rsync on the host — Git for Windows ships one, or
+  # `winget install cwRsync`). Same contract as ../vagrant.
+  config.vm.synced_folder "../..", "/synthaea", type: "rsync",
+    rsync__exclude: [".git/", "target/", "old/", "ml/.venv/", "ml/datasets/"]
+
+  config.vm.boot_timeout = 600
+  config.ssh.insert_key = true
+
+  LINUX_MACHINES.each do |name, opts|
+    config.vm.define name, primary: opts[:primary], autostart: !!opts[:primary] do |m|
+      m.vm.box      = opts[:box]
+      m.vm.hostname = "synthaea-#{name}"
+
+      m.vm.provider "hyperv" do |hv|
+        hv.vmname                           = "synthaea-#{name}"
+        hv.cpus                             = 4
+        hv.memory                           = 4096
+        hv.maxmemory                        = 4096
+        hv.linked_clone                     = true
+        hv.enable_virtualization_extensions = false
+      end
+
+      # Provider-neutral, shared by every harness.
+      m.vm.provision "shell", path: "../provisioning/linux-toolchain.sh", privileged: false
+    end
+  end
+end
