@@ -97,7 +97,7 @@ collection layers gather — richer sources mean richer features.
 *One sensor contract; sources inventoried, never assumed.* Each track is gated only by
 its own lab.
 
-- **Linux (M2):** eBPF sources #90 uprobes · #91 lsm (also the inline-block path #25 uses) · #92 netlink · #93 journal; audit fallback #34; container #80; JA4/SNI #86; device-control telemetry #84; inventory #87; collection quality #53 CO-RE · #111 probe filename; provisioning + musl/rolling-kernel labs #113/#123/#124.
+- **Linux (M2):** eBPF sources #90 uprobes · #91 lsm (also the inline-block path #25 uses) · #92 netlink · #93 journal; audit fallback #34; container #80; JA4/SNI #86; device-control telemetry #84; inventory #87; collection quality #53 portable lineage · #111 probe filename; provisioning + musl/rolling-kernel labs #113/#123/#124.
 - **Windows (M3):** ETW #20 ✅ + P2–P8 expansion #21 · eventlog #94 · DotNET/SMB #97; the x86 lab #22; conformance matrix #35.
 - **macOS (M4):** EndpointSecurity #32 + widening #96; NetworkExtension #33; unified-log #95.
 
