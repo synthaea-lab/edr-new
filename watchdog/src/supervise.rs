@@ -1,6 +1,17 @@
 //! The supervision loop — layer 1 of kill resistance, identical on every OS: spawn
 //! the agent, watch it, respawn on exit. (Layer 2 is the service manager restarting
 //! the watchdog itself — see [`crate::service`].)
+//!
+//! Crash-loop dampening (#101): a fixed `restart_delay` alone means an agent that
+//! crashes on startup (bad config, missing rules content, a panic on a corrupt
+//! store) respawns in a tight loop forever — CPU/log/journal churn, with the
+//! service-manager layer (layer 2: `sc failure`, `RestartSec`, launchd
+//! `ThrottleInterval`) piling its own restarts on top. [`Backoff`] doubles the
+//! delay (capped) on each *fast* crash and resets to the floor once the agent
+//! has run long enough to be considered healthy again — see its doc for the
+//! exact rule. The two layers stay out of each other's way: the watchdog owns
+//! agent-level backoff here, the service manager still owns watchdog-level
+//! restart at its own fixed cadence.
 
 use std::{
     path::{Path, PathBuf},
@@ -9,13 +20,68 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
 use anyhow::Context as _;
 
 use crate::paths::{child_log_path, resolve_agent_bin};
+
+/// Below this uptime, an exit counts as a "fast crash" for [`Backoff`]
+/// purposes; at or above it, the agent ran long enough that a later crash
+/// shouldn't inherit an elevated delay.
+const FAST_CRASH_THRESHOLD: Duration = Duration::from_secs(10);
+
+/// Backoff ceiling — the issue's "up to a few minutes" (#101).
+const BACKOFF_CAP_SECS: u64 = 300;
+
+/// Exponential backoff for agent crash loops. `floor` is the existing
+/// `restart_delay` (the CLI/service default of 5s, or whatever was
+/// configured) — the backoff multiplies from it rather than replacing it, per
+/// #101's "keep the existing `restart_delay` as the floor".
+struct Backoff {
+    floor: u64,
+    current: u64,
+}
+
+/// Whether [`Backoff::record_exit`] classified an exit as a fast crash (the
+/// delay it returns is the doubled/capped backoff) or a normal long-lived
+/// exit (the delay it returns is always the floor).
+#[derive(Debug, PartialEq, Eq)]
+enum ExitClass {
+    FastCrash,
+    Healthy,
+}
+
+impl Backoff {
+    fn new(floor: u64) -> Self {
+        Self {
+            floor,
+            current: floor.max(1),
+        }
+    }
+
+    /// Records one exit after the agent ran for `uptime`, returning the delay
+    /// to sleep before the next restart and how this exit was classified.
+    ///
+    /// A fast crash (`uptime < FAST_CRASH_THRESHOLD`) returns the *current*
+    /// delay and then doubles it (capped at [`BACKOFF_CAP_SECS`]) for next
+    /// time — so consecutive fast crashes produce 5s → 10s → 20s → ... A
+    /// normal exit (`uptime >= FAST_CRASH_THRESHOLD`) resets the delay back to
+    /// the floor: a one-off crash after the agent has been healthy for a
+    /// while must not inherit a stale long delay from an earlier crash loop.
+    fn record_exit(&mut self, uptime: Duration) -> (u64, ExitClass) {
+        if uptime < FAST_CRASH_THRESHOLD {
+            let delay = self.current;
+            self.current = self.current.saturating_mul(2).min(BACKOFF_CAP_SECS);
+            (delay, ExitClass::FastCrash)
+        } else {
+            self.current = self.floor;
+            (self.floor, ExitClass::Healthy)
+        }
+    }
+}
 
 /// Restarts the agent in a loop until `stop_flag` becomes true.
 pub(crate) fn watchdog_loop(
@@ -24,19 +90,26 @@ pub(crate) fn watchdog_loop(
     restart_delay: u64,
     stop_flag: &AtomicBool,
 ) {
+    let mut backoff = Backoff::new(restart_delay);
     while !stop_flag.load(Ordering::SeqCst) {
         eprintln!("[watchdog] starting the agent...");
+        let spawn_time = Instant::now();
         let mut child = match spawn_agent(agent, alerts) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[watchdog] spawn failed: {e}. Retrying in {restart_delay}s...");
-                if !sleep_unless_stopped(stop_flag, restart_delay) {
+                // A spawn failure (missing binary, permission denied) is as
+                // much a crash loop risk as an in-process panic — feed it
+                // into the same backoff instead of hammering at a fixed
+                // interval forever.
+                let (delay, _) = backoff.record_exit(Duration::ZERO);
+                eprintln!("[watchdog] spawn failed: {e}. Retrying in {delay}s...");
+                if !sleep_unless_stopped(stop_flag, delay) {
                     return;
                 }
                 continue;
             }
         };
-        if !watch_child(&mut child, restart_delay, stop_flag) {
+        if !watch_child(&mut child, spawn_time, &mut backoff, stop_flag) {
             return;
         }
     }
@@ -72,7 +145,12 @@ fn spawn_agent(agent: &Path, alerts: &Path) -> std::io::Result<Child> {
 /// Watches one child until it exits (→ `true`: restart it) or the stop flag rises
 /// (→ `false`: kill it and end supervision). Polls in short steps to react to the
 /// stop flag quickly.
-fn watch_child(child: &mut Child, restart_delay: u64, stop_flag: &AtomicBool) -> bool {
+fn watch_child(
+    child: &mut Child,
+    spawn_time: Instant,
+    backoff: &mut Backoff,
+    stop_flag: &AtomicBool,
+) -> bool {
     loop {
         if stop_flag.load(Ordering::SeqCst) {
             let _ = child.kill();
@@ -81,8 +159,18 @@ fn watch_child(child: &mut Child, restart_delay: u64, stop_flag: &AtomicBool) ->
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                eprintln!("[watchdog] agent exited ({status}). Restarting in {restart_delay}s...");
-                return sleep_unless_stopped(stop_flag, restart_delay);
+                let uptime = spawn_time.elapsed();
+                let (delay, class) = backoff.record_exit(uptime);
+                match class {
+                    ExitClass::FastCrash => eprintln!(
+                        "[watchdog] agent exited ({status}) after {:.1}s — fast crash, backing off {delay}s...",
+                        uptime.as_secs_f64()
+                    ),
+                    ExitClass::Healthy => {
+                        eprintln!("[watchdog] agent exited ({status}). Restarting in {delay}s...");
+                    }
+                }
+                return sleep_unless_stopped(stop_flag, delay);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(500)),
             Err(e) => {
@@ -136,3 +224,76 @@ pub(crate) fn cmd_run(
     eprintln!("[watchdog] stopped.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // "Fake clock": Backoff::record_exit takes the uptime as a plain
+    // Duration rather than measuring real time itself, so these tests drive
+    // the schedule with hand-picked durations instead of real sleeps.
+
+    #[test]
+    fn fast_crashes_double_the_delay_up_to_the_cap() {
+        let mut backoff = Backoff::new(5);
+        let fast = Duration::from_secs(1);
+
+        let (d1, c1) = backoff.record_exit(fast);
+        assert_eq!((d1, c1), (5, ExitClass::FastCrash));
+        let (d2, c2) = backoff.record_exit(fast);
+        assert_eq!((d2, c2), (10, ExitClass::FastCrash));
+        let (d3, c3) = backoff.record_exit(fast);
+        assert_eq!((d3, c3), (20, ExitClass::FastCrash));
+        let (d4, _) = backoff.record_exit(fast);
+        assert_eq!(d4, 40);
+    }
+
+    #[test]
+    fn backoff_never_exceeds_the_cap() {
+        let mut backoff = Backoff::new(5);
+        let fast = Duration::from_secs(0);
+        // Enough consecutive fast crashes to run past the cap several times over.
+        let mut last = 0;
+        for _ in 0..20 {
+            let (delay, class) = backoff.record_exit(fast);
+            assert_eq!(class, ExitClass::FastCrash);
+            last = delay;
+            assert!(delay <= BACKOFF_CAP_SECS);
+        }
+        assert_eq!(last, BACKOFF_CAP_SECS);
+    }
+
+    #[test]
+    fn healthy_exit_resets_the_backoff_to_the_floor() {
+        let mut backoff = Backoff::new(5);
+        let fast = Duration::from_secs(2);
+        let healthy = Duration::from_secs(3600); // ran an hour before exiting
+
+        backoff.record_exit(fast); // -> 5s used, now at 10s
+        backoff.record_exit(fast); // -> 10s used, now at 20s
+        let (delay, class) = backoff.record_exit(healthy);
+        assert_eq!((delay, class), (5, ExitClass::Healthy));
+
+        // A later fast crash starts back at the floor, not at the inflated 20s.
+        let (delay, class) = backoff.record_exit(fast);
+        assert_eq!((delay, class), (5, ExitClass::FastCrash));
+    }
+
+    #[test]
+    fn exit_exactly_at_the_threshold_counts_as_healthy() {
+        let mut backoff = Backoff::new(5);
+        let (delay, class) = backoff.record_exit(FAST_CRASH_THRESHOLD);
+        assert_eq!((delay, class), (5, ExitClass::Healthy));
+    }
+
+    #[test]
+    fn custom_floor_is_respected() {
+        let mut backoff = Backoff::new(30);
+        let fast = Duration::from_secs(0);
+        let (d1, _) = backoff.record_exit(fast);
+        assert_eq!(d1, 30);
+        let (d2, _) = backoff.record_exit(fast);
+        assert_eq!(d2, 60);
+    }
+}
+</content>
