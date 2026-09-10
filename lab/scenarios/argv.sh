@@ -25,6 +25,12 @@
 # Note: a process that exits within the drain latency (a few ms) legitimately shows
 # an empty argv — the accepted race of the userspace read. The `sh -c` pipeline here
 # lives long enough that the read is reliable.
+#
+# Scope: this asserts *capture fidelity* for a cooperative process, not tamper
+# resistance. `/proc/<pid>/cmdline` is read at drain time, not at execve, so a process
+# that rewrites its own argv region before the read can spoof what a cmdline-substring
+# rule sees. That is a known gap of the userspace read (see `read_proc_cmdline`), out
+# of scope here — `image_path` stays authoritative regardless.
 
 set -euo pipefail
 
