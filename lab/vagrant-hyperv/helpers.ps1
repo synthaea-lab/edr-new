@@ -83,11 +83,27 @@ function vsync {
   vagrant rsync $m
 }
 
+function Invoke-LabRemote {
+  <#
+    Run a bash snippet in the guest. The snippet is base64'd and decoded inside
+    the VM so it survives untouched through PowerShell's native-arg parser,
+    vagrant, and ssh -- otherwise embedded quotes / `$(...)` / leading-dash
+    tokens (`curl -fSL ...`) get mangled and vagrant rejects them as options.
+    ~/.cargo/env is sourced first; the snippet sets its own `set -e` if it wants
+    fail-fast (vbuild does, vscen deliberately does not).
+  #>
+  param([string]$Machine, [string]$Script)
+  $m = Get-LabMachine $Machine
+  $full = "source ~/.cargo/env 2>/dev/null || true`n" + $Script
+  $b64  = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($full))
+  vagrant ssh $m -c "echo $b64 | base64 -d | bash"
+}
+
 function vssh {
-  <# Interactive shell, or `vssh ubuntu2204 'cmd'` to run one command. #>
+  <# Interactive shell, or `vssh ubuntu2204 'cmd; cmd'` to run a bash snippet. #>
   param([string]$Machine, [string]$Command)
   $m = Get-LabMachine $Machine
-  if ($Command) { vagrant ssh $m -c $Command } else { vagrant ssh $m }
+  if ($Command) { Invoke-LabRemote $m $Command } else { vagrant ssh $m }
 }
 
 function vhalt {
@@ -105,17 +121,23 @@ function vreset {
 }
 
 function vbuild {
-  <# Release build of the agent inside the VM. #>
+  <#
+    Release build of the agent inside the VM. Fails fast if bpf-linker is not on
+    PATH -- without it the build silently omits the eBPF probes and the agent
+    errors at runtime ("built without embedded eBPF probes").
+  #>
   param([string]$Machine)
-  $m = Get-LabMachine $Machine
-  vagrant ssh $m -c 'cd /synthaea && source ~/.cargo/env && cargo build --release -p agent'
+  Invoke-LabRemote (Get-LabMachine $Machine) @'
+set -e
+command -v bpf-linker >/dev/null || { echo "bpf-linker NOT on PATH -- run: vagrant provision" >&2; exit 1; }
+cd /synthaea && cargo build --release -p agent
+'@
 }
 
 function vstatus {
   <# Verifier check: loads all sensor programs and reports (needs a prior vbuild). #>
   param([string]$Machine)
-  $m = Get-LabMachine $Machine
-  vagrant ssh $m -c 'cd /synthaea && sudo ./target/release/agent status'
+  Invoke-LabRemote (Get-LabMachine $Machine) 'cd /synthaea && sudo ./target/release/agent status'
 }
 
 function vscen {
@@ -131,17 +153,16 @@ function vscen {
     [string]$Machine
   )
   $m = Get-LabMachine $Machine
-  $grepStep = if ($Grep) { "grep $Grep /tmp/a" } else { "cat /tmp/a" }
-  $remote = @"
+  $grepStep = if ($Grep) { "grep $Grep /tmp/a || echo '(no match for $Grep)'" } else { "cat /tmp/a" }
+  Invoke-LabRemote $m @"
 cd /synthaea
 sudo env RUST_LOG=sensor_linux=info ./target/release/agent run --alerts /tmp/a --events /tmp/e &
 sleep 4
 bash lab/scenarios/$Scenario.sh
 sleep 2
-sudo pkill -f 'agent run'
+sudo pkill -f 'agent run' || true
 $grepStep
 "@
-  vagrant ssh $m -c $remote
 }
 
 Write-Host "lab helpers loaded: vprep vup vsync vssh vhalt vreset vbuild vstatus vscen  (default machine: $LabMachine)" -ForegroundColor Green
