@@ -66,9 +66,11 @@ run_scenario argv
 n=$(count '"T1059.004"' "$A")
 echo "  T1059.004 (base64 decode) alerts: ${n:-0}   (expect >= 3)"
 [ "${n:-0}" -ge 3 ] || { cat "$A" 2>/dev/null; fail "argv/cmdline NOT captured from /proc/<pid>/cmdline on $KREL — #152 regressed"; }
-# The cooperative process the scenario guarantees outlives the drain: its full
-# argv must be on the exec event. This is the actual "#152 argv is correct" check.
-shargv=$(count '"argv":\["sh","-c","echo ' "$E")
+# The cooperative process the scenario holds open past the drain (the `sleep 0.2`
+# prefix in argv.sh): its full argv must be on the exec event. This is the actual
+# "#152 argv is correct" check. Match the sleep-prefixed form so the cron `sh -c`
+# that may fire mid-run (debian-sa1) is not counted.
+shargv=$(count '"argv":\["sh","-c","sleep 0.2; echo ' "$E")
 echo "  sh -c events with full argv:       ${shargv:-0}   (expect >= 3)"
 [ "${shargv:-0}" -ge 3 ] || { grep '"comm":"sh"' "$E" 2>/dev/null; fail "the cooperative sh -c argv was not captured on $KREL — #152 regressed"; }
 # Short-lived children (uname from the scenario's own `$(uname -r)`, a fast

@@ -23,8 +23,10 @@
 # space-joined `cmdline`, not an empty vector.
 #
 # Note: a process that exits within the drain latency (a few ms) legitimately shows
-# an empty argv — the accepted race of the userspace read. The `sh -c` pipeline here
-# lives long enough that the read is reliable.
+# an empty argv — the accepted race of the userspace read. A bare `echo | base64`
+# pipeline is gone in ~1-2 ms and loses that race under load (observed on 6.1 in the
+# Hyper-V lab), so the `sh -c` here begins with `sleep 0.2` to hold the process open
+# well past the drain — this scenario measures capture fidelity, not the race.
 #
 # Scope: this asserts *capture fidelity* for a cooperative process, not tamper
 # resistance. `/proc/<pid>/cmdline` is read at drain time, not at execve, so a process
@@ -39,7 +41,7 @@ PAYLOAD='ZWNobyBoZWxsbwo='  # "echo hello\n"
 
 echo "Running $ITERATIONS shell invocations with a base64 decode in argv..."
 for i in $(seq 1 "$ITERATIONS"); do
-    sh -c "echo $PAYLOAD | base64 -d >/dev/null"
+    sh -c "sleep 0.2; echo $PAYLOAD | base64 -d >/dev/null"
     echo "  iteration $i done"
     sleep 1
 done
