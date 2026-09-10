@@ -60,13 +60,16 @@ not `sudo VAR=... cmd` — the default sudoers env policy drops the latter.
 
 ## Missing boxes (6.8 / 6.12)
 
-`ubuntu2404` (6.8) and `debian13` (6.12) have **no ready Hyper-V Vagrant box**
+`ubuntu2404` (6.8) and `debian13` (6.12) have **no usable Hyper-V Vagrant box**
 (`bento/*` dropped Hyper-V; `generic/*` covers only some releases). Options:
 
-- **`boxen/ubuntu-24.04`** ships a Hyper-V provider (low download count — your
-  call on trusting a third-party box for a lab VM);
+- ~~`boxen/ubuntu-24.04`~~ — has a Hyper-V provider but was **tried and
+  rejected**: prompts for Windows SMB credentials on every `up` (its `/vagrant`
+  is an SMB share) and ships a root disk too small for the Rust + LLVM toolchain
+  (provisioning dies with `No space left on device`);
 - build a box from the official cloud image (`qemu-img convert -O vhdx`, add a
-  `vagrant` user + the insecure key, `vagrant box add`) — ~an evening;
+  `vagrant` user + the insecure key, `vagrant box add`) — ~an evening — this is
+  now the remaining path for these two rows;
 - or run those two rows on the `../vagrant` (arm64) harness / Florian's matrix.
 
 5.15 is the strictest verifier of the four, so `ubuntu2204` + `debian12` catch
