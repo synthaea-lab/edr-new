@@ -2,44 +2,104 @@
 
 **Component:** `server/ops`
 **Branch:** `feat/83-ops-dashboard`
-**Status:** Blocked (depends on #28, #134)
+**Status:** BLOCKED — depends on #28 (server scaffold) and #134 (agent health telemetry)
 
-## Summary
+---
 
-Build the fleet operations dashboard — the operator's view of fleet health, telemetry
-accounting, rollout control, and ingest health. An EDR that cannot see its own health
-degrades silently.
+## Résumé Exécutif
 
-## Acceptance Criteria
+Dashboard d'opérations pour visualiser la santé de la flotte EDR en temps réel: agents actifs/silencieux, état des capteurs, compteurs de perte de télémétrie, contrôle de rollout, et santé d'ingestion.
+
+### Dépendances Critiques
+
+**Issue #28: Server Scaffold (Next.js + PostgreSQL)** — BLOQUANT
+- Status: OPEN, pas démarré
+- Requis: Next.js setup, PostgreSQL, endpoint `/api/ingest/health`, auth
+- Sans #28, impossible de commencer #83
+
+**Issue #134: Agent Health Telemetry** — REQUIS
+- Status: PR #157 OPEN, MERGEABLE ✅
+- Fournit: `HealthBeacon` structure (agent version, sensors status, loss counters)
+- Reste à faire: intégrer transport (#24), câbler dans agent main loop
+
+### Flux de Données (Agent → Server → Dashboard)
+
+```
+Agent (HealthCollector #134)
+  ├─ Collecte toutes les 30s:
+  │   ├─ SensorHealth (name, pulse_count, silent)
+  │   ├─ spool_bytes, spool_dropped (EventSpool #108)
+  │   └─ enrich_dropped (EnrichQueue)
+  └─► Émet HealthBeacon via Transport (#24)
+        │
+        ▼
+Server (#28 + #83)
+  ├─ POST /api/ingest/health (reçoit HealthBeacon)
+  ├─ Stocke: agent_health_beacons + sensor_health tables
+  ├─ Background job: détecte agents silencieux
+  └─ GET /api/ops/* (queries pour dashboard)
+        │
+        ▼
+Dashboard UI (#83)
+  ├─ /ops — Fleet overview (agents par statut)
+  ├─ /ops/agents/[id] — Agent detail (sensors, loss counters)
+  ├─ /ops/loss — Telemetry accounting (fleet-wide)
+  └─ /ops/rollout — Ring status + version spread
+```
+
+### Schema PostgreSQL (mappé sur #134)
+
+```sql
+CREATE TABLE agent_health_beacons (
+    id BIGSERIAL PRIMARY KEY,
+    agent_id UUID NOT NULL,
+    timestamp_ns BIGINT NOT NULL,      -- HealthBeacon.timestamp_ns
+    agent_version TEXT NOT NULL,       -- HealthBeacon.agent_version
+    spool_bytes BIGINT NOT NULL,       -- HealthBeacon.spool_bytes
+    spool_dropped BIGINT NOT NULL,     -- HealthBeacon.spool_dropped
+    enrich_dropped BIGINT NOT NULL,    -- HealthBeacon.enrich_dropped
+    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE sensor_health (
+    id BIGSERIAL PRIMARY KEY,
+    beacon_id BIGINT NOT NULL REFERENCES agent_health_beacons(id),
+    name TEXT NOT NULL,                -- SensorHealth.name
+    pulse_count BIGINT NOT NULL,       -- SensorHealth.pulse_count
+    silent BOOLEAN NOT NULL            -- SensorHealth.silent
+);
+```
+
+### Acceptance Criteria
 
 - [ ] Dashboard shows lab fleet health incl. per-host loss counters
 - [ ] Killing a sensor on one VM is visible (capability degraded) within a heartbeat
 - [ ] Ring status reflects a content rollout with halt state
 
-## Dependencies
+### Next Steps
 
-### Critical Blockers
+1. **PRIORITÉ 1:** Merge PR #157 (Agent health telemetry)
+2. **PRIORITÉ 2:** Démarrer Issue #28 (Server scaffold)
+3. Une fois #28 + #134 complétés → implémenter #83
+
+---
+
+## Documentation Détaillée
+
+### Dependencies
 
 #### Issue #28: Scaffold server (Next.js + PostgreSQL)
 **Status:** OPEN
-**Why needed:**
-- Next.js App Router + TypeScript base
-- PostgreSQL schema + migrations
-- Ingest route handlers for receiving agent data
-- docker-compose dev environment
 
 **What #83 needs from #28:**
 - `/api/ingest/health` endpoint to receive HealthBeacon from agents
-- Database schema for storing agent health state
-- Authentication/authorization for ops dashboard routes
-- Base UI layout and routing structure
+- Database schema for storing agent health state (agent_health_beacons, sensor_health)
+- Authentication/authorization (mTLS for agents, user session for dashboard)
+- Base UI layout and routing structure (Next.js App Router)
+- docker-compose dev environment
 
 #### Issue #134: Agent Health Telemetry
 **Status:** PR #157 open, mergeable
-**Why needed:**
-- HealthBeacon data structure (agent_version, sensors, spool stats)
-- SensorHealth data (name, pulse_count, silent flag)
-- Periodic health beacon emission from agents
 
 **What #83 needs from #134:**
 ```rust
@@ -66,19 +126,19 @@ pub struct SensorHealth {
 3. Dashboard queries for latest beacon per agent + time-series data
 4. Server-side alerting on beacon silence (agent stopped beaconing)
 
-### Related Issues
+#### Related Issues
 
 - **Issue #108:** EventSpool two-phase drain/ack (PR #156)
   - Provides spool stats (spool_bytes, spool_dropped) for telemetry accounting
-  - Dashboard will surface per-host and fleet-wide spool drop counts
+  - Dashboard surfaces per-host and fleet-wide spool drop counts
 
 - **Issue #24:** Transport mTLS (PR #158)
   - Health beacons flow through transport layer to server
   - Dashboard needs agent identity from mTLS enrollment
 
-## Features
+### Features
 
-### 1. Agent Health View
+#### 1. Agent Health View
 
 **Data sources:**
 - `HealthBeacon` from agents (via #134)
@@ -102,7 +162,7 @@ pub struct SensorHealth {
 - Watchdog restart spike
 - Tamper event detected
 
-### 2. Telemetry Accounting
+#### 2. Telemetry Accounting
 
 **Observable-loss counters:**
 - Per-agent:
@@ -110,7 +170,6 @@ pub struct SensorHealth {
   - `enrich_dropped` (from HealthBeacon)
   - Scan-queue sheds (future: needs agent instrumentation)
   - Bounded-map evictions (future: needs agent instrumentation)
-  - Ring-buffer drops (future: needs agent instrumentation)
 
 - Fleet-wide aggregations:
   - Total loss counters across fleet
@@ -122,13 +181,7 @@ pub struct SensorHealth {
 - Sudden spike in loss counters → capacity issue
 - Persistent high loss on single host → local resource issue
 
-**UI Components:**
-- Loss counter dashboard with time-series graphs
-- Per-host loss breakdown table
-- Fleet-wide loss trends
-- Alerting rules configuration
-
-### 3. Rollout Control
+#### 3. Rollout Control
 
 **Data sources:**
 - Agent version from HealthBeacon
@@ -137,22 +190,11 @@ pub struct SensorHealth {
 - Model version distribution status
 
 **UI Components:**
-- Ring status table:
-  - Ring name
-  - Binary version target vs actual spread
-  - Content version target vs actual spread
-  - Model version target vs actual spread
-  - Agent count per version
+- Ring status table: ring name, version target vs actual spread, agent count
 - Rollout halt/rollback controls
 - Canary health monitoring (cross-ref with health metrics)
 
-**Workflow:**
-- Start rollout → agents in ring X pull new version
-- Monitor health beacons for regressions
-- Auto-halt on anomaly (watchdog restart spike, sensor silent, loss spike)
-- Manual rollback if needed
-
-### 4. Ingest Health
+#### 4. Ingest Health
 
 **Metrics:**
 - Event ingest rate (events/sec by type)
@@ -160,55 +202,9 @@ pub struct SensorHealth {
 - Per-tenant quotas and usage
 - Queue depths (if applicable)
 
-**UI Components:**
-- Ingest rate time-series graph
-- Lag histogram
-- Tenant quota usage table
-- Queue depth gauges
+### Technical Design
 
-## Technical Design
-
-### Database Schema (PostgreSQL)
-
-```sql
--- Agent health beacons (time-series)
-CREATE TABLE agent_health_beacons (
-    id BIGSERIAL PRIMARY KEY,
-    agent_id UUID NOT NULL REFERENCES agents(id),
-    timestamp_ns BIGINT NOT NULL,
-    agent_version TEXT NOT NULL,
-    spool_bytes BIGINT NOT NULL,
-    spool_dropped BIGINT NOT NULL,
-    enrich_dropped BIGINT NOT NULL,
-    received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(agent_id, timestamp_ns)
-);
-CREATE INDEX idx_beacons_agent_time ON agent_health_beacons(agent_id, timestamp_ns DESC);
-
--- Sensor health (child records of beacon)
-CREATE TABLE sensor_health (
-    id BIGSERIAL PRIMARY KEY,
-    beacon_id BIGINT NOT NULL REFERENCES agent_health_beacons(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    pulse_count BIGINT NOT NULL,
-    silent BOOLEAN NOT NULL
-);
-CREATE INDEX idx_sensor_health_beacon ON sensor_health(beacon_id);
-
--- Agent registry (from enrollment, simplified view)
-CREATE TABLE agents (
-    id UUID PRIMARY KEY,
-    hostname TEXT NOT NULL,
-    enrolled_at TIMESTAMPTZ NOT NULL,
-    last_seen TIMESTAMPTZ,
-    mtls_cert_fingerprint TEXT NOT NULL,
-    ring TEXT, -- rollout ring assignment
-    UNIQUE(mtls_cert_fingerprint)
-);
-CREATE INDEX idx_agents_last_seen ON agents(last_seen DESC);
-```
-
-### API Routes
+#### API Routes
 
 ```typescript
 // server/app/api/ingest/health/route.ts
@@ -232,7 +228,7 @@ CREATE INDEX idx_agents_last_seen ON agents(last_seen DESC);
 // Authentication: user session (ops role required)
 ```
 
-### UI Pages
+#### UI Pages
 
 ```
 server/app/ops/
@@ -252,101 +248,139 @@ server/app/ops/
     └── page.tsx               # Ingest health metrics
 ```
 
-### React Components (Sketches)
+#### Critical Queries
 
-```typescript
-// components/ops/FleetHealthOverview.tsx
-// - Agent count by status (healthy, degraded, silent)
-// - Time-series of fleet health
-// - Recent alerts list
+**Fleet health overview:**
+```sql
+-- Latest beacons per agent
+SELECT DISTINCT ON (agent_id)
+    agent_id,
+    timestamp_ns,
+    agent_version,
+    spool_dropped,
+    enrich_dropped,
+    received_at
+FROM agent_health_beacons
+ORDER BY agent_id, timestamp_ns DESC;
 
-// components/ops/AgentHealthCard.tsx
-// - Agent hostname, version, last seen
-// - Sensor status badges (green/yellow/red)
-// - Loss counter summary
-// - Link to detail view
-
-// components/ops/SensorStatusTable.tsx
-// - Table: sensor name, pulse_count, silent flag, status badge
-// - Sortable, filterable
-
-// components/ops/LossCounterChart.tsx
-// - Time-series line chart: spool_dropped, enrich_dropped
-// - Per-agent and fleet-wide views
-
-// components/ops/RolloutStatusTable.tsx
-// - Table: ring, target version, actual spread, agent count
-// - Halt/rollback action buttons
+-- Count agents by status
+WITH latest AS (...)
+SELECT
+    COUNT(*) FILTER (WHERE received_at > NOW() - INTERVAL '60 seconds') AS healthy,
+    COUNT(*) FILTER (WHERE received_at BETWEEN NOW() - INTERVAL '5 minutes'
+                                          AND NOW() - INTERVAL '60 seconds') AS degraded,
+    COUNT(*) FILTER (WHERE received_at < NOW() - INTERVAL '5 minutes') AS silent
+FROM latest;
 ```
 
-## Implementation Plan
+**Sensor status per agent:**
+```sql
+SELECT
+    sh.name,
+    sh.pulse_count,
+    sh.silent,
+    b.timestamp_ns
+FROM sensor_health sh
+JOIN agent_health_beacons b ON sh.beacon_id = b.id
+WHERE b.agent_id = $1
+ORDER BY b.timestamp_ns DESC
+LIMIT 10;
+```
 
-### Phase 1: Foundation (depends on #28 landing)
+**Loss counter aggregation:**
+```sql
+-- Fleet-wide loss over last hour
+SELECT
+    SUM(spool_dropped) as total_spool_dropped,
+    SUM(enrich_dropped) as total_enrich_dropped,
+    COUNT(*) as beacon_count
+FROM agent_health_beacons
+WHERE received_at > NOW() - INTERVAL '1 hour';
+```
+
+### Implementation Plan
+
+#### Phase 1: Foundation (depends on #28 landing)
 1. Database migrations for agent_health_beacons, sensor_health, agents tables
 2. `/api/ingest/health` endpoint to receive HealthBeacon
 3. Background job to detect beacon silence (server-side)
 4. Basic agent registry (enrollment creates agent record)
 
-### Phase 2: Fleet Health Dashboard
+#### Phase 2: Fleet Health Dashboard
 1. `/ops` page layout and navigation
 2. `/ops/agents` list view with last-seen timestamps
 3. `/ops/agents/[id]` detail view with sensor status table
 4. Fleet health overview component (agent count by status)
 5. Real-time updates (polling or websocket)
 
-### Phase 3: Telemetry Accounting
+#### Phase 3: Telemetry Accounting
 1. Loss counter aggregation queries
 2. `/ops/loss` dashboard with time-series charts
 3. Anomaly detection rules (configurable thresholds)
 4. Alerting on loss spikes
 
-### Phase 4: Rollout Control
+#### Phase 4: Rollout Control
 1. Ring assignment schema + API
 2. `/ops/rollout` ring status table
 3. Version spread calculation (actual vs target)
 4. Halt/rollback controls
 
-### Phase 5: Ingest Health
+#### Phase 5: Ingest Health
 1. Ingest metrics collection (event rate, lag)
 2. `/ops/ingest` dashboard
 3. Per-tenant quota tracking
 
-## Testing Strategy
+### Testing Strategy
 
-### Integration Tests
+#### Integration Tests
 - Agent sends HealthBeacon → stored in DB → appears in dashboard
 - Sensor goes silent → dashboard shows red status within 1 heartbeat
 - Agent stops beaconing → server detects silence → alert fires
 
-### E2E Tests (Playwright)
+#### E2E Tests (Playwright)
 - Navigate to /ops → see fleet overview
 - Click agent → see detail view with sensor table
 - Kill sensor on test VM → verify degraded status appears
 - Rollout to ring → verify version spread updates
 
-### Load Tests
+#### Load Tests
 - 1000 agents sending beacons every 30s → DB write load
 - Dashboard query performance with 1000+ agents
 
-## Monitoring & Observability
+### Risks and Mitigations
 
-- Ingest endpoint latency (p50, p99)
-- Database query performance (slow query log)
-- Beacon gap alerts (how many agents silent)
-- Dashboard page load time
-- Alerting rule evaluation lag
+**Risk 1: #28 not started yet**
+- Impact: Blocks all #83 implementation
+- Mitigation: Prioritize #28, deliver incrementally (ingest endpoint first)
 
-## Security Considerations
+**Risk 2: Performance with 1000+ agents × 2 beacons/min**
+- Impact: 120k inserts/hour
+- Mitigation: Batch inserts, table partitioning, auto-purge (30 days), optimized indexes
 
-- Ops dashboard requires authenticated user session (not agent mTLS)
-- RBAC: ops role required to access /ops routes
-- Rate limiting on ingest endpoint (per agent)
-- SQL injection prevention (parameterized queries)
-- XSS prevention (sanitize agent-provided strings in UI)
+**Risk 3: #134 not wired in agent yet**
+- Impact: No data to test dashboard
+- Mitigation: Create mock data generator, test with synthetic beacons
 
-## Open Questions
+**Risk 4: Dashboard query latency**
+- Impact: Degraded UX
+- Mitigation: Materialized views, caching (Redis), incremental updates
 
-1. **Beacon retention policy:** How long to keep health beacons in DB?
+### Success Metrics
+
+**Performance Targets:**
+- Beacon ingestion latency: < 100ms p99
+- Dashboard page load: < 2s
+- Fleet overview update: < 500ms
+- Support: 1000 agents @ 2 beacons/min
+
+**Observability:**
+- Ingest endpoint error rate < 0.1%
+- Silence detection lag < 60s
+- Dashboard query time < 200ms p95
+
+### Open Questions
+
+1. **Beacon retention:** How long to keep raw beacons in DB?
    - Proposal: 30 days raw, then downsample to hourly aggregates for 1 year
 
 2. **Real-time updates:** Polling vs WebSocket for dashboard?
@@ -358,23 +392,11 @@ server/app/ops/
 4. **Multi-tenancy:** Ops dashboard per tenant or global (for MSP)?
    - Proposal: Per-tenant by default (filter by tenant_id), global view for admin
 
-## Documentation Needed
+### Related Code Locations
 
-- Ops dashboard user guide (screenshots, workflows)
-- Alerting rules configuration guide
-- Rollout procedure runbook
-- Beacon silence troubleshooting guide
-
-## Related Code Locations
-
-- Agent health beacon implementation: `agent/src/health.rs` (from #134)
+- Agent health beacon: `agent/src/health.rs` (from #134)
 - Schema types: `crates/schema/src/lib.rs` (HealthBeacon, SensorHealth)
 - Tamper detection: `crates/tamper/src/heartbeat.rs` (SilenceMonitor)
 - Spool stats: `crates/store/src/spool.rs` (from #108)
-
-## Notes
-
-- This is a foundational feature — visibility into fleet health is critical
-- The dashboard design should prioritize operator efficiency (glanceable status)
-- Anomaly detection rules must be tunable (different fleets have different baselines)
-- Loss counters are "observable loss" — we know we dropped, we just report it honestly
+- Server README: `server/README.md`
+- ADR-0001: `docs/adr/0001-server-stack-nextjs-postgres.md`
