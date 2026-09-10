@@ -13,7 +13,9 @@ cd /synthaea
 source "$HOME/.cargo/env"
 
 echo "== cargo fmt --check =="
-cargo fmt --all --check && echo "  fmt OK" || { echo "  FMT ISSUES ^"; FAIL=1; }
+# rustfmt.toml sets unstable options (group_imports, imports_granularity) — stable
+# rustfmt ignores them and reports spurious diffs, so format-check on nightly.
+cargo +nightly fmt --all --check && echo "  fmt OK" || { echo "  FMT ISSUES ^"; FAIL=1; }
 
 echo
 echo "== clippy (workspace, minus sensor-linux-ebpf — same as CI) =="
@@ -24,7 +26,7 @@ CLIPPY=${PIPESTATUS[0]}
 
 echo
 echo "== sensor-linux-ebpf: fmt only (clippy needs the bpfel target) =="
-cargo fmt -p sensor-linux-ebpf --check && echo "  ebpf fmt OK" || { echo "  ebpf FMT ISSUES ^"; FAIL=1; }
+cargo +nightly fmt -p sensor-linux-ebpf --check && echo "  ebpf fmt OK" || { echo "  ebpf FMT ISSUES ^"; FAIL=1; }
 
 echo
 [ -z "${FAIL:-}" ] && echo "[LINT PASS]" || { echo "[LINT FAIL]"; exit 1; }
