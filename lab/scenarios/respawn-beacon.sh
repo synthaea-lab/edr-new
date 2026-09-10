@@ -21,7 +21,8 @@
 #   3) expected IF the rule works as documented:
 #      T1059/T1071 — pid=...: N spawns + network connection — automatic respawn with suspected beaconing
 #      expected IF the hypothesis above is confirmed: no respawn alert, only the
-#      BEACON/SELF-SPAWN alerts (validated in the old lab on 2026-08-25).
+#      BEACON alert (validated in the old lab on 2026-08-25). The `rules` SELF-SPAWN
+#      alert is Windows-only since #159 and no longer fires here.
 
 set -euo pipefail
 
