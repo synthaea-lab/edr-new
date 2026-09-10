@@ -11,14 +11,23 @@
 #   vagrant ssh ubuntu2204
 #   vagrant destroy -f ubuntu2204   # rollback = destroy + up
 
-# name => [box, kernel it proves]. Hyper-V box availability is thin; ubuntu2404
-# (6.8) and debian13 (6.12) have no ready box — see README.md, "Missing boxes".
+# name => [box, kernel it proves]. Hyper-V box availability is thin: the
+# generic/* boxes only cover 5.15 and 6.1. ubuntu2404 (6.8) and debian13 (6.12)
+# have no usable Hyper-V box — boxen/ubuntu-24.04 was tried and rejected (SMB
+# /vagrant prompt + a root disk too small for the toolchain). See README.md
+# "Missing boxes"; a home-built box is the remaining option.
 LINUX_MACHINES = {
   "ubuntu2204" => { box: "generic/ubuntu2204", primary: true }, # 5.15 — oldest LTS
   "debian12"   => { box: "generic/debian12" },                  # 6.1  — Debian stable
 }.freeze
 
 Vagrant.configure("2") do |config|
+  # Force rsync for every synced folder — some boxes default /vagrant to an SMB
+  # share, which prompts for Windows credentials on every `up`. We use only the
+  # rsync /synthaea folder below.
+  config.vm.allowed_synced_folder_types = ["rsync"]
+  config.vm.synced_folder ".", "/vagrant", disabled: true
+
   # No native Hyper-V file sharing without SMB creds; rsync the repo root to
   # /synthaea (needs an rsync on the host — Git for Windows ships one, or
   # `winget install cwRsync`). Same contract as ../vagrant.
