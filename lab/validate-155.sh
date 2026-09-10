@@ -25,7 +25,8 @@ ok()   { echo "[ok]   $*"; }
 count() { grep -c "$@" 2>/dev/null | head -1; }
 
 echo; echo "== build (agent + sensor-linux, pulls the eBPF probes) =="
-cargo build --release -p agent -p sensor-linux 2>&1 | tail -5 || fail "build failed on $KREL"
+# No pipe — a cold build is minutes long and `| tail` would hide all progress.
+cargo build --release -p agent -p sensor-linux || fail "build failed on $KREL"
 
 echo; echo "== BTF =="
 [ -r /sys/kernel/btf/vmlinux ] || fail "no /sys/kernel/btf/vmlinux — eBPF sensor cannot attach on $KREL"
@@ -38,7 +39,8 @@ acc=$(count 'accepted by the verifier' /tmp/v155-status.txt)
 ok "$acc/5 programs accepted"
 
 echo; echo "== unit tests (normalize + parse_proc_cmdline + /proc stat) =="
-cargo test -p sensor-linux -p sensor-linux-wire 2>&1 | tail -8 || fail "unit tests failed on $KREL"
+cargo test -p sensor-linux -p sensor-linux-wire 2>&1 | grep -E 'running [0-9]+ test|test result|^test .* FAILED' \
+  || fail "unit tests failed on $KREL"
 
 # --- scenario runner -------------------------------------------------------
 run_scenario() {   # $1 = scenario base name under lab/scenarios/

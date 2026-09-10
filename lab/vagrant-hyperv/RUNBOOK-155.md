@@ -30,10 +30,14 @@ Replace `MACHINE` with `ubuntu2204` **or** `debian12`.
 vprep                                  # wsl --shutdown + rsync check + free-RAM warning
 vup MACHINE                            # ~5 min: boot + provisioning (rust + bpf-linker); answer "1" at the switch prompt
 
-# systemd-resolved's 127.0.0.53 stub is flaky on Default Switch — point resolv.conf at the real file
-vssh MACHINE 'sudo ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf'
+# DNS on the Default Switch is flaky. Ubuntu has the systemd-resolved 127.0.0.53
+# stub; on the generic/debian12 box /etc/resolv.conf is sometimes absent entirely.
+# Drop any symlink and pin public resolvers — works on both:
+vssh MACHINE 'test -L /etc/resolv.conf && sudo rm -f /etc/resolv.conf; printf "nameserver 1.1.1.1\nnameserver 8.8.8.8\n" | sudo tee /etc/resolv.conf >/dev/null'
+vssh MACHINE 'getent hosts static.rust-lang.org >/dev/null && echo "DNS ok"'
 
-# the repo is already at /synthaea (rsynced at boot); run the validator in place
+# the repo is already at /synthaea (rsynced at boot); run the validator in place.
+# first run on a fresh VM is a cold build — several minutes, no output until done.
 vssh MACHINE 'bash /synthaea/lab/validate-155.sh'
 ```
 
