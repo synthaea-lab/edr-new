@@ -36,7 +36,14 @@ Vagrant.configure("2") do |config|
       m.vm.provider "hyperv" do |hv|
         hv.vmname                           = "synthaea-#{name}"
         hv.cpus                             = 4
-        hv.memory                           = 4096
+        # Dynamic memory: maxmemory > memory makes vagrant-hyperv enable Hyper-V
+        # Dynamic Memory with `memory` as the startup/minimum and `maxmemory` as
+        # the ceiling. Hyper-V only needs the startup amount free at boot, then
+        # balloons up under load — a static 4096 fails with 0x800705AA on a 16 GB
+        # host once a browser/IDE is open (only ~3 GB free even after
+        # `wsl --shutdown`). The toolchain build still gets up to 4 GB when the
+        # host can spare it.
+        hv.memory                           = 1024
         hv.maxmemory                        = 4096
         hv.linked_clone                     = true
         hv.enable_virtualization_extensions = false

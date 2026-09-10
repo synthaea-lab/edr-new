@@ -38,8 +38,12 @@ vagrant destroy -f ubuntu2204                     # rollback = destroy + up
 
 The repo root is rsynced one-way to `/synthaea` (needs an `rsync` on the host —
 Git for Windows ships one at `C:\Program Files\Git\usr\bin\rsync.exe`, or
-`winget install cwRsync`). RAM: the boxes ask for 4 GB each — bring one machine
-up at a time on a 16 GB host, and `wsl --shutdown` first if WSL is hogging memory.
+`winget install cwRsync`). RAM: the boxes use Hyper-V Dynamic Memory, 1 GB
+startup up to 4 GB — bring one machine up at a time, and `wsl --shutdown` first
+(`helpers.ps1` `vprep` does this). If `vagrant up` still dies with `0x800705AA`
+("Ressources système insuffisantes" / cannot allocate RAM), the host has under
+~1.5 GB free — close a browser/IDE and retry; the VM balloons back up to 4 GB
+for the build once memory frees up.
 
 ## Build + test in the VM
 
