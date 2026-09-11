@@ -12,6 +12,7 @@ To migrate from `old/lab` after review:
 | `dropper-chain.sh` | Download → write → execute chain | download-then-exec, T1105 correlation |
 | `respawn-beacon.sh` | Beacon that respawns when killed | BEACON + SELF-SPAWN, case continuity |
 | `lineage.sh` | Web-server-named process spawns a shell | T1059 — asserts eBPF parent lineage (ppid/parent_comm) is correct on every kernel row (#53) |
+| `argv.sh` | Shell one-liner with a base64 decode in its arguments | T1059.004 — asserts argv/cmdline capture (`/proc/<pid>/cmdline`) is correct on every kernel row (#152) |
 | `dns-exfil.sh` | Data chunked into high-entropy DNS subdomains | T1048.003/T1071.004 correlation (Windows agent only — no Linux DNS sensor yet) |
 
 New scenarios follow the same shape: one script, one documented expectation list,
