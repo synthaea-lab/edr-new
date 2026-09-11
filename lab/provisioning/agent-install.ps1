@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Installs an already-built agent (+ watchdog, + rules content) into a lab
-    Windows VM for scenario runs (#22) — the Windows counterpart of just
+    Windows VM for scenario runs (#22) - the Windows counterpart of just
     `cargo build`-ing in place on the Linux side (see ../vagrant/README.md):
     a Windows lab machine can receive a binary built elsewhere (another VM,
     or a host with the toolchain already set up) instead of provisioning the
@@ -11,14 +11,14 @@
 .DESCRIPTION
     Provider-neutral: takes no harness-specific assumptions about how the
     build output got onto this machine (winrm file copy, a synced folder, a
-    manually copied zip) — just a source to copy from. Idempotent: re-running
+    manually copied zip) - just a source to copy from. Idempotent: re-running
     with the same arguments overwrites in place; -InstallService safely
     replaces an already-installed service rather than erroring on it.
 
 .PARAMETER SourceDir
     A directory containing the build output: agent.exe, watchdog.exe, and
     optionally the rules/sigma and rules/yara content directories (as
-    produced by `cargo build --release` — i.e. a target/release/ directory,
+    produced by `cargo build --release` - i.e. a target/release/ directory,
     or a staging directory assembled from one).
 
 .PARAMETER AgentZip
@@ -31,7 +31,7 @@
 
 .PARAMETER InstallService
     Also registers the watchdog as a Windows service (`watchdog.exe install`)
-    so the agent runs under supervision and survives a reboot — the same
+    so the agent runs under supervision and survives a reboot - the same
     kill-resistance setup a production endpoint gets. Without this switch,
     the binaries are staged but nothing is started: useful when a scenario
     script drives `agent.exe run` directly and wants to read its own
@@ -68,7 +68,7 @@ if ([bool]$SourceDir -eq [bool]$AgentZip) {
     throw "Specify exactly one of -SourceDir or -AgentZip"
 }
 
-# ── Resolve the source ──────────────────────────────────────────────────────
+# -- Resolve the source ------------------------------------------------------
 Write-Section "Resolving build output"
 
 if ($AgentZip) {
@@ -89,13 +89,13 @@ $agentSrc = Join-Path $SourceDir "agent.exe"
 $watchdogSrc = Join-Path $SourceDir "watchdog.exe"
 foreach ($required in @($agentSrc, $watchdogSrc)) {
     if (-not (Test-Path $required)) {
-        throw "missing $required — SourceDir must contain a release build of both agent and watchdog"
+        throw "missing $required - SourceDir must contain a release build of both agent and watchdog"
     }
 }
 
-# ── Stop any previous install first ─────────────────────────────────────────
+# -- Stop any previous install first -----------------------------------------
 # Overwriting a running agent.exe/watchdog.exe in place fails (the file is
-# locked) — idempotent re-installs must tear the old one down first, exactly
+# locked) - idempotent re-installs must tear the old one down first, exactly
 # what a fresh install also needs to be safe to run twice.
 Write-Section "Stopping any existing install"
 
@@ -108,7 +108,7 @@ if (Test-Path $watchdogDst) {
 }
 Get-Process -Name "agent", "watchdog" -ErrorAction SilentlyContinue | Stop-Process -Force
 
-# ── Copy binaries + content ─────────────────────────────────────────────────
+# -- Copy binaries + content -------------------------------------------------
 Write-Section "Installing into $InstallDir"
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
@@ -117,7 +117,7 @@ Copy-Item $watchdogSrc (Join-Path $InstallDir "watchdog.exe") -Force
 Write-Host "[ok] agent.exe, watchdog.exe"
 
 # rules/sigma and rules/yara are optional (DetectionSink runs fine without
-# either — see agent/src/sink.rs's content_dir doc) — only copied when present
+# either - see agent/src/sink.rs's content_dir doc) - only copied when present
 # next to the binaries, mirroring the executable-relative lookup the agent
 # itself does at runtime.
 foreach ($contentDir in @("rules\sigma", "rules\yara")) {
@@ -126,7 +126,7 @@ foreach ($contentDir in @("rules\sigma", "rules\yara")) {
         $dst = Join-Path $InstallDir $contentDir
         # Remove any previous copy first: Copy-Item -Recurse onto an
         # already-existing destination directory nests $src *inside* it
-        # (…\rules\sigma\sigma\…) instead of replacing it — silently
+        # (...\rules\sigma\sigma\...) instead of replacing it - silently
         # duplicating content on every re-run otherwise.
         if (Test-Path $dst) {
             Remove-Item -Path $dst -Recurse -Force
@@ -135,7 +135,7 @@ foreach ($contentDir in @("rules\sigma", "rules\yara")) {
         Copy-Item $src $dst -Recurse -Force
         Write-Host "[ok] $contentDir"
     } else {
-        Write-Host "[info] $contentDir not present in source — skipped (agent runs without it)"
+        Write-Host "[info] $contentDir not present in source - skipped (agent runs without it)"
     }
 }
 
@@ -143,7 +143,7 @@ if ($AgentZip) {
     Remove-Item -Path $SourceDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# ── Optionally install the watchdog service ─────────────────────────────────
+# -- Optionally install the watchdog service ---------------------------------
 # Computed unconditionally: used below in the final instructions either way
 # (as the -InstallService target, or as the direct-run example).
 $agentDst = Join-Path $InstallDir "agent.exe"
@@ -158,14 +158,14 @@ if ($InstallService) {
     }
 } else {
     Write-Host ""
-    Write-Host "[info] -InstallService not given — binaries staged, nothing started"
+    Write-Host "[info] -InstallService not given - binaries staged, nothing started"
 }
 
 Write-Host ""
 Write-Host "== Done ==" -ForegroundColor Cyan
 Write-Host "Installed into: $InstallDir"
 if ($InstallService) {
-    Write-Host "Watchdog service running — check: sc query SynthaEDR"
+    Write-Host "Watchdog service running - check: sc query SynthaEDR"
 } else {
     Write-Host "Run a scenario directly, e.g.:"
     Write-Host "  $agentDst run --alerts $alertsPath --events $eventsPath"
