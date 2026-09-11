@@ -1354,11 +1354,260 @@ ed25519-dalek = "2" # Signature verification
 
 ---
 
+## Commentary: Strategic & Architectural Insights
+
+### The Fleet-Derived Defense Thesis
+
+Issue #62 represents a fundamental shift in EDR architecture philosophy. Most endpoint security products operate in isolation—each agent makes detection decisions based solely on what it observes locally. This creates a critical blind spot: **attackers operate at fleet scale, but defenders operate at host scale.**
+
+**The thesis:** Layer 7 (Fleet Correlation + Adaptive Posture) closes this asymmetry gap. It implements the exact signals an attacker cannot reproduce by reverse-engineering our binaries:
+
+1. **Cross-endpoint correlation** reveals patterns invisible to any single host
+2. **Adaptive posture** turns fleet intelligence into immediate defensive action
+3. **Offline resilience via mesh** ensures the pool self-protects even when isolated
+
+This is not incremental improvement—it's a qualitative capability boundary. An attacker who downloads our agent, reads our detection rules, and tests against them locally still cannot predict what the fleet sees collectively.
+
+### Why This Is Hard (And Why It Matters)
+
+**Technical Challenge:**
+- **State synchronization at scale:** Correlating detections across thousands of hosts with sub-minute latency while maintaining tenant isolation
+- **Graph traversal complexity:** Computing blast-radius in real-time over continuously-updating entity graphs
+- **Dual-channel posture:** Balancing authoritative server control with resilient P2P gossip without creating attack surface
+
+**Architectural Risk:**
+The mesh gossip component (#79 integration) is particularly delicate. P2P communication inside an EDR is a gift to attackers if done wrong:
+- **Risk:** Posture channel becomes a lateral movement vector
+- **Mitigation:** Heighten-only invariant + signed messages + no command execution
+- **Design principle:** Advisory until server-validated (defense in depth)
+
+**Why It's Worth It:**
+When an attacker compromises one host and starts moving laterally, traditional EDR sees isolated detections. Fleet correlation sees the **campaign**. Adaptive posture means the blast-radius hosts immediately heighten their sensitivity—catching follow-on actions that would otherwise slip through baseline thresholds.
+
+### Dependency Ordering Is Critical
+
+The M8/M9 dependency chain is not arbitrary—it reflects hard architectural constraints:
+
+```
+#77 (Datalake) → #72 (Entity Graph) → #62 (Fleet Correlation)
+                     ↓
+                 #76 (Prevalence) ─────────┘
+```
+
+**Why this order:**
+- **Datalake first (#77):** Graph and prevalence both require full-fidelity telemetry substrate
+- **Graph second (#72):** Blast-radius computation is the foundation for both correlation and posture
+- **Prevalence parallel (#76):** Rarity signals contextualize whether spreading is anomalous
+- **Fleet correlation last (#62):** Consumes all of the above
+
+**The #28 Blocker:**
+Server scaffold (#28) gates *everything* in M8/M9. Without Next.js + PostgreSQL + authentication infrastructure, no server-side component can begin implementation. This makes #28 the critical path for the entire upper-layer stack.
+
+**Timeline Reality:**
+The "~9 weeks" estimate assumes sequential work *after* all dependencies land. The actual calendar time depends on:
+- #28 completion (M8 foundation) — **unknown, not started**
+- #72/#76/#77/#78 parallel development (M9 prerequisites) — **unknown, not started**
+- Integration testing with real fleet telemetry — **high uncertainty**
+
+Conservative estimate: M9 is a **multi-quarter effort** from today.
+
+### Security Design Philosophy
+
+**Heighten-Only Invariant:**
+The most important security property is that posture changes can **only increase alertness, never decrease it**. This binds both server and mesh paths:
+- Server cannot emit a posture that lowers ML thresholds
+- Mesh gossip cannot propagate hints that disable collection
+- Advisory mesh hints upgrade to full posture only after server validation
+
+**Why This Matters:**
+An attacker who compromises the posture channel (extremely difficult—requires breaking enrollment PKI) still cannot use it to blind the fleet. The worst they can do is trigger false heightened states, which auto-expire and are audited.
+
+**Defense in Depth:**
+- Layer 1: Enrollment PKI (mesh peers authenticate mutually)
+- Layer 2: Message signatures (posture hints carry case provenance)
+- Layer 3: Heighten-only verification (agents reject lowering hints)
+- Layer 4: Server validation (advisory until corroborated)
+- Layer 5: Audit trail (every posture change is logged)
+- Layer 6: Auto-expiry (heightened states decay, preventing accumulation)
+
+### Implementation Gotchas
+
+**Graph Performance at Scale:**
+Blast-radius computation is a graph traversal. On a 10,000-host fleet with dense entity relations, this could be expensive:
+- **Risk:** Posture trigger → graph query → timeout → no posture emitted
+- **Mitigation:** Pre-computed graph neighborhoods, cached blast-radius sets, query timeouts with fallback
+- **Monitoring:** `fleet.posture.graph_query_duration_ms` histogram (alert if p99 > 1s)
+
+**Posture State Accumulation:**
+Without expiry enforcement, heightened states accumulate:
+- Host A triggers posture → 100 hosts heightened
+- Host B triggers posture → another 100 hosts heightened
+- After 10 triggers, half the fleet is in heightened state indefinitely
+- **Result:** Performance degradation, alert fatigue, operational nightmare
+
+**Mitigation:** Server background job enforces expiry every 5 minutes. Heightened states decay to baseline automatically. Operators can extend if needed, but default is bounded.
+
+**Mesh Gossip Amplification:**
+Fixed fan-out (3 neighbors) and rate limits are essential:
+- **Without limits:** A single posture trigger → exponential gossip flood → network saturation
+- **With limits:** Controlled propagation, jittered intervals, replay prevention via hint cache
+- **Monitoring:** `mesh.posture.hints_propagated` counter (alert if rate > 1000/min/tenant)
+
+### When to Build This (Strategic Timing)
+
+**Not Now:**
+#62 is correctly blocked on M8/M9. Attempting to build fleet correlation without:
+- Datalake (#77) = no telemetry substrate
+- Graph (#72) = no blast-radius computation
+- Server (#28) = no infrastructure to run on
+
+...would mean building twice (throwaway prototype, then production).
+
+**The Right Sequence:**
+1. Complete M8 foundation (server scaffold, datalake, ingest)
+2. Build M9 prerequisites in parallel (graph, prevalence, cloud-detection)
+3. Then begin #62 Phase 1 (foundations)
+
+**Why This Is Frustrating But Correct:**
+The spec is 100% complete. Code could be written tomorrow. But without the substrate, it's vaporware. The dependency discipline forces correct layering—fleet intelligence genuinely requires the full M8/M9 stack.
+
+### Integration with Adjacent Issues
+
+**#83 (Fleet Ops Dashboard):**
+The ops dashboard will display active posture states and fleet cases. Design coordination needed:
+- Share UI components (posture state cards, case timelines)
+- Consistent API patterns (`/api/fleet/*` and `/api/ops/*`)
+- Both need `server/graph` visualization (subgraph rendering)
+
+**#79 (P2P Mesh):**
+Mesh posture gossip is a feature addition to existing peer attestation:
+- Reuse mesh discovery, authentication, and transport
+- Add `PostureHint` message type to protocol
+- Share bounded-chatter primitives (fan-out, rate limits)
+
+**#60 (Intel) + #76 (Prevalence):**
+Fleet correlation joins by file hash and prevalence:
+- Intel provides IOC hash sets (known bad)
+- Prevalence provides rarity (first-seen, low-frequency)
+- Correlation asks: "Is this hash bad? Is it rare? Is it spreading?"
+
+**#64 (Disruption Playbooks):**
+Adaptive posture is proto-SOAR:
+- Detection → case → posture change is an automated response
+- Playbooks extend this: detection → case → run playbook (isolate, remediate, investigate)
+- Posture is the "heighten alertness" playbook; #64 adds "take action" playbooks
+
+### Operational Considerations
+
+**Tuning Posture Thresholds:**
+Default severity threshold (High) may be too aggressive or too lax:
+- **Too aggressive:** Frequent posture triggers → alert fatigue, performance impact
+- **Too lax:** Critical cases don't trigger posture → missed detections
+- **Solution:** Per-tenant configuration, start conservative (Critical only), tune based on FP rate
+
+**Blast-Radius Sizing:**
+`BlastRadiusConfig` has many knobs (subnet, identity, inventory, network neighbors):
+- **All enabled:** Large blast-radius → many agents heightened → resource cost
+- **Too restrictive:** Small blast-radius → lateral movement escapes posture
+- **Solution:** Start with identity + subnet (high-confidence signals), add network neighbors after validation
+
+**Expiry Duration:**
+Default 4-hour expiry is a guess:
+- **Too short:** Posture expires before campaign completes → gaps in coverage
+- **Too long:** Prolonged heightened state → operational friction
+- **Solution:** Start at 4h, monitor case lifecycle duration (p50, p95), adjust
+
+**Mesh Offline Scenarios:**
+A 1000-host datacenter loses WAN connectivity:
+- Mesh gossip works (local LAN intact)
+- Server validation fails (no internet)
+- Agents operate on advisory posture (heighten-only constraint still holds)
+- When connectivity restored: server validates retroactively, upgrades advisory → full posture
+
+**Audit Trail Storage:**
+Every posture change logged to `posture_audit`:
+- High-severity incidents → many posture triggers → large audit volume
+- **Concern:** PostgreSQL growth, query performance degradation
+- **Mitigation:** Partition by month, retention policy (6 months?), archive to datalake
+
+### Success Metrics
+
+**Product Metrics:**
+- **Lateral movement detection rate:** % of multi-host campaigns detected as fleet cases (vs isolated alerts)
+- **Posture effectiveness:** % of secondary infections caught during heightened posture (vs baseline)
+- **Time to fleet-wide awareness:** Latency from first detection to blast-radius posture applied
+
+**Operational Metrics:**
+- **False posture rate:** Posture triggers on benign activity (admin tools, legitimate software updates)
+- **Blast-radius accuracy:** Overlap between computed blast-radius and actual campaign spread
+- **Mesh coverage:** % of agents with mesh peers (offline resilience readiness)
+
+**Technical Metrics:**
+- **Correlation latency:** Time from detection ingest to fleet case creation (p50, p95, p99)
+- **Graph query performance:** Blast-radius computation duration (must be < 1s p99)
+- **Posture propagation time:** Server path vs mesh path (mesh should be 2-5x faster within segment)
+
+### Future Extensions (Post-MVP)
+
+**Retrospective Correlation:**
+New detection content lands → replay over historical datalake → create fleet cases from past telemetry:
+- "This malware sample was unknown yesterday, now recognized—where else did it run?"
+- Requires #78 (cloud-detection retrospective mode) integration
+
+**Machine Learning on Fleet Cases:**
+Train models on fleet case patterns:
+- Features: case topology (graph structure), entity types, temporal patterns
+- Label: confirmed incident vs false positive
+- Output: Fleet case risk score (prioritization)
+
+**Cross-Tenant Correlation (SaaS Mode):**
+Fleet correlation currently respects tenant boundaries:
+- Same malware spreading across different customers → multiple independent cases
+- With consent: anonymous telemetry sharing → cross-tenant campaign detection
+- **Privacy hard problem:** How to correlate without leaking tenant data?
+
+**Posture Grades (Beyond Binary):**
+Current design: baseline or heightened:
+- Future: Multiple posture levels (Normal → Elevated → High → Critical)
+- Each level: progressively lower thresholds, wider collection, shorter heartbeats
+- Graduated response based on case severity + blast-radius confidence
+
+**Fleet Hunting Queries:**
+Operator-initiated fleet correlation:
+- "Find all hosts that executed this hash in the last 7 days"
+- "Show me the network neighborhood of this compromised identity"
+- Hunting as interactive fleet correlation (vs automatic background correlation)
+
+### The Bigger Picture
+
+**Where This Fits in the 10-Layer Stack:**
+
+Layers 1-6 (device-side detection) produce verdicts on what they see locally. Layer 7 (this issue) is the first layer that **changes its mind based on what others see**. This is the transition point where the EDR becomes a true XDR—the "X" (extended) is fleet correlation.
+
+Layers 8-10 (threat intel, human intelligence, MDR) build on Layer 7's foundation:
+- Threat intel (#60) feeds correlation (known IOCs across fleet)
+- Hunting (#61) is interactive correlation (analyst-driven)
+- MDR/human intelligence (#75 assistant) consume fleet cases as input
+
+**Defensive Asymmetry:**
+Attackers have always operated at fleet scale (botnets, ransomware campaigns, APT lateral movement). Defenders have been stuck at host scale. Layer 7 is the architectural move that restores symmetry—the defense sees the fleet, not just individual hosts.
+
+**Why Synthaea:**
+This architecture (fleet correlation + adaptive posture + mesh resilience) is not common in commercial EDR. Most vendors:
+- Correlate in SIEM (analyst manual work, high latency)
+- Don't auto-adjust posture (static detection thresholds)
+- Have no offline resilience (blind when control plane down)
+
+Synthaea's Layer 7 is a differentiator—but only if M8/M9 ship. The spec is great; execution is everything.
+
+---
+
 ## Changelog
 
 | Date | Action | Author |
 |------|--------|--------|
 | 2026-09-11 | Initial documentation (issue drafted) | Claude |
+| 2026-09-11 | Added strategic commentary section | Claude |
 
 ---
 
