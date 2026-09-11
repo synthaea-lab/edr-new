@@ -110,8 +110,8 @@ server/fleet (blast-radius computation via graph)
 - Fournit: Signed, versioned policy types (posture est policy overlay)
 - Reason: Posture shipped via policy channel requires policy infrastructure
 
-**Issue #24: Transport (mTLS + Spooled)** — OPEN ⏳
-- Status: PR #158 OPEN
+**Issue #24: Transport (mTLS + Spooled)** — ✅ MERGED
+- Status: PR #158 MERGED (2026-09-10)
 - Fournit: Secure agent ↔ server communication
 - Reason: Policy distribution channel
 
@@ -1349,7 +1349,7 @@ ed25519-dalek = "2" # Signature verification
 - **#78:** Cloud detection — REQUIS
 - **#79:** P2P mesh — Posture gossip component
 - **#23:** Shared policy model — Posture overlay types
-- **#24:** Transport (mTLS) — Policy distribution channel
+- **#24:** Transport (mTLS) — Policy distribution channel ✅ MERGED
 - **#83:** Fleet ops dashboard — Consumer of fleet health (related but independent)
 
 ---

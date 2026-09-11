@@ -2,7 +2,7 @@
 
 **Component:** `server/ops`
 **Branch:** `feat/83-ops-dashboard`
-**Status:** BLOCKED — depends on #28 (server scaffold) and #134 (agent health telemetry)
+**Status:** BLOCKED — depends on #28 (server scaffold) only (#134 merged ✅)
 
 ---
 
@@ -17,10 +17,10 @@ Dashboard d'opérations pour visualiser la santé de la flotte EDR en temps rée
 - Requis: Next.js setup, PostgreSQL, endpoint `/api/ingest/health`, auth
 - Sans #28, impossible de commencer #83
 
-**Issue #134: Agent Health Telemetry** — REQUIS
-- Status: PR #157 OPEN, MERGEABLE ✅
+**Issue #134: Agent Health Telemetry** — ✅ MERGED
+- Status: PR #157 MERGED (2026-09-10)
 - Fournit: `HealthBeacon` structure (agent version, sensors status, loss counters)
-- Reste à faire: intégrer transport (#24), câbler dans agent main loop
+- Code ready: needs wiring in agent main loop (transport #24 already merged)
 
 ### Flux de Données (Agent → Server → Dashboard)
 
@@ -78,7 +78,7 @@ CREATE TABLE sensor_health (
 
 ### Next Steps
 
-1. **PRIORITÉ 1:** Merge PR #157 (Agent health telemetry)
+1. **✅ DONE:** PR #157 (Agent health telemetry) MERGED 2026-09-10
 2. **PRIORITÉ 2:** Démarrer Issue #28 (Server scaffold)
 3. Une fois #28 + #134 complétés → implémenter #83
 
@@ -99,7 +99,7 @@ CREATE TABLE sensor_health (
 - docker-compose dev environment
 
 #### Issue #134: Agent Health Telemetry
-**Status:** PR #157 open, mergeable
+**Status:** PR #157 MERGED (2026-09-10) ✅
 
 **What #83 needs from #134:**
 ```rust
@@ -132,7 +132,7 @@ pub struct SensorHealth {
   - Provides spool stats (spool_bytes, spool_dropped) for telemetry accounting
   - Dashboard surfaces per-host and fleet-wide spool drop counts
 
-- **Issue #24:** Transport mTLS (PR #158)
+- **Issue #24:** Transport mTLS (PR #158 MERGED 2026-09-10) ✅
   - Health beacons flow through transport layer to server
   - Dashboard needs agent identity from mTLS enrollment
 

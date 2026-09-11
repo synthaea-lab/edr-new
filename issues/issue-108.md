@@ -1,8 +1,12 @@
 # Issue #108: EventSpool Two-Phase Drain/Ack
 
-**PR:** #156
-**Branch:** `fix/108-eventspool-two-phase-drain`
-**Status:** Open, Mergeable
+> **📌 Note:** This is a **historical document** from PR #156, which was **MERGED on 2026-09-10**.
+> The implementation lives in `crates/store/src/spool.rs` (with comprehensive inline documentation).
+> This file is kept for session traceability and planning context, not as active documentation.
+
+**PR:** #156 — **MERGED 2026-09-10** ✅
+**Branch:** `fix/108-eventspool-two-phase-drain` (merged to main)
+**Status:** Complete
 
 ## Summary
 
