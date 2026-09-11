@@ -10,7 +10,7 @@ provisioning from `../provisioning/`. For Windows hosts running Hyper-V, see
 - **QEMU**: `brew install qemu`
 - **Vagrant** + the QEMU provider plugin: `vagrant plugin install vagrant-qemu`
 - Windows boxes are **amd64** (VirtualBox / Hyper-V): unusable under QEMU on Apple
-  Silicon — run them on an x86 host instead (issue #22).
+  Silicon — run them on an x86 host instead (see below).
 
 ## Host setup (Windows / x86, VirtualBox) — Alpine row only
 
@@ -38,7 +38,7 @@ is `../provisioning/alpine-toolchain.sh`; verified end to end on this box — bu
 `agent status` (5/5 eBPF programs accepted by the verifier), and the full
 `lab/scenarios/beacon.sh` walking-skeleton (T1071/T1041 alert fires as expected).
 
-## Usage
+## Usage (Linux machines)
 
 ```bash
 cd lab/vagrant
@@ -63,3 +63,38 @@ Provisioning installs the family packages, rustup (stable + nightly + rust-src),
 bpf-linker (with the LLVM-major alignment), bindgen-cli, and aya-tool — see
 `../provisioning/linux-toolchain.sh`. On `fedora41`/`rocky9` no recent-enough LLVM is
 available: provisioning continues with a warning and those VMs are replay-only.
+
+## Usage (Windows machines, #22)
+
+Requires an x86 host with VirtualBox or Hyper-V (`autostart: false` — bring one up
+explicitly):
+
+```bash
+cd lab/vagrant
+vagrant up win11
+vagrant provision win11      # re-run windows-toolchain.ps1 (idempotent)
+```
+
+Provisioning (`../provisioning/windows-toolchain.ps1`) installs rustup (stable-msvc)
+and, if not already present, Visual Studio Build Tools with the C++ workload and the
+Windows 11 SDK — the MSVC linker and import libraries the ETW/Event Log/SCM sensors
+link against. No nightly toolchain and no LLVM-alignment step: `windows-sys`,
+`ferrisetw`, and `windows-service` are pure-Rust bindings against DLLs Windows already
+ships.
+
+There is no rsync-equivalent synced folder wired up for winrm yet — get the source
+onto the VM (winrm file copy, a shared drive, or building on one machine and shipping
+the binary to the others), then:
+
+```powershell
+cargo build --release -p agent -p watchdog
+```
+
+To stage a build (from this VM or another) for a scenario run without rebuilding —
+useful once one Windows machine has built and the others just need to run —
+`../provisioning/agent-install.ps1` copies the binaries (+ `rules/sigma`,
+`rules/yara` if present) into place and can optionally register the watchdog service:
+
+```powershell
+.\agent-install.ps1 -SourceDir target\release -InstallService
+```
