@@ -31,3 +31,15 @@ from `crates/response`/`crates/policy`, which don't exist yet — issues #131, #
 tracepoint-sourced one), and all three lab-validated "Done when" items on #91 are
 follow-ups — this machine has no way to validate a real attach (root needed, and no
 confirmation "bpf" is a registered LSM here even though the BTF type is present).
+
+**Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
+tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's
+`tail` module doc for why) and classifies an allowlist: sshd accept/fail, PAM
+session open/close (any `pam_unix` service, not just sudo), sudo command lines, and
+systemd unit start/stop/fail. No `schema::Event` variant yet — the issue's own text
+says this event type is shared with Windows 4624/macOS login, and that type does not
+exist in `schema` today, so it needs a cross-platform design pass before a Linux-only
+PR bakes one in. sshd/`su` classification is built against the standard, documented
+log line formats but unverified against a real capture (no `sshd` on this dev box,
+`su` needs interactive auth this session can't provide) — lab validation is a
+follow-up, same discipline as #91.
