@@ -11,6 +11,17 @@ and container-aware content — not a separate container-security product; deep
 container runtime security (Falco's territory) and Kubernetes context remain
 explicitly out of scope until after v1.
 
+**Status (issue #80):** Attribution foundation landed — `EventMeta::container`
+(`ContainerContext.id`) is resolved on every exec/file-open/connect event from
+`/proc/<pid>/cgroup` (cgroup v1 `/docker/<id>` and v2 `docker-<id>.scope` /
+`cri-containerd-<id>.scope` naming both handled; Kubernetes' `kubepods` nesting is
+transparent to the same matching, its pod/namespace context is not extracted).
+`image`/`name` are always `None` for now — they need a cached Docker/containerd
+socket lookup, deferred to a follow-up PR. Overlayfs path normalization and the
+container-aware content (docker-exec lineage, docker.sock mount, privileged-escape
+indicators) are also follow-ups; none of the three "Done when" lab-validation items
+on #80 are closed by this foundation alone.
+
 **Status (issue #91, BPF-LSM):** Observation-only foundation landed —
 `crates/sensors/linux/lsm` loads/attaches the `file_open` LSM hook (compiled into the
 same eBPF object as the tracepoint probes) and counts hits, proving the hook fires
