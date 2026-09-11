@@ -219,6 +219,10 @@ impl Sensor for WindowsSensor {
             exec_events: true,
             file_events: true,
             connect_events: true,
+            // Logon/session events (schema::Event::Auth) are `sensor-windows-eventlog`'s
+            // job (Security 4624/4625/4648/4672 via wevtutil), not this ETW sensor's —
+            // see that crate's `EventLogSensor::capabilities` for the true value.
+            auth_events: false,
             user_attribution: true, // F-3: token SID + integrity level
             parent_lineage: true,   // parent path/comm resolved at exec time
         }
