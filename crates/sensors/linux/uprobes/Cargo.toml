@@ -10,3 +10,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+schema = { path = "../../../schema" }
+log = { version = "0.4", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+goblin = { version = "0.9", default-features = false, features = ["elf64", "elf32", "endian_fd", "std"] }
+thiserror = "2.0"
+
+[[example]]
+name = "symbol_resolution_spike"
+path = "examples/symbol_resolution_spike.rs"
