@@ -31,6 +31,7 @@ const NLA_F_NESTED: u16 = 0x8000;
 pub const CTA_TUPLE_ORIG: u16 = 1;
 pub const CTA_TUPLE_REPLY: u16 = 2;
 pub const CTA_STATUS: u16 = 3;
+pub const CTA_PROTOINFO: u16 = 4;
 pub const CTA_TIMEOUT: u16 = 7;
 pub const CTA_MARK: u16 = 8;
 pub const CTA_COUNTERS_ORIG: u16 = 9;
@@ -51,6 +52,14 @@ pub const CTA_PROTO_DST_PORT: u16 = 3;
 
 pub const CTA_COUNTERS_PACKETS: u16 = 1;
 pub const CTA_COUNTERS_BYTES: u16 = 2;
+
+/// `CTA_PROTOINFO_TCP` — the only `CTA_PROTOINFO_*` sub-attribute this crate
+/// decodes (see [`TcpState`]'s doc for why DCCP/SCTP protoinfo isn't worth
+/// adding).
+pub const CTA_PROTOINFO_TCP: u16 = 1;
+/// `CTA_PROTOINFO_TCP_STATE`, one byte, `<linux/netfilter/nf_conntrack_tcp.h>`'s
+/// `enum tcp_conntrack`.
+pub const CTA_PROTOINFO_TCP_STATE: u16 = 1;
 
 /// One decoded `nlattr`: its type with [`NLA_F_NESTED`] already masked off,
 /// whether that flag was set, and its value bytes (the `nlattr` header
@@ -241,11 +250,72 @@ impl FlowCounters {
     }
 }
 
+/// A TCP flow's state, from `CTA_PROTOINFO_TCP_STATE`
+/// (`<linux/netfilter/nf_conntrack_tcp.h>`'s `enum tcp_conntrack`). Only the
+/// values a live `CT_GET` dump can actually carry are named (0-9); `MAX`/
+/// `IGNORE`/`RETRANS`/`UNACK` (10+) are internal bookkeeping states the
+/// kernel never puts in a dump entry, so they fall into [`Self::Other`]
+/// alongside any genuinely unrecognized value rather than getting named
+/// constants that would never be hit.
+///
+/// `Listen` (value 9) is the kernel's own `TCP_CONNTRACK_LISTEN` — documented
+/// in the kernel header itself as obsolete and reused as `SYN_SENT2`
+/// (simultaneous-open detection); the ambiguity is the kernel's, not a gap in
+/// this decode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    None,
+    SynSent,
+    SynRecv,
+    Established,
+    FinWait,
+    CloseWait,
+    LastAck,
+    TimeWait,
+    Close,
+    Listen,
+    Other(u8),
+}
+
+impl From<u8> for TcpState {
+    fn from(raw: u8) -> Self {
+        match raw {
+            0 => Self::None,
+            1 => Self::SynSent,
+            2 => Self::SynRecv,
+            3 => Self::Established,
+            4 => Self::FinWait,
+            5 => Self::CloseWait,
+            6 => Self::LastAck,
+            7 => Self::TimeWait,
+            8 => Self::Close,
+            9 => Self::Listen,
+            other => Self::Other(other),
+        }
+    }
+}
+
+/// Parses a `CTA_PROTOINFO` attribute's value down to the TCP state, if this
+/// flow has one. `None` covers three distinct cases this crate doesn't need
+/// to tell apart: the flow isn't TCP (no `CTA_PROTOINFO_TCP` sub-attribute at
+/// all — confirmed against a real capture on this dev machine: UDP dump
+/// entries carry no `CTA_PROTOINFO` attribute whatsoever), the kernel omitted
+/// state for some other reason, or the attribute was malformed.
+fn parse_tcp_state(protoinfo_value: &[u8]) -> Option<TcpState> {
+    for attr in parse_attrs(protoinfo_value) {
+        if attr.attr_type == CTA_PROTOINFO_TCP && attr.nested {
+            for tcp_attr in parse_attrs(attr.value) {
+                if tcp_attr.attr_type == CTA_PROTOINFO_TCP_STATE {
+                    return tcp_attr.value.first().copied().map(TcpState::from);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// One conntrack table entry, decoded to the fields this crate's beacon
-/// cross-check needs. `CTA_PROTOINFO` (per-protocol state, e.g. TCP's
-/// state machine) is deliberately not decoded — a third level of nesting
-/// beyond what volume/periodicity features need, tracked as a further
-/// follow-up rather than blocking this slice.
+/// cross-check needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConntrackFlow {
     pub orig: FlowTuple,
@@ -259,6 +329,12 @@ pub struct ConntrackFlow {
     pub id: u32,
     pub counters_orig: Option<FlowCounters>,
     pub counters_reply: Option<FlowCounters>,
+    /// `CTA_PROTOINFO`'s TCP state, when this flow is TCP and the kernel sent
+    /// one — see [`parse_tcp_state`]'s doc for what collapses to `None`.
+    /// `CTA_PROTOINFO_TCP_WSCALE_*`/`_FLAGS_*` (also present under the same
+    /// attribute) aren't decoded — not needed for beacon volume/periodicity
+    /// features, same scoping call as `CTA_STATUS`'s individual `IPS_*` bits.
+    pub tcp_state: Option<TcpState>,
 }
 
 impl ConntrackFlow {
@@ -279,6 +355,7 @@ impl ConntrackFlow {
         let mut id = 0;
         let mut counters_orig = None;
         let mut counters_reply = None;
+        let mut tcp_state = None;
 
         for attr in parse_attrs(payload) {
             match attr.attr_type {
@@ -292,6 +369,7 @@ impl ConntrackFlow {
                 CTA_COUNTERS_REPLY if attr.nested => {
                     counters_reply = FlowCounters::parse(attr.value);
                 }
+                CTA_PROTOINFO if attr.nested => tcp_state = parse_tcp_state(attr.value),
                 _ => {} // unrecognized type, or a container-only type without the nested flag
             }
         }
@@ -305,6 +383,7 @@ impl ConntrackFlow {
             id,
             counters_orig,
             counters_reply,
+            tcp_state,
         })
     }
 }
@@ -395,6 +474,62 @@ mod tests {
         assert_eq!(payload.timeout_secs, 118);
         assert_eq!(payload.id, 0x5bbd_5b9d);
         assert!(payload.counters_orig.is_none()); // not included in this fixture
+        assert!(payload.tcp_state.is_none()); // no CTA_PROTOINFO in this fixture either
+    }
+
+    #[test]
+    fn parses_tcp_state_from_a_real_captured_protoinfo() {
+        // `CTA_PROTOINFO` bytes verbatim from a real ctnetlink dump entry
+        // captured on this dev machine (WSL2, a TIME_WAIT'd
+        // `curl http://example.com`) via the same Python NETLINK_NETFILTER
+        // reference client: CTA_PROTOINFO -> CTA_PROTOINFO_TCP carrying state
+        // (0x07 = TCP_CONNTRACK_TIME_WAIT), wscale-original, wscale-reply,
+        // flags-original, flags-reply — this test only asserts on state,
+        // the rest are decoded on the wire but not surfaced (see
+        // `ConntrackFlow::tcp_state`'s doc).
+        let tcp_protoinfo = [
+            nlattr(CTA_PROTOINFO_TCP_STATE, false, &[0x07]),
+            nlattr(2, false, &[0x07]), // CTA_PROTOINFO_TCP_WSCALE_ORIGINAL
+            nlattr(3, false, &[0x07]), // CTA_PROTOINFO_TCP_WSCALE_REPLY
+            nlattr(4, false, &[0x27, 0x00]), // CTA_PROTOINFO_TCP_FLAGS_ORIGINAL
+            nlattr(5, false, &[0x23, 0x00]), // CTA_PROTOINFO_TCP_FLAGS_REPLY
+        ]
+        .concat();
+        let protoinfo = nlattr(CTA_PROTOINFO_TCP, true, &tcp_protoinfo);
+
+        let orig = tuple_bytes([172, 30, 136, 16], [104, 20, 23, 154], 6, 51866, 80);
+        let reply = tuple_bytes([104, 20, 23, 154], [172, 30, 136, 16], 6, 80, 51866);
+        let mut buf = Vec::new();
+        buf.extend(nlattr(CTA_TUPLE_ORIG, true, &orig));
+        buf.extend(nlattr(CTA_TUPLE_REPLY, true, &reply));
+        buf.extend(nlattr(CTA_PROTOINFO, true, &protoinfo));
+
+        let flow = ConntrackFlow::parse(&buf).expect("a well-formed entry must parse");
+        assert_eq!(flow.tcp_state, Some(TcpState::TimeWait));
+    }
+
+    #[test]
+    fn tcp_state_from_u8_covers_the_named_states_and_falls_back() {
+        assert_eq!(TcpState::from(0), TcpState::None);
+        assert_eq!(TcpState::from(3), TcpState::Established);
+        assert_eq!(TcpState::from(7), TcpState::TimeWait);
+        assert_eq!(TcpState::from(9), TcpState::Listen);
+        assert_eq!(TcpState::from(42), TcpState::Other(42));
+    }
+
+    #[test]
+    fn udp_flow_has_no_protoinfo_so_tcp_state_is_none() {
+        // Confirmed against a real capture: UDP dump entries carry no
+        // `CTA_PROTOINFO` attribute at all (not an empty one) — this fixture
+        // mirrors that by simply never including CTA_PROTOINFO.
+        let orig = tuple_bytes([10, 255, 255, 254], [10, 255, 255, 254], 17, 54655, 53);
+        let reply = tuple_bytes([10, 255, 255, 254], [10, 255, 255, 254], 17, 53, 54655);
+        let mut buf = Vec::new();
+        buf.extend(nlattr(CTA_TUPLE_ORIG, true, &orig));
+        buf.extend(nlattr(CTA_TUPLE_REPLY, true, &reply));
+
+        let flow = ConntrackFlow::parse(&buf).expect("a well-formed entry must parse");
+        assert!(flow.tcp_state.is_none());
     }
 
     #[test]

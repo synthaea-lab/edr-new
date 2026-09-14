@@ -47,10 +47,11 @@ Accounting requires `net.netfilter.nf_conntrack_acct=1` on the target kernel —
 default, confirmed empirically (no `CTA_COUNTERS_*` attribute appears at all until it
 is turned on). Unprivileged reachability of conntrack is not characterized (every
 capture here ran as root). Proc connector is a separate, independent foundation slice
-(PR #179), not part of this one. `CTA_PROTOINFO` (per-protocol state, e.g. TCP's state
-machine) is deliberately not decoded — a third level of nesting beyond what
-volume/periodicity beacon features need, tracked as a further follow-up on #92, not
-silently dropped.
+(PR #179), not part of this one. `CTA_PROTOINFO`'s TCP state (`CTA_PROTOINFO_TCP` ->
+`CTA_PROTOINFO_TCP_STATE`) is now decoded too — a third level of `nlattr` nesting,
+only present for TCP flows (confirmed empirically: UDP dump entries carry no
+`CTA_PROTOINFO` attribute at all). The sibling wscale/flags sub-attributes are decoded
+on the wire but not surfaced, same scoping call as `CTA_STATUS`'s individual bits.
 
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's

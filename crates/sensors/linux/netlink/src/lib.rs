@@ -33,13 +33,19 @@
 //! turned on) — see [`conntrack_socket`]'s doc. Unprivileged reachability of
 //! conntrack is not characterized (every capture here ran as root).
 //!
+//! **`CTA_PROTOINFO`'s TCP state is also decoded** — [`TcpState`], from
+//! `CTA_PROTOINFO` -> `CTA_PROTOINFO_TCP` -> `CTA_PROTOINFO_TCP_STATE`, a
+//! third level of `nlattr` nesting beyond the tuple's two. Only present for
+//! TCP flows — confirmed against a real capture on this dev machine: UDP
+//! dump entries carry no `CTA_PROTOINFO` attribute at all. The sibling
+//! `CTA_PROTOINFO_TCP_WSCALE_*`/`_FLAGS_*` sub-attributes are decoded on the
+//! wire but not surfaced — not needed for beacon volume/periodicity
+//! features, same scoping call as `CTA_STATUS`'s individual `IPS_*` bits.
+//!
 //! **proc connector** (`NETLINK_CONNECTOR`, fork/exec/exit) is a separate,
 //! independent foundation slice — see PR #179, not part of this one.
 //!
 //! Deliberately **not** here yet:
-//! - `CTA_PROTOINFO` (per-protocol state, e.g. TCP's own state machine) — a
-//!   third level of nesting beyond what volume/periodicity beacon features
-//!   need; tracked as a further conntrack follow-up, not silently dropped.
 //! - No `schema::Event` variant or [`schema::sensor::Sensor`] implementation:
 //!   volume/periodicity beacon features and the eBPF cross-check both need
 //!   `crates/correlator`/`crates/tamper` wiring that doesn't exist for this data
@@ -62,7 +68,7 @@ mod socket;
 
 use std::net::SocketAddr;
 
-pub use conntrack_attrs::{ConntrackFlow, FlowCounters, FlowTuple};
+pub use conntrack_attrs::{ConntrackFlow, FlowCounters, FlowTuple, TcpState};
 #[cfg(target_os = "linux")]
 pub use conntrack_socket::dump as dump_conntrack;
 #[cfg(target_os = "linux")]
