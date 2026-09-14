@@ -30,6 +30,10 @@ Layout convention next to a baseline:
 The manifest is fully decoupled from the sample format — `train_linux.py` and
 `train_windows.py` continue to read the JSONL as they do today. Loading the
 manifest is what the (upcoming) registry glue does.
+
+CLI: `python -m synthaea_ml.data.manifest {write,verify} ...` — the wrapper
+around `write_manifest` and `verify_manifest` used by the day-to-day flow
+in `docs/ml/data-infra.md` ("Add a new baseline").
 """
 
 from __future__ import annotations
@@ -51,6 +55,13 @@ _HOST_ID_LEN = 12
 """Length in hex chars of the truncated hostname hash. 12 chars = 48 bits — enough
 entropy that random collisions are effectively impossible for a fleet, short
 enough to be readable in file names."""
+
+# Known values used by the CLI's `--platform` / `--workload-label` flags. Kept
+# as module-level constants so a caller (a test, a future notebook) can read
+# the same shortlist rather than duplicating strings. Widen these when the
+# team agrees on a new label, not by passing an unknown value at runtime.
+_KNOWN_PLATFORMS = ("linux", "windows", "macos")
+_KNOWN_WORKLOAD_LABELS = ("desktop-user", "dev", "admin", "server-idle")
 
 
 @dataclass(frozen=True)
@@ -258,3 +269,142 @@ def verify_manifest(baseline_dir: Path) -> None:
             f"baseline sample count mismatch: manifest={manifest.sample_count}, "
             f"actual={actual_count}"
         )
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def _parse_capture_time(s: str) -> datetime:
+    """Parse an ISO-8601 timestamp with a mandatory timezone.
+
+    Accepts the two shapes the manifest itself uses (`Z` suffix and explicit
+    offset like `+00:00`). Naive strings are refused up-front rather than
+    letting `_isoformat_utc` raise later — a friendlier error at the CLI seam.
+    """
+    normalised = s[:-1] + "+00:00" if s.endswith("Z") else s
+    dt = datetime.fromisoformat(normalised)
+    if dt.tzinfo is None:
+        raise ValueError(f"capture time must include a timezone offset: {s!r}")
+    return dt.astimezone(UTC)
+
+
+def _main(argv: list[str] | None = None) -> int:
+    """CLI entry point: `python -m synthaea_ml.data.manifest {write,verify}`.
+
+    Returns:
+        Exit code: 0 on success, 1 on an operation failure (baseline mutated,
+        manifest missing), 2 on a usage error (unknown flag, bad datetime).
+    """
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(
+        prog="synthaea_ml.data.manifest",
+        description="Read and write baseline dataset manifests.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    write = sub.add_parser(
+        "write",
+        help="Compute and write manifest.json for a baseline directory.",
+    )
+    write.add_argument("baseline_dir", type=Path)
+    write.add_argument(
+        "--platform",
+        required=True,
+        choices=_KNOWN_PLATFORMS,
+        help="Target platform of the capture.",
+    )
+    write.add_argument(
+        "--os-version",
+        required=True,
+        help="Free-form OS version tag (e.g. 'WSL2 Ubuntu 24.04', '11 24H2', '14.5').",
+    )
+    write.add_argument(
+        "--workload-label",
+        required=True,
+        choices=_KNOWN_WORKLOAD_LABELS,
+        help="Human-picked role of the host during the capture window.",
+    )
+    write.add_argument(
+        "--capture-start",
+        required=True,
+        type=_parse_capture_time,
+        help="ISO-8601 with timezone, e.g. '2026-09-14T09:00:00Z'.",
+    )
+    write.add_argument(
+        "--capture-end",
+        required=True,
+        type=_parse_capture_time,
+        help="ISO-8601 with timezone, e.g. '2026-09-14T17:00:00Z'.",
+    )
+    write.add_argument(
+        "--baseline-filename",
+        default=DEFAULT_BASELINE_FILENAME,
+        help=(
+            f"Name of the samples file inside baseline_dir "
+            f"(default: {DEFAULT_BASELINE_FILENAME!r}). Override for legacy captures "
+            f"that keep the sensor's original file name (e.g. 'baseline_benign.jsonl')."
+        ),
+    )
+    write.add_argument(
+        "--capturer-ref",
+        default="",
+        help="Free-form tag for human tracing (a machine short name, a run number). Not hashed.",
+    )
+    write.add_argument(
+        "--hostname",
+        default=None,
+        help="Override the hostname used for host_id. Defaults to the current machine.",
+    )
+
+    verify = sub.add_parser(
+        "verify",
+        help="Re-hash the baseline and confirm it still matches its manifest.",
+    )
+    verify.add_argument("baseline_dir", type=Path)
+
+    args = parser.parse_args(argv)
+
+    if args.cmd == "write":
+        try:
+            manifest = write_manifest(
+                args.baseline_dir,
+                platform=args.platform,
+                os_version=args.os_version,
+                workload_label=args.workload_label,
+                capture_start=args.capture_start,
+                capture_end=args.capture_end,
+                hostname=args.hostname,
+                baseline_filename=args.baseline_filename,
+                capturer_ref=args.capturer_ref,
+            )
+        except (FileNotFoundError, ValueError) as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 1
+        print(f"wrote {args.baseline_dir / MANIFEST_FILENAME}")
+        print(
+            f"  host_id={manifest.host_id}  "
+            f"samples={manifest.sample_count}  "
+            f"sha={manifest.sample_sha256[:12]}…"
+        )
+        return 0
+
+    if args.cmd == "verify":
+        try:
+            verify_manifest(args.baseline_dir)
+        except (FileNotFoundError, ValueError) as e:
+            print(f"FAIL {args.baseline_dir}: {e}", file=sys.stderr)
+            return 1
+        print(f"{args.baseline_dir}: manifest ok")
+        return 0
+
+    return 2  # unreachable — argparse refuses an unknown cmd first
+
+
+if __name__ == "__main__":
+    import sys
+
+    sys.exit(_main())
