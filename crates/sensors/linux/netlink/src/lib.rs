@@ -17,15 +17,29 @@
 //! owning PID(s) by scanning `/proc` ([`proc_join`]), the same technique `ss`/
 //! `lsof` use. Verified against this dev machine's real kernel — no root needed
 //! (confirmed empirically: `sock_diag` for TCP works unprivileged, unlike
-//! conntrack and proc connector below).
+//! conntrack below).
+//!
+//! **conntrack is also done** — [`conntrack_socket::dump`] queries the kernel's
+//! conntrack table (IPv4 + IPv6) over `NETLINK_NETFILTER`/`ctnetlink`
+//! ([`conntrack_attrs`]/[`conntrack_socket`]), decoding each flow's 5-tuple
+//! (both directions), status, timeout, and packet/byte accounting when the
+//! kernel provides it. This is the recursive `nlattr` tree (`CTA_TUPLE_ORIG` ->
+//! `CTA_TUPLE_IP` -> `CTA_IP_V4_SRC`) that made conntrack "a full netlink
+//! sub-protocol of its own" rather than a `sock_diag`-sized job — confirmed
+//! against a real capture on this dev machine byte for byte before being
+//! pinned into tests. Accounting (`CTA_COUNTERS_*`) requires
+//! `net.netfilter.nf_conntrack_acct=1` on the target kernel — off by default,
+//! confirmed empirically (no counters attribute appears at all until it is
+//! turned on) — see [`conntrack_socket`]'s doc. Unprivileged reachability of
+//! conntrack is not characterized (every capture here ran as root).
+//!
+//! **proc connector** (`NETLINK_CONNECTOR`, fork/exec/exit) is a separate,
+//! independent foundation slice — see PR #179, not part of this one.
 //!
 //! Deliberately **not** here yet:
-//! - **conntrack** and **proc connector** — both were confirmed reachable in this
-//!   sandbox (this session has passwordless `sudo`), but each is a full netlink
-//!   sub-protocol of its own (conntrack's TLV-nested attributes — tuples,
-//!   counters — are a meaningfully bigger parser than `sock_diag`'s fixed-size
-//!   struct). Scoped out to keep this slice reviewable; tracked as follow-ups on
-//!   #92, not silently dropped.
+//! - `CTA_PROTOINFO` (per-protocol state, e.g. TCP's own state machine) — a
+//!   third level of nesting beyond what volume/periodicity beacon features
+//!   need; tracked as a further conntrack follow-up, not silently dropped.
 //! - No `schema::Event` variant or [`schema::sensor::Sensor`] implementation:
 //!   volume/periodicity beacon features and the eBPF cross-check both need
 //!   `crates/correlator`/`crates/tamper` wiring that doesn't exist for this data
@@ -37,14 +51,20 @@
 //!   is a one-shot query; a caller decides the cadence. No lab VM here to
 //!   validate the issue's "listening-port drift" done-when item against.
 
+mod conntrack_attrs;
 mod proc_join;
 mod wire;
 
+#[cfg(target_os = "linux")]
+mod conntrack_socket;
 #[cfg(target_os = "linux")]
 mod socket;
 
 use std::net::SocketAddr;
 
+pub use conntrack_attrs::{ConntrackFlow, FlowCounters, FlowTuple};
+#[cfg(target_os = "linux")]
+pub use conntrack_socket::dump as dump_conntrack;
 #[cfg(target_os = "linux")]
 pub use socket::NetlinkError;
 pub use wire::{DiagMsg, TCP_ESTABLISHED, TCP_LISTEN};
