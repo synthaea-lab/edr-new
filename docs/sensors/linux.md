@@ -32,7 +32,7 @@ tracepoint-sourced one), and all three lab-validated "Done when" items on #91 ar
 follow-ups — this machine has no way to validate a real attach (root needed, and no
 confirmation "bpf" is a registered LSM here even though the BTF type is present).
 
-**Status (issue #92, sock_diag + conntrack):** Foundation landed for both —
+**Status (issue #92, netlink sensors):** Foundation landed for all three —
 `crates/sensors/linux/netlink` queries TCP listening/established sockets (IPv4 + IPv6)
 via a hand-rolled `NETLINK_SOCK_DIAG` client, joined to owning PID(s) via a `/proc` fd
 scan (the same technique `ss`/`lsof` use); verified unprivileged against this dev
@@ -46,12 +46,15 @@ real capture on this dev machine byte for byte before being pinned into tests.
 Accounting requires `net.netfilter.nf_conntrack_acct=1` on the target kernel — off by
 default, confirmed empirically (no `CTA_COUNTERS_*` attribute appears at all until it
 is turned on). Unprivileged reachability of conntrack is not characterized (every
-capture here ran as root). Proc connector is a separate, independent foundation slice
-(PR #179), not part of this one. `CTA_PROTOINFO`'s TCP state (`CTA_PROTOINFO_TCP` ->
+capture here ran as root). `CTA_PROTOINFO`'s TCP state (`CTA_PROTOINFO_TCP` ->
 `CTA_PROTOINFO_TCP_STATE`) is now decoded too — a third level of `nlattr` nesting,
 only present for TCP flows (confirmed empirically: UDP dump entries carry no
 `CTA_PROTOINFO` attribute at all). The sibling wscale/flags sub-attributes are decoded
 on the wire but not surfaced, same scoping call as `CTA_STATUS`'s individual bits.
+`ProcEventSubscription` (`NETLINK_CONNECTOR`, `CN_IDX_PROC` group) decodes live
+fork/exec/exit broadcasts — root/`CAP_NET_ADMIN`-only, confirmed against this dev
+machine (the kernel rejects an unprivileged subscribe with `EPERM`, reported back as a
+`NetlinkError`, not a panic); verified end to end against the real kernel as root.
 
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's

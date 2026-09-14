@@ -45,24 +45,38 @@
 //! **proc connector** (`NETLINK_CONNECTOR`, fork/exec/exit) is a separate,
 //! independent foundation slice — see PR #179, not part of this one.
 //!
+//! **proc connector is also done** — [`ProcEventSubscription`] subscribes to the
+//! kernel's `CN_IDX_PROC` multicast group over `NETLINK_CONNECTOR`
+//! ([`proc_events`]/[`proc_socket`]) and decodes fork/exec/exit broadcasts. Root/
+//! `CAP_NET_ADMIN`-only (unlike `sock_diag`): confirmed against this dev
+//! machine that the kernel rejects the subscribe with `EPERM` for an
+//! unprivileged caller, reported back as a proper `NetlinkError`, not a panic.
+//!
 //! Deliberately **not** here yet:
-//! - No `schema::Event` variant or [`schema::sensor::Sensor`] implementation:
-//!   volume/periodicity beacon features and the eBPF cross-check both need
-//!   `crates/correlator`/`crates/tamper` wiring that doesn't exist for this data
-//!   yet — nothing to push into today.
+//! - No `schema::Event` variant or [`schema::sensor::Sensor`] implementation
+//!   for sock_diag, conntrack, or proc connector: volume/periodicity beacon
+//!   features and the eBPF cross-check both need `crates/correlator`/
+//!   `crates/tamper` wiring that doesn't exist for this data yet — nothing to
+//!   push into today.
 //! - UDP sockets — `sock_diag` supports them, but "listen/established" (this
 //!   issue's own wording) is TCP-state terminology; UDP would need its own
 //!   category, not a states-mask filter.
 //! - Periodic re-snapshotting / drift detection between snapshots — [`snapshot`]
 //!   is a one-shot query; a caller decides the cadence. No lab VM here to
 //!   validate the issue's "listening-port drift" done-when item against.
+//! - `PROC_EVENT_UID`/`_GID`/`_SID`/`_PTRACE`/`_COMM`/`_COREDUMP` — decoded as
+//!   [`ProcEvent::Other`] rather than their own variants; nothing in the eBPF
+//!   stream to cross-check them against yet (see [`proc_events`]).
 
 mod conntrack_attrs;
+mod proc_events;
 mod proc_join;
 mod wire;
 
 #[cfg(target_os = "linux")]
 mod conntrack_socket;
+#[cfg(target_os = "linux")]
+mod proc_socket;
 #[cfg(target_os = "linux")]
 mod socket;
 
@@ -71,6 +85,9 @@ use std::net::SocketAddr;
 pub use conntrack_attrs::{ConntrackFlow, FlowCounters, FlowTuple, TcpState};
 #[cfg(target_os = "linux")]
 pub use conntrack_socket::dump as dump_conntrack;
+pub use proc_events::ProcEvent;
+#[cfg(target_os = "linux")]
+pub use proc_socket::ProcEventSubscription;
 #[cfg(target_os = "linux")]
 pub use socket::NetlinkError;
 pub use wire::{DiagMsg, TCP_ESTABLISHED, TCP_LISTEN};
