@@ -122,6 +122,7 @@ fn poll_service_installs(
                         user: User::Unknown,
                         timestamp_ns: now_ns(),
                         comm: install.service_name,
+                        container: None, // Windows: no container support
                     },
                     path: install.image_path,
                     flags: FLAG_PERSISTENCE_ARTIFACT,
@@ -230,6 +231,7 @@ fn poll_scheduled_tasks(
                         user: User::Unknown,
                         timestamp_ns: now_ns(),
                         comm: xml::task_leaf_name(&task.task_name),
+                        container: None, // Windows: no container support
                     },
                     path: action_path,
                     flags: FLAG_PERSISTENCE_TASK_ARTIFACT,
@@ -368,6 +370,7 @@ fn to_auth_event(logon: &LogonEvent) -> Option<Event> {
             user,
             timestamp_ns: now_ns(),
             comm: LSASS_COMM.to_string(),
+            container: None, // Windows: no container support
         },
         outcome,
         kind,
