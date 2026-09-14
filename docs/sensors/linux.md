@@ -43,6 +43,20 @@ its own parser (conntrack's attributes are TLV-nested, a meaningfully bigger job
 `sock_diag`'s fixed-size struct) — scoped out to keep this slice reviewable, tracked
 as follow-ups on #92, not silently dropped.
 
+**Status (issue #92, schema wiring):** Listening sockets now reach `schema::Event` —
+`listen_port_events()` maps a snapshot to `Event::ListenPort` (schema v10 -> v11),
+resolving each joined PID's `comm`/`ppid`/`gid` from `/proc/<pid>/status` (uid is
+kernel-reported by `sock_diag` itself, no `/proc` read needed for that one). An
+unattributable PID (exited between the two queries, or another user's process) is
+silently skipped, not emitted with fabricated metadata. This is the mapping issue
+#92's "listening-port drift" done-when item needs, but nothing yet calls it on a
+cadence or diffs consecutive snapshots for drift, and nothing feeds its output to
+`crates/correlator`'s `EventBus` — both are a caller's job that doesn't exist yet.
+Conntrack's and proc connector's own schema/`tamper` wiring are explicitly deferred
+past this slice too — see the crate doc's "Deliberately not here yet" section for
+why (conntrack flows carry no PID from the kernel at all; proc connector's role is a
+`tamper` cross-check that may not want to be a `schema::Event` in the first place).
+
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's
 `tail` module doc for why) and classifies an allowlist: sshd accept/fail, PAM
