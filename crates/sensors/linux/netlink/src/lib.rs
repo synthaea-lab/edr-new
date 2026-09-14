@@ -17,7 +17,40 @@
 //! owning PID(s) by scanning `/proc` ([`proc_join`]), the same technique `ss`/
 //! `lsof` use. Verified against this dev machine's real kernel — no root needed
 //! (confirmed empirically: `sock_diag` for TCP works unprivileged, unlike
-//! conntrack and proc connector below).
+//! conntrack below).
+//!
+//! **conntrack is also done** — [`conntrack_socket::dump`] queries the kernel's
+//! conntrack table (IPv4 + IPv6) over `NETLINK_NETFILTER`/`ctnetlink`
+//! ([`conntrack_attrs`]/[`conntrack_socket`]), decoding each flow's 5-tuple
+//! (both directions), status, timeout, and packet/byte accounting when the
+//! kernel provides it. This is the recursive `nlattr` tree (`CTA_TUPLE_ORIG` ->
+//! `CTA_TUPLE_IP` -> `CTA_IP_V4_SRC`) that made conntrack "a full netlink
+//! sub-protocol of its own" rather than a `sock_diag`-sized job — confirmed
+//! against a real capture on this dev machine byte for byte before being
+//! pinned into tests. Accounting (`CTA_COUNTERS_*`) requires
+//! `net.netfilter.nf_conntrack_acct=1` on the target kernel — off by default,
+//! confirmed empirically (no counters attribute appears at all until it is
+//! turned on) — see [`conntrack_socket`]'s doc. Unprivileged reachability of
+//! conntrack is not characterized (every capture here ran as root).
+//!
+//! **`CTA_PROTOINFO`'s TCP state is also decoded** — [`TcpState`], from
+//! `CTA_PROTOINFO` -> `CTA_PROTOINFO_TCP` -> `CTA_PROTOINFO_TCP_STATE`, a
+//! third level of `nlattr` nesting beyond the tuple's two. Only present for
+//! TCP flows — confirmed against a real capture on this dev machine: UDP
+//! dump entries carry no `CTA_PROTOINFO` attribute at all. The sibling
+//! `CTA_PROTOINFO_TCP_WSCALE_*`/`_FLAGS_*` sub-attributes are decoded on the
+//! wire but not surfaced — not needed for beacon volume/periodicity
+//! features, same scoping call as `CTA_STATUS`'s individual `IPS_*` bits.
+//!
+//! **proc connector** (`NETLINK_CONNECTOR`, fork/exec/exit) is a separate,
+//! independent foundation slice — see PR #179, not part of this one.
+//!
+//! **proc connector is also done** — [`ProcEventSubscription`] subscribes to the
+//! kernel's `CN_IDX_PROC` multicast group over `NETLINK_CONNECTOR`
+//! ([`proc_events`]/[`proc_socket`]) and decodes fork/exec/exit broadcasts. Root/
+//! `CAP_NET_ADMIN`-only (unlike `sock_diag`): confirmed against this dev
+//! machine that the kernel rejects the subscribe with `EPERM` for an
+//! unprivileged caller, reported back as a proper `NetlinkError`, not a panic.
 //!
 //! **`schema::Event` wiring, for listening sockets:** [`listen_port_events`] maps
 //! a [`snapshot`] to [`schema::Event::ListenPort`] (`schema` `SCHEMA_VERSION` 10 ->
@@ -37,14 +70,8 @@
 //! before this wiring existed.
 //!
 //! Deliberately **not** here yet:
-//! - **conntrack** and **proc connector** — both were confirmed reachable in this
-//!   sandbox (this session has passwordless `sudo`), but each is a full netlink
-//!   sub-protocol of its own (conntrack's TLV-nested attributes — tuples,
-//!   counters — are a meaningfully bigger parser than `sock_diag`'s fixed-size
-//!   struct). Scoped out to keep this slice reviewable; tracked as follow-ups on
-//!   #92, not silently dropped.
-//! - `schema::Event` wiring for conntrack (beacon volume/periodicity features) and
-//!   proc connector (the eBPF cross-check): both need design decisions beyond this
+//! - `schema::Event` wiring for `conntrack` (beacon volume/periodicity features) and
+//!   `proc connector` (the eBPF cross-check): both need design decisions beyond this
 //!   slice's scope — conntrack flows carry no PID at all from the kernel (would
 //!   need a further join, e.g. against a `sock_diag` snapshot's own tuples, to
 //!   attribute one), and the proc connector's role per the issue is a *tamper*
@@ -61,17 +88,32 @@
 //! - Periodic re-snapshotting / drift detection between snapshots — [`snapshot`]
 //!   is a one-shot query; a caller decides the cadence. No lab VM here to
 //!   validate the issue's "listening-port drift" done-when item against.
+//! - `PROC_EVENT_UID`/`_GID`/`_SID`/`_PTRACE`/`_COMM`/`_COREDUMP` — decoded as
+//!   [`ProcEvent::Other`] rather than their own variants; nothing in the eBPF
+//!   stream to cross-check them against yet (see [`proc_events`]).
 
+mod conntrack_attrs;
 mod normalize;
+mod proc_events;
 mod proc_join;
 mod proc_meta;
 mod wire;
 
 #[cfg(target_os = "linux")]
+mod conntrack_socket;
+#[cfg(target_os = "linux")]
+mod proc_socket;
+#[cfg(target_os = "linux")]
 mod socket;
 
 use std::net::SocketAddr;
 
+pub use conntrack_attrs::{ConntrackFlow, FlowCounters, FlowTuple, TcpState};
+#[cfg(target_os = "linux")]
+pub use conntrack_socket::dump as dump_conntrack;
+pub use proc_events::ProcEvent;
+#[cfg(target_os = "linux")]
+pub use proc_socket::ProcEventSubscription;
 #[cfg(target_os = "linux")]
 pub use socket::NetlinkError;
 pub use wire::{DiagMsg, TCP_ESTABLISHED, TCP_LISTEN};
