@@ -7,12 +7,15 @@ use aya_ebpf::{
         bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_probe_read_kernel_str_bytes,
         bpf_probe_read_user, bpf_probe_read_user_str_bytes,
     },
-    macros::{lsm, map, tracepoint},
+    macros::{lsm, map, tracepoint, uprobe, uretprobe},
     maps::{HashMap, PerCpuArray, RingBuf},
-    programs::{LsmContext, TracePointContext},
+    programs::{LsmContext, ProbeContext, RetProbeContext, TracePointContext},
 };
 use aya_log_ebpf::{info, warn};
-use sensor_linux_wire::{ConnectEvent, ExecEvent, FileOpenEvent, LineageEntry, TASK_COMM_LEN};
+use sensor_linux_wire::{
+    ConnectEvent, ExecEvent, FileOpenEvent, LineageEntry, ReadlineInputEvent, TlsCaptureEvent,
+    TASK_COMM_LEN, MAX_TLS_CAPTURE,
+};
 
 // This probe reads NO `task_struct`/`mm_struct` frozen offset: parent lineage (ppid +
 // parent comm) comes from `sched_process_fork` tracepoint fields via `PROC_LINEAGE`
@@ -535,6 +538,260 @@ fn try_file_open(ctx: LsmContext) -> Result<i32, i32> {
 
     let pid = (bpf_get_current_pid_tgid() >> 32) as u32;
     info!(&ctx, "sensor-linux-ebpf: lsm file_open pid={}", pid);
+    Ok(0)
+}
+
+// --- Uprobes: TLS plaintext capture (issue #90) ------------------------------------
+//
+// These uprobes attach to SSL_read/SSL_write in OpenSSL/BoringSSL/GnuTLS libraries.
+// Attachment is done from userspace (sensor-linux-uprobes) after resolving symbols
+// with goblin — the eBPF programs below are just the handlers.
+
+/// Ring buffer for TLS capture events.
+#[map]
+static TLS_CAPTURE_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+/// Per-CPU scratch for building one `TlsCaptureEvent` (256 bytes data budget).
+#[map]
+static TLS_SCRATCH: PerCpuArray<TlsCaptureEvent> = PerCpuArray::with_max_entries(1, 0);
+
+/// Tracks SSL_read buffer pointers between entry and return: pid → (buf_ptr, num).
+/// SSL_read(SSL *ssl, void *buf, int num) fills `buf` on success, so we need to
+/// stash the arguments at entry and read the buffer at return (uretprobe).
+#[map]
+static SSL_READ_ARGS: HashMap<u64, (u64, u32)> = HashMap::with_max_entries(1024, 0);
+
+/// Uprobe on SSL_write entry (pre-encryption plaintext capture).
+/// Signature: `int SSL_write(SSL *ssl, const void *buf, int num)`
+/// Captures the first MAX_TLS_CAPTURE bytes of `buf` before encryption.
+#[uprobe]
+pub fn ssl_write(ctx: ProbeContext) -> u32 {
+    match try_ssl_write(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_ssl_write(ctx: ProbeContext) -> Result<u32, u32> {
+    // SSL_write(SSL *ssl, const void *buf, int num)
+    // arg(0) = ssl, arg(1) = buf, arg(2) = num
+    let buf_ptr: u64 = ctx.arg(1).ok_or(1u32)?;
+    let num: i32 = ctx.arg(2).ok_or(1u32)?;
+
+    if buf_ptr == 0 || num <= 0 {
+        return Ok(0);
+    }
+
+    let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
+    let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
+
+    let e = TLS_SCRATCH.get_ptr_mut(0).ok_or(1u32)?;
+    unsafe {
+        core::ptr::write_bytes(e, 0, 1);
+
+        (*e).meta.pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*e).meta.ppid = lineage_ppid();
+        (*e).meta.uid = uid_gid as u32;
+        (*e).meta.gid = (uid_gid >> 32) as u32;
+        (*e).meta.timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_ns();
+        let mut i = 0usize;
+        while i < TASK_COMM_LEN {
+            (*e).meta.comm[i] = comm[i];
+            i += 1;
+        }
+
+        (*e).direction = 1; // write (pre-encryption)
+        (*e).lib_type = 0;  // OpenSSL (userspace will set correct type)
+
+        // Capture first N bytes of plaintext (budget: MAX_TLS_CAPTURE).
+        // TLS data is binary, not null-terminated, so we read byte-by-byte up to
+        // the budget or the actual buffer size, whichever is smaller.
+        let to_read = if num as usize > MAX_TLS_CAPTURE {
+            MAX_TLS_CAPTURE
+        } else {
+            num as usize
+        };
+
+        // Read bytes one by one to avoid null-termination issues with binary data.
+        let mut bytes_read = 0usize;
+        while bytes_read < to_read {
+            if let Ok(byte) = bpf_probe_read_user((buf_ptr + bytes_read as u64) as *const u8) {
+                (*e).data[bytes_read] = byte;
+                bytes_read += 1;
+            } else {
+                break;
+            }
+        }
+        (*e).bytes_len = bytes_read as u32;
+
+        if TLS_CAPTURE_EVENTS.output::<TlsCaptureEvent>(&*e, 0).is_err() {
+            warn!(
+                &ctx,
+                "sensor-linux-ebpf: ring buffer full, dropping TLS write event"
+            );
+        }
+    }
+
+    Ok(0)
+}
+
+/// Uprobe on SSL_read entry: stash arguments for the uretprobe.
+/// Signature: `int SSL_read(SSL *ssl, void *buf, int num)`
+#[uprobe]
+pub fn ssl_read_entry(ctx: ProbeContext) -> u32 {
+    // SSL_read(SSL *ssl, void *buf, int num)
+    // arg(0) = ssl, arg(1) = buf, arg(2) = num
+    if let (Some(buf_ptr), Some(num)) = (ctx.arg::<u64>(1), ctx.arg::<i32>(2)) {
+        if buf_ptr != 0 && num > 0 {
+            let pid_tgid = bpf_get_current_pid_tgid();
+            let _ = SSL_READ_ARGS.insert(&pid_tgid, &(buf_ptr, num as u32), 0);
+        }
+    }
+    0
+}
+
+/// Uretprobe on SSL_read return: capture decrypted plaintext.
+/// The return value is the number of bytes read, or <= 0 on error.
+#[uretprobe]
+pub fn ssl_read_exit(ctx: RetProbeContext) -> u32 {
+    match try_ssl_read_exit(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_ssl_read_exit(ctx: RetProbeContext) -> Result<u32, u32> {
+    let retval: i32 = unsafe { ctx.ret().ok_or(1u32)? }; // SSL_read's return value
+    if retval <= 0 {
+        return Ok(0); // Read failed or no data
+    }
+
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let (buf_ptr, _num) = match unsafe { SSL_READ_ARGS.get(&pid_tgid) } {
+        Some(args) => *args,
+        None => return Ok(0), // Entry wasn't tracked
+    };
+
+    let _ = SSL_READ_ARGS.remove(&pid_tgid);
+
+    let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
+    let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
+
+    let e = TLS_SCRATCH.get_ptr_mut(0).ok_or(1u32)?;
+    unsafe {
+        core::ptr::write_bytes(e, 0, 1);
+
+        (*e).meta.pid = (pid_tgid >> 32) as u32;
+        (*e).meta.ppid = lineage_ppid();
+        (*e).meta.uid = uid_gid as u32;
+        (*e).meta.gid = (uid_gid >> 32) as u32;
+        (*e).meta.timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_ns();
+        let mut i = 0usize;
+        while i < TASK_COMM_LEN {
+            (*e).meta.comm[i] = comm[i];
+            i += 1;
+        }
+
+        (*e).direction = 0; // read (post-decryption)
+        (*e).lib_type = 0;  // OpenSSL
+
+        // Capture first N bytes of plaintext (budget: MAX_TLS_CAPTURE).
+        let to_read = if retval as usize > MAX_TLS_CAPTURE {
+            MAX_TLS_CAPTURE
+        } else {
+            retval as usize
+        };
+
+        // Read bytes one by one to avoid null-termination issues with binary data.
+        let mut bytes_read = 0usize;
+        while bytes_read < to_read {
+            if let Ok(byte) = bpf_probe_read_user((buf_ptr + bytes_read as u64) as *const u8) {
+                (*e).data[bytes_read] = byte;
+                bytes_read += 1;
+            } else {
+                break;
+            }
+        }
+        (*e).bytes_len = bytes_read as u32;
+
+        if TLS_CAPTURE_EVENTS.output::<TlsCaptureEvent>(&*e, 0).is_err() {
+            warn!(
+                &ctx,
+                "sensor-linux-ebpf: ring buffer full, dropping TLS read event"
+            );
+        }
+    }
+
+    Ok(0)
+}
+
+// --- Uprobes: Shell readline capture (issue #90) ------------------------------------
+
+/// Ring buffer for readline input events.
+#[map]
+static READLINE_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
+
+/// Per-CPU scratch for building one `ReadlineInputEvent` (512 bytes input budget).
+#[map]
+static READLINE_SCRATCH: PerCpuArray<ReadlineInputEvent> = PerCpuArray::with_max_entries(1, 0);
+
+/// Uretprobe on readline return: capture interactive shell command.
+/// Signature: `char *readline(const char *prompt)`
+/// The return value is a malloc'd string (freed by caller), or NULL on EOF/error.
+#[uretprobe]
+pub fn readline_exit(ctx: RetProbeContext) -> u32 {
+    match try_readline_exit(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_readline_exit(ctx: RetProbeContext) -> Result<u32, u32> {
+    let line_ptr: u64 = unsafe { ctx.ret().ok_or(1u32)? }; // readline's return value
+    if line_ptr == 0 {
+        return Ok(0); // EOF or error
+    }
+
+    let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
+    let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
+
+    let e = READLINE_SCRATCH.get_ptr_mut(0).ok_or(1u32)?;
+    unsafe {
+        core::ptr::write_bytes(e, 0, 1);
+
+        (*e).meta.pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*e).meta.ppid = lineage_ppid();
+        (*e).meta.uid = uid_gid as u32;
+        (*e).meta.gid = (uid_gid >> 32) as u32;
+        (*e).meta.timestamp_ns = aya_ebpf::helpers::bpf_ktime_get_ns();
+        let mut i = 0usize;
+        while i < TASK_COMM_LEN {
+            (*e).meta.comm[i] = comm[i];
+            i += 1;
+        }
+
+        // Detect shell type from comm (userspace will override if needed).
+        (*e).shell_type = if comm.starts_with(b"bash") {
+            0 // bash
+        } else if comm.starts_with(b"zsh") {
+            1 // zsh
+        } else {
+            0 // default to bash
+        };
+
+        // Capture the full command line (budget: MAX_READLINE_INPUT).
+        if let Ok(input) = bpf_probe_read_user_str_bytes(line_ptr as *const u8, &mut (*e).input) {
+            (*e).input_len = input.len() as u32;
+        }
+
+        if READLINE_EVENTS.output::<ReadlineInputEvent>(&*e, 0).is_err() {
+            warn!(
+                &ctx,
+                "sensor-linux-ebpf: ring buffer full, dropping readline event"
+            );
+        }
+    }
+
     Ok(0)
 }
 
