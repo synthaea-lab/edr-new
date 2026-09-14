@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Synthaea agent MSI (#37): installs agent.exe + watchdog.exe into Program Files
+  and registers the watchdog as the "SynthaEDR" Windows service via its own
+  `install`/`uninstall` subcommands (see watchdog/src/service/windows.rs) rather
+  than WiX's native ServiceInstall/ServiceControl elements - the watchdog already
+  self-registers (sc create + failure-action + start), persisting the
+  agent-bin/alerts flags into the service's own binPath (#112), so
+  re-implementing that in WiX would just be a second, divergent way to do the
+  same thing.
+
+  WiX v3 (candle.exe/light.exe) chosen over v4/v5: a standalone toolset, no
+  dotnet/NuGet needed to install it (this repo's dev machines already juggle
+  enough toolchains - see lab/provisioning/windows-toolchain.ps1) or to build
+  with it.
+
+  NOT YET BUILD-TESTED (#37, first pass): no Windows machine was available to
+  run candle.exe/light.exe against this while authoring it. Build and test
+  install/uninstall on a real machine before relying on it - see README.md.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="Synthaea Agent"
+           Language="1033"
+           Version="0.1.0.0"
+           Manufacturer="Synthaea"
+           UpgradeCode="D79BAF8F-91AC-4018-8274-297161F7F57F">
+    <!--
+      UpgradeCode must never change across versions (it is what ties future
+      releases together for MajorUpgrade below) - Product/Id="*" (a fresh GUID
+      each build) is what SHOULD change every build; Version is what actually
+      drives upgrade/downgrade comparisons.
+    -->
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+
+    <!--
+      perMachine (via Package above) already implies elevation is required;
+      the watchdog's own `install` custom action below needs that (sc create).
+    -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="Synthaea">
+          <Component Id="AgentExe" Guid="855B0481-4C70-4A29-A15D-23625BD085AE">
+            <File Id="AgentExeFile" Source="$(var.RepoRoot)\target\release\agent.exe" KeyPath="yes" />
+          </Component>
+          <Component Id="WatchdogExe" Guid="4BE7B00A-A454-4E8D-B786-A15E32D22AFF">
+            <File Id="WatchdogExeFile" Source="$(var.RepoRoot)\target\release\watchdog.exe" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="MainFeature" Title="Synthaea Agent" Level="1">
+      <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="WatchdogExe" />
+    </Feature>
+
+    <!--
+      FileKey (not a literal path): resolves to wherever AgentExeFile/
+      WatchdogExeFile actually got installed, so this does not hardcode
+      INSTALLFOLDER twice. Deferred + Impersonate="no": runs elevated, in the
+      installer's script context, after the files are actually on disk -
+      sc create would fail if scheduled any earlier or run as the (possibly
+      non-admin) interactive user.
+
+      The alerts flag is explicit ("[INSTALLFOLDER]alerts.ndjson"): without
+      it, watchdog.exe install's own CLI default ("alerts.ndjson", relative)
+      would resolve against msiexec's own working directory, not
+      INSTALLFOLDER - see cmd_install's std::path::absolute() call in
+      service/windows.rs. No agent-bin flag needed: resolve_agent_bin's
+      default (next to the watchdog executable) already finds AgentExeFile,
+      since both land in the same INSTALLFOLDER.
+    -->
+    <CustomAction Id="InstallService"
+                  FileKey="WatchdogExeFile"
+                  ExeCommand="install --alerts &quot;[INSTALLFOLDER]alerts.ndjson&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="check" />
+
+    <!--
+      Return="ignore": an uninstall must not fail (leaving the product stuck
+      "half removed") just because the service was already gone or `sc
+      delete` hit a transient error - matches watchdog.exe uninstall's own
+      command-side tolerance (run_sc for "stop" is already best-effort there).
+    -->
+    <CustomAction Id="UninstallService"
+                  FileKey="WatchdogExeFile"
+                  ExeCommand="uninstall"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!--
+        NOT Installed: only on a fresh install / major upgrade's install half,
+        never on a repair of an already-installed product (repairing would
+        otherwise call `watchdog.exe install` against an already-registered
+        service on every `msiexec /fa`).
+      -->
+      <Custom Action="InstallService" After="InstallFiles">NOT Installed</Custom>
+      <!--
+        Before RemoveFiles, not after: the service must be stopped and
+        deregistered while watchdog.exe still exists on disk to run.
+        Installed AND REMOVE="ALL" is the standard WiX idiom for "this is a
+        real uninstall", not a repair or a feature-level modify.
+      -->
+      <Custom Action="UninstallService" Before="RemoveFiles">Installed AND (REMOVE="ALL")</Custom>
+    </InstallExecuteSequence>
+  </Product>
+</Wix>
