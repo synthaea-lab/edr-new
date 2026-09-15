@@ -31,7 +31,7 @@ mod normalize;
 mod redact;
 
 #[cfg(target_os = "linux")]
-pub use config::UprobesConfig;
+pub use config::{ComplianceMode, UprobesConfig};
 
 #[cfg(target_os = "linux")]
 pub use sensor::UprobesSensor;
