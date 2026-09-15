@@ -99,11 +99,16 @@ fi
 command -v bpf-linker >/dev/null 2>&1 && bpf-linker --version
 
 echo "== bindgen-cli + aya-tool =="
-# NOT verified against Alpine in the session this script was written from
-# (only cargo build/test/clippy of the existing workspace was exercised —
-# nothing here regenerates aya bindings). libclang discovery may need
-# LIBCLANG_PATH set explicitly on Alpine; revisit if this step fails.
-command -v bindgen >/dev/null 2>&1 || cargo install bindgen-cli
+# Verified on Alpine: `cargo install bindgen-cli` produces a static-pie binary
+# (Rust's musl default) that can generate --version output fine but panics
+# the moment it actually needs libclang ("Unable to find libclang: ... Dynamic
+# loading not supported") — a static musl binary cannot dlopen anything at
+# runtime, no path config fixes that. Same class of bug as bpf-linker/ort
+# earlier in this script: rebuild dynamic. aya-tool, by contrast, generates
+# bindings straight from kernel BTF without touching libclang/dlopen — it
+# works fine static-pie, no rebuild needed.
+command -v bindgen >/dev/null 2>&1 \
+  || RUSTFLAGS="-C target-feature=-crt-static" cargo install bindgen-cli --locked
 command -v aya-tool >/dev/null 2>&1 || cargo install --git https://github.com/aya-rs/aya aya-tool
 
 for tool in bindgen aya-tool bpf-linker; do
