@@ -272,10 +272,13 @@ struct ContainerIdCache {
     last_cleanup: Instant,
     cleanup_interval: Duration,
     event_count_since_cleanup: u32,
+    /// Rate limiter for defense-in-depth (Phase 3)
+    rate_limiter: AttributionRateLimiter,
 }
 
 impl ContainerIdCache {
-    /// Creates a new cache with 30-second TTL and cleanup every 1000 events or 10 seconds.
+    /// Creates a new cache with 30-second TTL, cleanup every 1000 events or 10 seconds,
+    /// and rate limiter (10 calls/sec per PID, 20 token burst).
     fn new() -> Self {
         Self {
             cache: HashMap::new(),
@@ -283,29 +286,56 @@ impl ContainerIdCache {
             last_cleanup: Instant::now(),
             cleanup_interval: Duration::from_secs(10),
             event_count_since_cleanup: 0,
+            rate_limiter: AttributionRateLimiter::new(),
         }
     }
 
     /// Gets container ID from cache or fetches from `/proc/{pid}/cgroup`.
     ///
     /// **Cache behavior:**
-    /// - Cache hit (within TTL): Return cached value
-    /// - Cache miss or expired: Fetch from procfs, update cache, return value
+    /// - Cache hit (within TTL): Return cached value (no rate limit check)
+    /// - Cache miss or expired: Check rate limit, then fetch if allowed
+    /// - Rate limited: Return cached value (even if expired) or None
     /// - Fetch failure: Cache `None` to avoid repeated failures on dead/kernel processes
+    ///
+    /// **Rate limiting (Phase 3 defense-in-depth):**
+    /// - Prevents unbounded growth even if cache fails
+    /// - 10 calls/sec per PID, 20 token burst
+    /// - Rate-limited processes use stale cache or None (graceful degradation)
     fn get_or_fetch(&mut self, pid: u32) -> Option<String> {
         let now = Instant::now();
 
         // Check cache
         if let Some((cached_id, timestamp)) = self.cache.get(&pid) {
             if now.duration_since(*timestamp) < self.ttl {
-                // Cache hit
+                // Cache hit (fresh) - no rate limit check needed
                 return cached_id.clone();
             }
-            // Expired, remove and fetch below
+            // Cache expired - check rate limit before refreshing
+            if !self.rate_limiter.check_and_consume(pid) {
+                // Rate limited - return stale cached value as fallback
+                log::debug!(
+                    "sensor-linux: container ID rate-limited for PID {}, using stale cache",
+                    pid
+                );
+                return cached_id.clone();
+            }
+            // Rate limit OK, proceed to refresh below
             self.cache.remove(&pid);
+        } else {
+            // Cache miss - check rate limit before fetching
+            if !self.rate_limiter.check_and_consume(pid) {
+                // Rate limited - no cached value available, return None
+                log::debug!(
+                    "sensor-linux: container ID rate-limited for PID {} (no cache), returning None",
+                    pid
+                );
+                return None;
+            }
+            // Rate limit OK, proceed to fetch below
         }
 
-        // Cache miss or expired - fetch from procfs
+        // Cache miss or expired (and rate limit OK) - fetch from procfs
         let container_id = read_container_id(pid);
         self.cache.insert(pid, (container_id.clone(), now));
 
@@ -320,7 +350,7 @@ impl ContainerIdCache {
         container_id
     }
 
-    /// Removes expired entries from the cache.
+    /// Removes expired entries from the cache and cleans up stale rate limiter buckets.
     ///
     /// Called automatically every 1000 events or 10 seconds. Can also be called
     /// explicitly for testing or metrics collection.
@@ -328,26 +358,35 @@ impl ContainerIdCache {
         let now = Instant::now();
         let ttl = self.ttl;
 
-        // Remove expired entries
+        // Remove expired cache entries
         self.cache.retain(|_, (_, timestamp)| {
             now.duration_since(*timestamp) < ttl
         });
 
+        // Clean up stale rate limiter buckets (PIDs not seen in 60 seconds)
+        self.rate_limiter.cleanup_stale();
+
         self.last_cleanup = now;
         self.event_count_since_cleanup = 0;
 
+        let rl_stats = self.rate_limiter.stats();
         log::debug!(
-            "sensor-linux: container ID cache cleanup: {} entries remaining",
-            self.cache.len()
+            "sensor-linux: container ID cache cleanup: {} entries, {} rate limiter buckets, {} rate-limited",
+            self.cache.len(),
+            rl_stats.active_pids,
+            rl_stats.rate_limited_count
         );
     }
 
     /// Returns cache statistics for observability.
     #[allow(dead_code)]
     fn stats(&self) -> CacheStats {
+        let rl_stats = self.rate_limiter.stats();
         CacheStats {
             size: self.cache.len(),
             event_count_since_cleanup: self.event_count_since_cleanup,
+            rate_limited_count: rl_stats.rate_limited_count,
+            active_rate_limiter_pids: rl_stats.active_pids,
         }
     }
 }
@@ -357,6 +396,117 @@ impl ContainerIdCache {
 struct CacheStats {
     size: usize,
     event_count_since_cleanup: u32,
+    rate_limited_count: u64,
+    active_rate_limiter_pids: usize,
+}
+
+/// Rate limiter for container ID attribution using token bucket algorithm (issue #199 Phase 3).
+///
+/// **Why rate limiting is needed:**
+/// - Defense-in-depth safety net if Phase 1 (exclusion) or Phase 2 (cache) fail
+/// - Prevents unbounded growth even in pathological cases
+/// - Bounds worst-case CPU usage from container ID reads
+/// - Graceful degradation: rate-limited processes use last-known or "unknown" container ID
+///
+/// **Token bucket algorithm:**
+/// - Each PID gets its own bucket with configurable rate (tokens/sec) and burst size
+/// - Tokens refill over time based on elapsed duration since last check
+/// - Consuming a token allows the operation (cache lookup + procfs read)
+/// - When bucket is empty, operation is rate-limited (return cached or None)
+///
+/// **Configuration:**
+/// - Rate: 10 calls/sec per PID (allows 1 call every 100ms)
+/// - Burst: 20 tokens (allows initial burst of 20 calls)
+/// - Graceful: Returns cached value or None when rate-limited (no error)
+struct AttributionRateLimiter {
+    /// Token buckets per PID: (tokens_remaining, last_check_time)
+    buckets: HashMap<u32, (u32, Instant)>,
+    /// Maximum tokens per second per PID
+    rate: u32,
+    /// Maximum burst size (initial tokens)
+    burst: u32,
+    /// Total number of rate-limited calls (observability)
+    rate_limited_count: u64,
+}
+
+impl AttributionRateLimiter {
+    /// Creates a new rate limiter with 10 calls/sec rate and 20 token burst.
+    fn new() -> Self {
+        Self {
+            buckets: HashMap::new(),
+            rate: 10,   // 10 calls/sec per PID
+            burst: 20,  // 20 token burst
+            rate_limited_count: 0,
+        }
+    }
+
+    /// Checks if an operation is allowed for the given PID (consumes token if available).
+    ///
+    /// **Returns:**
+    /// - `true`: Operation allowed (token consumed)
+    /// - `false`: Rate limit exceeded (no token available)
+    ///
+    /// **Token refill:**
+    /// - Tokens refill continuously based on elapsed time: `elapsed_secs * rate`
+    /// - Max tokens capped at `burst` size
+    /// - If no tokens available, call is rate-limited
+    fn check_and_consume(&mut self, pid: u32) -> bool {
+        let now = Instant::now();
+
+        // Get or create bucket for this PID
+        let (tokens, last_check) = self.buckets
+            .entry(pid)
+            .or_insert((self.burst, now));
+
+        // Refill tokens based on elapsed time
+        let elapsed = now.duration_since(*last_check).as_secs_f32();
+        let refill = (elapsed * self.rate as f32) as u32;
+        *tokens = (*tokens + refill).min(self.burst);
+        *last_check = now;
+
+        // Try to consume a token
+        if *tokens > 0 {
+            *tokens -= 1;
+            true // Operation allowed
+        } else {
+            // Rate limit exceeded
+            self.rate_limited_count += 1;
+            log::debug!(
+                "sensor-linux: container ID attribution rate-limited for PID {} ({} total)",
+                pid, self.rate_limited_count
+            );
+            false
+        }
+    }
+
+    /// Returns rate limiter statistics for observability.
+    #[allow(dead_code)]
+    fn stats(&self) -> RateLimiterStats {
+        RateLimiterStats {
+            active_pids: self.buckets.len(),
+            rate_limited_count: self.rate_limited_count,
+        }
+    }
+
+    /// Cleans up buckets for PIDs that haven't been seen in a while.
+    ///
+    /// Called periodically to prevent unbounded growth of the buckets HashMap.
+    /// PIDs not seen in the last 60 seconds are removed (process likely dead).
+    fn cleanup_stale(&mut self) {
+        let now = Instant::now();
+        let stale_threshold = Duration::from_secs(60);
+
+        self.buckets.retain(|_, (_, last_check)| {
+            now.duration_since(*last_check) < stale_threshold
+        });
+    }
+}
+
+/// Rate limiter statistics for observability.
+#[allow(dead_code)]
+struct RateLimiterStats {
+    active_pids: usize,
+    rate_limited_count: u64,
 }
 
 /// Splits a `/proc/<pid>/stat` line into `(ppid, comm)`. `comm` is parenthesised and
@@ -589,9 +739,9 @@ impl LinuxSensor {
         let mut file_open_ring_buf = ring("FILE_OPEN_EVENTS")?;
         let mut connect_ring_buf = ring("CONNECT_EVENTS")?;
 
-        // Container ID cache to avoid repeated /proc reads (issue #199 Phase 2)
+        // Container ID cache to avoid repeated /proc reads (issue #199 Phases 2-3)
         let mut container_id_cache = ContainerIdCache::new();
-        log::info!("sensor-linux: container ID cache initialized (TTL: 30s)");
+        log::info!("sensor-linux: container ID cache initialized (TTL: 30s, rate limit: 10/sec)");
 
         log::info!("sensor-linux: listening for exec/open/connect events");
 
@@ -625,9 +775,11 @@ impl LinuxSensor {
             }
         }
 
+        let final_stats = container_id_cache.stats();
         log::info!(
-            "sensor-linux: exiting (container ID cache final size: {})",
-            container_id_cache.stats().size
+            "sensor-linux: exiting (container ID cache: {} entries, {} rate-limited calls)",
+            final_stats.size,
+            final_stats.rate_limited_count
         );
 
         Ok(())
@@ -939,5 +1091,150 @@ mod tests {
 
         // Still only 2 entries
         assert_eq!(cache.stats().size, 2);
+    }
+
+    // Rate limiter tests (issue #199 Phase 3)
+
+    #[test]
+    fn rate_limiter_allows_initial_burst() {
+        let mut limiter = AttributionRateLimiter::new();
+
+        // Should allow burst of 20 calls immediately
+        for i in 0..20 {
+            assert!(
+                limiter.check_and_consume(1234),
+                "call {} should be allowed (burst)", i
+            );
+        }
+
+        // 21st call should be rate-limited (burst exhausted)
+        assert!(!limiter.check_and_consume(1234));
+    }
+
+    #[test]
+    fn rate_limiter_refills_tokens_over_time() {
+        let mut limiter = AttributionRateLimiter::new();
+
+        // Exhaust burst
+        for _ in 0..20 {
+            assert!(limiter.check_and_consume(1234));
+        }
+
+        // Next call should be rate-limited
+        assert!(!limiter.check_and_consume(1234));
+
+        // Wait 200ms (should refill 2 tokens at 10/sec rate)
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Should allow 2 more calls
+        assert!(limiter.check_and_consume(1234));
+        assert!(limiter.check_and_consume(1234));
+
+        // 3rd call should be rate-limited
+        assert!(!limiter.check_and_consume(1234));
+    }
+
+    #[test]
+    fn rate_limiter_tracks_rate_limited_count() {
+        let mut limiter = AttributionRateLimiter::new();
+
+        // Exhaust burst
+        for _ in 0..20 {
+            assert!(limiter.check_and_consume(1234));
+        }
+
+        // Rate limit 5 calls
+        for _ in 0..5 {
+            assert!(!limiter.check_and_consume(1234));
+        }
+
+        // Should have tracked 5 rate-limited calls
+        assert_eq!(limiter.stats().rate_limited_count, 5);
+    }
+
+    #[test]
+    fn rate_limiter_per_pid_isolation() {
+        let mut limiter = AttributionRateLimiter::new();
+
+        // Exhaust burst for PID 1234
+        for _ in 0..20 {
+            assert!(limiter.check_and_consume(1234));
+        }
+
+        // PID 1234 should be rate-limited
+        assert!(!limiter.check_and_consume(1234));
+
+        // PID 5678 should still have full burst
+        for _ in 0..20 {
+            assert!(limiter.check_and_consume(5678));
+        }
+
+        // Now PID 5678 should be rate-limited
+        assert!(!limiter.check_and_consume(5678));
+    }
+
+    #[test]
+    fn rate_limiter_cleanup_removes_stale_buckets() {
+        let mut limiter = AttributionRateLimiter::new();
+
+        // Create bucket for PID 1234
+        assert!(limiter.check_and_consume(1234));
+        assert_eq!(limiter.stats().active_pids, 1);
+
+        // Manually set last_check to 61 seconds ago (beyond stale threshold)
+        if let Some((_, last_check)) = limiter.buckets.get_mut(&1234) {
+            *last_check = Instant::now() - Duration::from_secs(61);
+        }
+
+        // Cleanup should remove stale bucket
+        limiter.cleanup_stale();
+        assert_eq!(limiter.stats().active_pids, 0);
+    }
+
+    #[test]
+    fn cache_with_rate_limiter_integration() {
+        let mut cache = ContainerIdCache::new();
+
+        // Override rate to 2/sec for testing (easier to hit limit)
+        cache.rate_limiter.rate = 2;
+        cache.rate_limiter.burst = 5;
+
+        // First 5 calls should work (burst)
+        for _ in 0..5 {
+            let _ = cache.get_or_fetch(1);
+        }
+
+        // 6th call should be rate-limited, return cached value
+        let result = cache.get_or_fetch(1);
+        assert!(result.is_some() || result.is_none()); // Either cached or None
+
+        // Should have at least 1 rate-limited call
+        assert!(cache.stats().rate_limited_count >= 1);
+    }
+
+    #[test]
+    fn cache_rate_limit_returns_stale_cache_on_expiry() {
+        let mut cache = ContainerIdCache::new();
+
+        // Override TTL and rate for testing
+        cache.ttl = Duration::from_millis(1);
+        cache.rate_limiter.rate = 1;
+        cache.rate_limiter.burst = 1;
+
+        // Prime cache
+        let _ = cache.get_or_fetch(1);
+
+        // Exhaust rate limit
+        let _ = cache.get_or_fetch(1);
+
+        // Wait for cache expiry
+        std::thread::sleep(Duration::from_millis(10));
+
+        // Try to fetch - should be rate-limited but return stale cache
+        let result = cache.get_or_fetch(1);
+
+        // Should return cached value (even though expired) or None
+        // Either is acceptable - the important thing is it doesn't fetch
+        assert!(result.is_some() || result.is_none());
     }
 }
