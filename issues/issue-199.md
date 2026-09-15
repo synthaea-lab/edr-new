@@ -615,9 +615,173 @@ Process with 1000 file_open events/sec:
 
 ---
 
-### Phase 3: Rate Limiting ⏳ PENDING
+### Phase 3: Rate Limiting ✅ IMPLEMENTED
 
-**Status:** Not started - optional defense-in-depth after Phase 2 validation
+**Commit:** 4405154
+**Date:** 2026-09-15
+
+**Userspace Changes (`crates/sensors/linux/userspace/src/sensor.rs`):**
+
+**AttributionRateLimiter struct (Token Bucket Algorithm):**
+```rust
+struct AttributionRateLimiter {
+    buckets: HashMap<u32, (u32, Instant)>,  // PID -> (tokens, last_check)
+    rate: u32,    // 10 calls/sec per PID
+    burst: u32,   // 20 token burst
+    rate_limited_count: u64,
+}
+```
+
+**Token bucket implementation:**
+```rust
+fn check_and_consume(&mut self, pid: u32) -> bool {
+    let now = Instant::now();
+    let (tokens, last_check) = self.buckets.entry(pid).or_insert((self.burst, now));
+
+    // Refill tokens based on elapsed time
+    let elapsed = now.duration_since(*last_check).as_secs_f32();
+    let refill = (elapsed * self.rate as f32) as u32;
+    *tokens = (*tokens + refill).min(self.burst);
+    *last_check = now;
+
+    // Try to consume a token
+    if *tokens > 0 {
+        *tokens -= 1;
+        true  // Operation allowed
+    } else {
+        self.rate_limited_count += 1;
+        false  // Rate limited
+    }
+}
+```
+
+**Integration in ContainerIdCache.get_or_fetch():**
+```rust
+fn get_or_fetch(&mut self, pid: u32) -> Option<String> {
+    let now = Instant::now();
+
+    // Cache hit (fresh) - no rate limit check needed
+    if let Some((cached_id, timestamp)) = self.cache.get(&pid) {
+        if now.duration_since(*timestamp) < self.ttl {
+            return cached_id.clone();  // Bypass rate limit
+        }
+
+        // Cache expired - check rate limit before refreshing
+        if !self.rate_limiter.check_and_consume(pid) {
+            // Rate limited - return stale cache as fallback
+            return cached_id.clone();
+        }
+    } else {
+        // Cache miss - check rate limit before fetching
+        if !self.rate_limiter.check_and_consume(pid) {
+            // Rate limited - no cached value, return None
+            return None;
+        }
+    }
+
+    // Rate limit OK - fetch from procfs
+    let container_id = read_container_id(pid);
+    self.cache.insert(pid, (container_id.clone(), now));
+    container_id
+}
+```
+
+**Graceful degradation:**
+- **Rate-limited with cached value:** Return stale cache (acceptable staleness)
+- **Rate-limited with no cache:** Return None (event has no container ID)
+- **No errors, no panics, no event loss**
+- **Debug logs for observability**
+
+**Automatic cleanup:**
+```rust
+fn cleanup_stale(&mut self) {
+    let now = Instant::now();
+    let stale_threshold = Duration::from_secs(60);
+
+    // Remove buckets for PIDs not seen in 60 seconds
+    self.buckets.retain(|_, (_, last_check)| {
+        now.duration_since(*last_check) < stale_threshold
+    });
+}
+```
+
+**Observability:**
+```rust
+// Init log
+log::info!("container ID cache initialized (TTL: 30s, rate limit: 10/sec)");
+
+// Debug log on rate limit hit
+log::debug!(
+    "container ID attribution rate-limited for PID {} ({} total)",
+    pid, rate_limited_count
+);
+
+// Cleanup log
+log::debug!(
+    "cache cleanup: {} entries, {} rate limiter buckets, {} rate-limited",
+    cache.len(), active_pids, rate_limited_count
+);
+
+// Exit log
+log::info!(
+    "exiting (container ID cache: {} entries, {} rate-limited calls)",
+    size, rate_limited_count
+);
+```
+
+**Performance Impact:**
+
+**Normal operation (cache hit):**
+- No rate limit check (bypassed)
+- Zero overhead
+
+**Cache miss (rare):**
+- Rate limit check: ~10-50ns (token refill + comparison)
+- Negligible compared to procfs read (~50-200µs)
+
+**Rate limited (very rare in normal operation):**
+- Returns stale cache or None immediately
+- Prevents expensive procfs read
+- Bounds worst-case CPU usage
+
+**Defense-in-Depth (All 3 Phases):**
+1. **Phase 1 (eBPF exclusion):** Prevents agent's own syscalls from being captured
+2. **Phase 2 (Cache):** Avoids repeated procfs reads (>95% hit rate expected)
+3. **Phase 3 (Rate limiting):** Bounds worst-case if exclusion/cache fail
+
+**Testing:**
+- ✅ 8 new unit tests covering rate limiter
+- ✅ Initial burst allows 20 calls
+- ✅ Token refill over time (200ms = 2 tokens at 10/sec)
+- ✅ Rate-limited count tracking
+- ✅ Per-PID isolation (independent buckets)
+- ✅ Stale bucket cleanup (60 sec threshold)
+- ✅ Integration with cache (stale cache return on rate limit)
+- ✅ Integration with cache (None return on cache miss + rate limit)
+- ✅ Code compiles (cargo check passes)
+
+**Status:**
+- ✅ Code complete and pushed
+- ✅ 8 unit tests added and passing
+- ✅ Integrated with ContainerIdCache
+- ⏳ Pending lab validation (measure rate limit hit frequency)
+- ⏳ Pending production monitoring (should be very rare)
+
+**Known Limitations:**
+- Rate limit is per-PID, not global (acceptable - prevents one bad process from affecting others)
+- Buckets HashMap unbounded (relies on cleanup + process lifetime)
+- Stale cache fallback has no TTL limit (acceptable - better than None)
+
+**Next Steps:**
+- Lab validation with all 3 phases combined
+- Measure rate limit hit frequency (should be very rare in normal operation)
+- Monitor cache hit rate and rate-limited calls in production
+- Consider adding metrics integration for observability
+
+**Expected Behavior:**
+- **Normal operation:** Phase 1 prevents self-loop, Phase 2 handles caching, Phase 3 never triggered
+- **High-volume process:** Phase 2 cache prevents most procfs reads, Phase 3 rarely triggered
+- **Pathological case:** Phase 3 bounds worst-case (returns stale/None, logs warning)
 
 ---
 
