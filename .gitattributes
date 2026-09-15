@@ -1,3 +1,22 @@
+# crates/correlator/src/engine.rs and crates/policy/src/lib.rs were committed with
+# CRLF while the rest of the tree is LF. rustfmt run on Linux (CI, or the lab VMs)
+# then rewrites those files whole just to flip line endings, burying the real diff.
+# Pin *.rs to LF so formatting stays a content-only change regardless of the
+# developer's core.autocrlf.
+*.rs text eol=lf
+
+# Shell scripts run inside Linux VMs and CI. With core.autocrlf=true on a Windows
+# checkout they would otherwise get CRLF, and the lab harness rsyncs the working
+# tree verbatim into the guest -- a lone `\r` then breaks `set -o pipefail` and
+# every command. Force LF regardless of the developer's git config.
+*.sh   text eol=lf
+*.bash text eol=lf
+
+# Windows-side scripts stay CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # ml/datasets baselines are hash-pinned (manifest.json's sample_sha256) against their
 # on-disk bytes. Without this, Windows contributors on the Git-for-Windows default
 # core.autocrlf=true get LF silently rewritten to CRLF on checkout, and every
