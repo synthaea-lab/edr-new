@@ -411,23 +411,59 @@ impl UprobesSensor {
                     continue;
                 }
 
-                // Attach ssl_write to SSL_write/SSL_write_ex
-                if (symbol.name == "SSL_write" || symbol.name == "SSL_write_ex")
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write", symbol)
-                {
-                    warn!("sensor-linux-uprobes: failed to attach ssl_write: {e}");
+                // Attach ssl_write to SSL_write/SSL_write_ex (per-library probe function)
+                if symbol.name == "SSL_write" || symbol.name == "SSL_write_ex" {
+                    let probe_name = match symbol.library_type {
+                        symbol_resolver::LibraryType::OpenSSL => "ssl_write_openssl",
+                        symbol_resolver::LibraryType::BoringSSL => "ssl_write_boringssl",
+                        symbol_resolver::LibraryType::GnuTLS => "ssl_write_gnutls",
+                        symbol_resolver::LibraryType::Unknown => "ssl_write_openssl", // Default to OpenSSL
+                    };
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                        warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
+                    }
                 }
-                // Attach ssl_read_entry to SSL_read/SSL_read_ex
-                if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry", symbol)
+                // GnuTLS uses gnutls_record_send instead of SSL_write
+                if symbol.name == "gnutls_record_send"
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write_gnutls", symbol)
                 {
-                    warn!("sensor-linux-uprobes: failed to attach ssl_read_entry: {e}");
+                    warn!("sensor-linux-uprobes: failed to attach ssl_write_gnutls: {e}");
                 }
-                // Also attach the uretprobe (ssl_read_exit)
-                if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit", symbol)
+                // Attach ssl_read_entry to SSL_read/SSL_read_ex (per-library probe function)
+                if symbol.name == "SSL_read" || symbol.name == "SSL_read_ex" {
+                    let probe_name = match symbol.library_type {
+                        symbol_resolver::LibraryType::OpenSSL => "ssl_read_entry_openssl",
+                        symbol_resolver::LibraryType::BoringSSL => "ssl_read_entry_boringssl",
+                        symbol_resolver::LibraryType::GnuTLS => "ssl_read_entry_gnutls",
+                        symbol_resolver::LibraryType::Unknown => "ssl_read_entry_openssl", // Default
+                    };
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                        warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
+                    }
+                }
+                // GnuTLS uses gnutls_record_recv instead of SSL_read
+                if symbol.name == "gnutls_record_recv"
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry_gnutls", symbol)
                 {
-                    warn!("sensor-linux-uprobes: failed to attach ssl_read_exit: {e}");
+                    warn!("sensor-linux-uprobes: failed to attach ssl_read_entry_gnutls: {e}");
+                }
+                // Also attach the uretprobe (ssl_read_exit_*) - per-library function
+                if symbol.name == "SSL_read" || symbol.name == "SSL_read_ex" {
+                    let probe_name = match symbol.library_type {
+                        symbol_resolver::LibraryType::OpenSSL => "ssl_read_exit_openssl",
+                        symbol_resolver::LibraryType::BoringSSL => "ssl_read_exit_boringssl",
+                        symbol_resolver::LibraryType::GnuTLS => "ssl_read_exit_gnutls",
+                        symbol_resolver::LibraryType::Unknown => "ssl_read_exit_openssl", // Default
+                    };
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                        warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
+                    }
+                }
+                // GnuTLS uretprobe for gnutls_record_recv
+                if symbol.name == "gnutls_record_recv"
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit_gnutls", symbol)
+                {
+                    warn!("sensor-linux-uprobes: failed to attach ssl_read_exit_gnutls: {e}");
                 }
             }
         } else {

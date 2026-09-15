@@ -216,7 +216,16 @@ pub fn resolve_symbols(
 /// Returns [`ResolverError`] if library discovery or symbol parsing fails.
 pub fn resolve_tls_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
     let libraries = find_ssl_libraries()?;
-    let target_symbols = ["SSL_read", "SSL_write", "SSL_read_ex", "SSL_write_ex"];
+    // OpenSSL/BoringSSL: SSL_read, SSL_write, SSL_read_ex, SSL_write_ex
+    // GnuTLS: gnutls_record_recv, gnutls_record_send
+    let target_symbols = [
+        "SSL_read",
+        "SSL_write",
+        "SSL_read_ex",
+        "SSL_write_ex",
+        "gnutls_record_recv",
+        "gnutls_record_send",
+    ];
 
     let mut all_symbols = Vec::new();
     for lib in &libraries {
