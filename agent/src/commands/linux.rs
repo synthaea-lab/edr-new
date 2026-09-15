@@ -2,7 +2,9 @@
 //! programs through the kernel verifier without attaching them); run/capture
 //! drive `LinuxSensor` with the appropriate sink.
 
-use schema::sensor::Sensor as _;
+use std::sync::Arc;
+
+use schema::sensor::{EventSink as _, Sensor as _};
 
 use crate::sink::DetectionSink;
 
@@ -89,19 +91,95 @@ fn has_bpf_capabilities() -> bool {
     has(CAP_SYS_ADMIN) || (has(CAP_BPF) && has(CAP_PERFMON))
 }
 
-/// Linux: eBPF capture + detection via `LinuxSensor` (Ctrl-C handled by the sensor).
+/// Linux: eBPF capture + detection via `LinuxSensor` (Ctrl-C handled by the sensor),
+/// plus the netlink poller (issue #92: `sock_diag`/conntrack — listen-port drift and
+/// beacon detection where eBPF cannot run, or as a redundant cross-check alongside
+/// it). Both feed the same `DetectionSink`, shared via `Arc` (`schema::sensor`'s
+/// blanket `EventSink for Arc<T>`) since `LinuxSensor::run` needs to own its sink
+/// for `Sensor`'s lifetime but the poller thread outlives no particular caller.
 pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> anyhow::Result<()> {
-    let sink = DetectionSink::new(seeded_rule_state(), alerts, events)?;
+    let sink = Arc::new(DetectionSink::new(seeded_rule_state(), alerts, events)?);
     eprintln!("Synthaea agent — detection active (Ctrl-C to stop)");
     eprintln!(
         "alerts: {} · events: {}",
         alerts.display(),
         events.display()
     );
+    spawn_netlink_poller(sink.clone());
     let mut sensor = sensor_linux::LinuxSensor::new();
     sensor
         .run(Box::new(sink))
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
+}
+
+/// Polling interval for [`spawn_netlink_poller`]. `crates/rules`' BEACON window is
+/// 60s and needs 3 distinct flows inside it to ever alert — frequent enough to
+/// leave room for that, without dumping the kernel's socket/conntrack tables on
+/// every tick.
+const NETLINK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Spawns the background thread that periodically snapshots `sock_diag`
+/// (listen-port drift) and dumps conntrack (beacon volume features), handing the
+/// resulting events to `sink` — the caller `sensor_linux_netlink`'s own crate doc
+/// says doesn't exist yet: that crate produces `schema::Event`s but leaves the
+/// polling cadence and the handoff to `EventSink` entirely to its caller.
+///
+/// Runs until the process exits (no `Sensor::stop`-style shutdown): `agent run`'s
+/// only exit path today is Ctrl-C ending the whole process, same as every other
+/// background worker here (`EnrichQueue`, `yara::ScanQueue`).
+fn spawn_netlink_poller(sink: Arc<DetectionSink>) {
+    std::thread::Builder::new()
+        .name("netlink-poll".into())
+        .spawn(move || {
+            let mut listen_warned = false;
+            let mut conntrack_warned = false;
+            loop {
+                let ts = crate::time::now_ns();
+                forward_netlink_events(
+                    sensor_linux_netlink::listen_port_events(ts),
+                    &sink,
+                    &mut listen_warned,
+                    "listen-port",
+                );
+                forward_netlink_events(
+                    sensor_linux_netlink::conntrack_flow_events(ts),
+                    &sink,
+                    &mut conntrack_warned,
+                    "conntrack",
+                );
+                std::thread::sleep(NETLINK_POLL_INTERVAL);
+            }
+        })
+        .expect("spawning the netlink poll thread");
+}
+
+/// Forwards one poll's events to `sink`, or logs a kernel error — once per
+/// distinct failure streak (`warned`) rather than every `NETLINK_POLL_INTERVAL`,
+/// since an unprivileged agent (conntrack's reachability isn't characterized
+/// unprivileged, see `sensor_linux_netlink`'s crate doc) would otherwise log the
+/// same `EPERM` forever.
+fn forward_netlink_events(
+    result: Result<Vec<schema::Event>, sensor_linux_netlink::NetlinkError>,
+    sink: &DetectionSink,
+    warned: &mut bool,
+    source: &str,
+) {
+    match result {
+        Ok(events) => {
+            *warned = false;
+            for event in events {
+                sink.on_event(event);
+            }
+        }
+        Err(e) => {
+            if !*warned {
+                *warned = true;
+                log::warn!(
+                    "netlink poll ({source}): {e} — further identical errors this run are suppressed"
+                );
+            }
+        }
+    }
 }
 
 /// Linux: rules-filtered benign capture via `BaselineSink` (Ctrl-C handled by the

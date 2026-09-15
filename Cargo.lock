@@ -32,6 +32,7 @@ dependencies = [
  "rules",
  "schema",
  "sensor-linux",
+ "sensor-linux-netlink",
  "sensor-windows",
  "serde",
  "sigma",

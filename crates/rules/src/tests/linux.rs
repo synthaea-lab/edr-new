@@ -213,3 +213,103 @@ fn unrelated_exec_does_not_match_download() {
     let alerts = state.on_exec(&exec_event_full(51, 1, "ls", "ls -la", 1_000_000_000));
     assert!(alerts.is_empty());
 }
+
+// ── BEACON via conntrack polling (issue #92, NetworkFlowEvent) ──────────────────
+
+#[test]
+fn beacon_flow_three_distinct_ports_triggers_alert() {
+    // 3 distinct short-lived connections (3 distinct local ports) to the same
+    // (comm, daddr, dport) — the real beaconing shape `lab/scenarios/beacon.sh`
+    // exercises, observed here via conntrack polling instead of a discrete
+    // ConnectEvent trace.
+    let mut state = RuleState::new();
+    state.on_network_flow(&network_flow_event_full(
+        300,
+        "nc",
+        50000,
+        [127, 0, 0, 1],
+        4444,
+        0,
+    ));
+    state.on_network_flow(&network_flow_event_full(
+        300,
+        "nc",
+        50001,
+        [127, 0, 0, 1],
+        4444,
+        1_000_000_000,
+    ));
+    let alerts = state.on_network_flow(&network_flow_event_full(
+        300,
+        "nc",
+        50002,
+        [127, 0, 0, 1],
+        4444,
+        2_000_000_000,
+    ));
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1071/T1041");
+}
+
+#[test]
+fn beacon_flow_same_local_port_repolled_does_not_alert() {
+    // One single long-lived flow (same local_port every time) polled 5x within
+    // the window must NOT count as 5 connections — the false-positive risk this
+    // wiring exists to avoid (an ordinary long-lived SSH session still open on
+    // its 3rd poll is not beaconing).
+    let mut state = RuleState::new();
+    for i in 0..5u64 {
+        let alerts = state.on_network_flow(&network_flow_event_full(
+            300,
+            "sshd",
+            50000,
+            [127, 0, 0, 1],
+            22222, // non-standard port, so STANDARD_PORTS doesn't mask this case
+            i * 1_000_000_000,
+        ));
+        assert!(alerts.is_empty());
+    }
+}
+
+#[test]
+fn beacon_flow_standard_port_does_not_alert() {
+    let mut state = RuleState::new();
+    for (i, port) in (50000..50003u16).enumerate() {
+        let alerts = state.on_network_flow(&network_flow_event_full(
+            300,
+            "app",
+            port,
+            [10, 0, 0, 1],
+            443,
+            i as u64 * 1_000_000_000,
+        ));
+        assert!(alerts.is_empty());
+    }
+}
+
+#[test]
+fn beacon_flow_and_connect_share_the_same_window_state() {
+    // check_beacon and check_beacon_flow share the same underlying counter keyed
+    // by (comm, daddr, dport) — a mixed source (2 discrete connects + 1 polled
+    // flow, e.g. eBPF and netlink both active) must still cross the threshold,
+    // not reset it.
+    let mut state = RuleState::new();
+    state.on_connect(&connect_event_full(300, "nc", [127, 0, 0, 1], 4444, 0));
+    state.on_connect(&connect_event_full(
+        300,
+        "nc",
+        [127, 0, 0, 1],
+        4444,
+        1_000_000_000,
+    ));
+    let alerts = state.on_network_flow(&network_flow_event_full(
+        300,
+        "nc",
+        50002,
+        [127, 0, 0, 1],
+        4444,
+        2_000_000_000,
+    ));
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1071/T1041");
+}
