@@ -22,6 +22,7 @@ regenerate any more.
 | debian-13 | Debian | 6.12 | newest kernel drift |
 | fedora-41 | RPM | 6.11 | RPM family; replay-only where LLVM too old for eBPF builds |
 | rocky-9 | RPM (RHEL) | 5.14 | enterprise RHEL-clone baseline; replay-only |
+| arch (rolling) | pacman | 6.6 (validated 2026-09-15; moves) | rolling kernel/LLVM drift target for #53 CO-RE (#124) |
 | windows-11 / windows-10 | Windows client | — | ETW sensor validation |
 | windows-server | Windows server | — | ETW on server SKUs |
 | macos | macOS | — | EndpointSecurity validation — real hardware or Tart/UTM; no Vagrant box |
