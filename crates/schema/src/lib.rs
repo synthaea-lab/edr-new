@@ -420,6 +420,79 @@ pub struct ListenPortEvent {
     pub local_port: u16,
 }
 
+/// Direction of TLS data flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsDirection {
+    /// Data read from network (post-decryption).
+    Read,
+    /// Data written to network (pre-encryption).
+    Write,
+}
+
+/// TLS library type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsLibraryType {
+    /// OpenSSL library.
+    OpenSsl,
+    /// `BoringSSL` library (Google's fork of OpenSSL).
+    BoringSsl,
+    /// `GnuTLS` library.
+    GnuTls,
+}
+
+/// Shell type for readline capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellType {
+    Bash,
+    Zsh,
+}
+
+/// TLS plaintext capture — first N bytes of data before encryption or after
+/// decryption (issue #90).
+///
+/// Emitted by Linux uprobes on `SSL_read`/`SSL_write` and `GnuTLS` equivalents.
+/// Captures HTTP headers, initial TLS handshake bytes, and other plaintext that
+/// would otherwise be invisible to network monitoring. Primary signal for C2
+/// beacon detection and exfiltration analysis.
+///
+/// Note: This is sensitive data — the plaintext may contain credentials, tokens,
+/// or PII. Sensors apply a byte budget (`MAX_TLS_CAPTURE = 256` in the wire format);
+/// longer buffers are truncated at capture time. Configuration must allow operators
+/// to disable this capture or apply process/library allowlists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsCaptureEvent {
+    pub meta: EventMeta,
+    /// Direction of data flow (read = inbound/decrypted, write = outbound/encrypted).
+    pub direction: TlsDirection,
+    /// TLS library that was probed.
+    pub lib_type: TlsLibraryType,
+    /// Captured plaintext bytes. May be binary data (not UTF-8). Consumers should
+    /// handle encoding errors gracefully when treating this as text.
+    pub data: Vec<u8>,
+}
+
+/// Interactive shell command capture — commands typed at a shell prompt that may
+/// not trigger execve (issue #90).
+///
+/// Emitted by Linux uprobes on bash/zsh readline functions. Captures shell builtins
+/// (`cd`, `export`, `alias`) and interactive commands that do not spawn child processes.
+/// Complements `ExecEvent` for complete shell activity visibility.
+///
+/// Note: Multi-line commands are captured as typed (newlines included). Command
+/// history navigation (up-arrow) triggers multiple readline events; deduplication
+/// is the consumer's responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadlineInputEvent {
+    pub meta: EventMeta,
+    /// Shell type (bash or zsh).
+    pub shell_type: ShellType,
+    /// Full command line as typed by the user. UTF-8 validated by the sensor.
+    pub input: String,
+}
+
 /// Outbound network connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectEvent {
@@ -609,6 +682,8 @@ pub enum Event {
     Auth(AuthEvent),
     ListenPort(ListenPortEvent),
     NetworkFlow(NetworkFlowEvent),
+    TlsCapture(TlsCaptureEvent),
+    ReadlineInput(ReadlineInputEvent),
 }
 
 impl Event {
@@ -634,6 +709,8 @@ impl Event {
             Event::Auth(e) => &e.meta,
             Event::ListenPort(e) => &e.meta,
             Event::NetworkFlow(e) => &e.meta,
+            Event::TlsCapture(e) => &e.meta,
+            Event::ReadlineInput(e) => &e.meta,
             // Non-exhaustive: new telemetry variants must be added here.
             // This arm ensures a compile-time reminder when adding variants.
             #[allow(unreachable_patterns)]

@@ -2472,10 +2472,18 @@ dependencies = [
 name = "sensor-linux-uprobes"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "aya",
+ "aya-build",
+ "aya-log",
  "goblin",
+ "libc",
  "log",
  "schema",
+ "sensor-linux-wire",
  "thiserror 2.0.20",
+ "tokio",
+ "which",
 ]
 
 [[package]]

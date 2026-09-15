@@ -1,8 +1,8 @@
 //! Uprobe sensor: loads eBPF programs, attaches uprobes to SSL/readline functions,
 //! drains ring buffers. Symbol resolution via [`crate::symbol_resolver`].
 //!
-//! **Status (Phase 4):** Loads and attaches uprobes; drains ring buffers and logs events.
-//! Normalization to `schema::Event` deferred to Phase 5 (no event types exist yet).
+//! **Status (Phase 5):** Full implementation - symbol resolution, uprobe attachment,
+//! ring buffer draining, and normalization to `schema::Event`.
 
 use std::sync::Arc;
 
@@ -15,10 +15,34 @@ use schema::sensor::{Capabilities, EventSink, Sensor, SensorError};
 use sensor_linux_wire::{ReadlineInputEvent, TlsCaptureEvent};
 use tokio::sync::Notify;
 
+use crate::normalize;
 use crate::symbol_resolver::{self, SymbolInfo};
 
 fn err(msg: String) -> SensorError {
     msg.into()
+}
+
+/// Difference between the epoch clock and `CLOCK_MONOTONIC` (which the probes stamp
+/// events with), computed once at startup — see `normalize`.
+fn boot_epoch_offset_ns() -> u64 {
+    let epoch_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain FFI call with a valid pointer to a stack-owned timespec
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ret != 0 {
+        log::warn!("sensor-linux-uprobes: clock_gettime(CLOCK_MONOTONIC) failed");
+        return 0;
+    }
+    let monotonic_ns = (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64);
+    epoch_ns.saturating_sub(monotonic_ns)
 }
 
 /// Loads the embedded eBPF object from the main sensor-linux-ebpf crate.
@@ -104,10 +128,9 @@ fn attach_uprobe(
     Ok(())
 }
 
-/// Drains TLS capture events from the ring buffer and logs them.
-/// Phase 5 will normalize these to `schema::Event::TlsCapture`.
+/// Drains TLS capture events from the ring buffer and emits normalized schema events.
 macro_rules! drain_tls {
-    ($guard:expr, $_sink:expr) => {{
+    ($guard:expr, $sink:expr, $offset:expr) => {{
         let mut guard = $guard.map_err(|e| err(format!("TLS ring buffer poll failed: {e}")))?;
         let rb = guard.get_inner_mut();
         while let Some(item) = rb.next() {
@@ -117,25 +140,19 @@ macro_rules! drain_tls {
                 let event = unsafe {
                     core::ptr::read_unaligned(item.as_ptr() as *const TlsCaptureEvent)
                 };
-                // Phase 5: normalize to schema::Event::TlsCapture
-                log::debug!(
-                    "sensor-linux-uprobes: TLS capture pid={} direction={} lib_type={} bytes={}",
-                    event.meta.pid,
-                    event.direction,
-                    event.lib_type,
-                    event.bytes_len
-                );
-                // TODO: $sink.on_event(normalize::tls_capture(&event))
+                // Normalize and emit to sink
+                // TODO: container_id from /proc/<pid>/cgroup (issue #80)
+                let schema_event = normalize::tls_capture(&event, $offset, None);
+                $sink.on_event(schema_event);
             }
         }
         guard.clear_ready();
     }};
 }
 
-/// Drains readline events from the ring buffer and logs them.
-/// Phase 5 will normalize these to `schema::Event::ReadlineInput`.
+/// Drains readline events from the ring buffer and emits normalized schema events.
 macro_rules! drain_readline {
-    ($guard:expr, $_sink:expr) => {{
+    ($guard:expr, $sink:expr, $offset:expr) => {{
         let mut guard = $guard
             .map_err(|e| err(format!("readline ring buffer poll failed: {e}")))?;
         let rb = guard.get_inner_mut();
@@ -146,16 +163,10 @@ macro_rules! drain_readline {
                 let event = unsafe {
                     core::ptr::read_unaligned(item.as_ptr() as *const ReadlineInputEvent)
                 };
-                // Phase 5: normalize to schema::Event::ReadlineInput
-                let input_str =
-                    String::from_utf8_lossy(&event.input[..event.input_len as usize]);
-                log::debug!(
-                    "sensor-linux-uprobes: readline pid={} shell_type={} input=\"{}\"",
-                    event.meta.pid,
-                    event.shell_type,
-                    input_str
-                );
-                // TODO: $sink.on_event(normalize::readline_input(&event))
+                // Normalize and emit to sink
+                // TODO: container_id from /proc/<pid>/cgroup (issue #80)
+                let schema_event = normalize::readline_input(&event, $offset, None);
+                $sink.on_event(schema_event);
             }
         }
         guard.clear_ready();
@@ -181,8 +192,9 @@ impl UprobesSensor {
         }
     }
 
-    async fn run_async(&mut self, _sink: Box<dyn EventSink>) -> Result<(), SensorError> {
+    async fn run_async(&mut self, sink: Box<dyn EventSink>) -> Result<(), SensorError> {
         let mut ebpf = load_ebpf()?;
+        let offset = boot_epoch_offset_ns();
 
         // Initialize eBPF logger
         match aya_log::EbpfLogger::init(&mut ebpf) {
@@ -265,10 +277,10 @@ impl UprobesSensor {
                 _ = &mut ctrl_c => break,
                 _ = self.stop.notified() => break,
                 guard = tls_ring_buf.readable_mut() => {
-                    drain_tls!(guard, _sink);
+                    drain_tls!(guard, sink, offset);
                 }
                 guard = readline_ring_buf.readable_mut() => {
-                    drain_readline!(guard, _sink);
+                    drain_readline!(guard, sink, offset);
                 }
             }
         }

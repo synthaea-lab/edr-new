@@ -12,15 +12,17 @@
 //! across updates); the probe programs join the `ebpf` crate build, this crate owns
 //! attachment, symbol resolution, and normalization into schema events.
 //!
-//! **Status (Phase 4):** Symbol resolution, uprobe attachment, and ring buffer draining
-//! are implemented. Normalization to `schema::Event` deferred to Phase 5 (event types
-//! don't exist yet - this sensor logs events for now).
+//! **Status (Phase 5):** Full implementation complete - symbol resolution, uprobe
+//! attachment, ring buffer draining, and normalization to `schema::Event`.
 
 #[cfg(target_os = "linux")]
 pub mod symbol_resolver;
 
 #[cfg(target_os = "linux")]
 mod sensor;
+
+#[cfg(target_os = "linux")]
+mod normalize;
 
 #[cfg(target_os = "linux")]
 pub use sensor::UprobesSensor;
