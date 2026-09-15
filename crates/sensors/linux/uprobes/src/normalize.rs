@@ -4,12 +4,17 @@
 //! `boot_epoch_offset_ns` is the difference between the epoch clock and the monotonic
 //! clock the probes stamp events with (`bpf_ktime_get_ns`); the sensor computes it
 //! once at startup and passes it here so schema timestamps are epoch nanoseconds.
+//!
+//! **Security (Phase 9):** Sensitive data (passwords, tokens, credentials) is redacted
+//! before event emission. See `crate::redact` for patterns and implementation.
 
 use schema::{
     ContainerContext, Event, EventMeta, ReadlineInputEvent, ShellType, TlsCaptureEvent,
     TlsDirection, TlsLibraryType, User,
 };
 use sensor_linux_wire as wire;
+
+use crate::redact;
 
 /// Tripwire: bumping the wire ABI must come here to revisit the mappings below.
 const _: () = assert!(wire::WIRE_VERSION == 4);
@@ -51,6 +56,9 @@ fn meta(
 /// The wire format captures the first `MAX_TLS_CAPTURE` bytes of plaintext;
 /// this function copies that into a Vec<u8> for the schema. Binary data is
 /// preserved exactly (not treated as UTF-8).
+///
+/// **Security (Phase 9):** Sensitive data (Authorization headers, cookies, credentials
+/// in URLs, API keys) is redacted before emission. See `crate::redact::redact_tls_data`.
 #[must_use]
 pub fn tls_capture(
     event: &wire::TlsCaptureEvent,
@@ -73,6 +81,9 @@ pub fn tls_capture(
     let data_len = (event.bytes_len as usize).min(wire::MAX_TLS_CAPTURE);
     let data = event.data[..data_len].to_vec();
 
+    // Redact sensitive data (Authorization, Cookie, credentials in URLs, API keys)
+    let data = redact::redact_tls_data(data);
+
     Event::TlsCapture(TlsCaptureEvent {
         meta: meta(&event.meta, boot_epoch_offset_ns, container_id),
         direction,
@@ -85,6 +96,10 @@ pub fn tls_capture(
 ///
 /// The wire format captures up to `MAX_READLINE_INPUT` bytes of the command line;
 /// this function converts it to a UTF-8 String (lossy conversion for invalid UTF-8).
+///
+/// **Security (Phase 9):** Sensitive data (export statements with secrets, --password
+/// flags, AWS credentials, curl -u auth) is redacted before emission. See
+/// `crate::redact::redact_readline_input`.
 #[must_use]
 pub fn readline_input(
     event: &wire::ReadlineInputEvent,
@@ -99,6 +114,9 @@ pub fn readline_input(
 
     let input_len = (event.input_len as usize).min(wire::MAX_READLINE_INPUT);
     let input = String::from_utf8_lossy(&event.input[..input_len]).into_owned();
+
+    // Redact sensitive data (passwords, export statements, AWS credentials, curl -u)
+    let input = redact::redact_readline_input(input);
 
     Event::ReadlineInput(ReadlineInputEvent {
         meta: meta(&event.meta, boot_epoch_offset_ns, container_id),

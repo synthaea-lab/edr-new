@@ -2479,6 +2479,7 @@ dependencies = [
  "goblin",
  "libc",
  "log",
+ "regex",
  "schema",
  "sensor-linux-wire",
  "thiserror 2.0.20",

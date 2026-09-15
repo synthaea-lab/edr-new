@@ -12,8 +12,8 @@
 //! across updates); the probe programs join the `ebpf` crate build, this crate owns
 //! attachment, symbol resolution, and normalization into schema events.
 //!
-//! **Status (Phase 6):** Full implementation with configuration - symbol resolution,
-//! uprobe attachment, ring buffer draining, normalization, and budget enforcement.
+//! **Status (Phase 9):** Security enhancements - field-level redaction of sensitive data
+//! (passwords, tokens, credentials) before event emission.
 
 #[cfg(target_os = "linux")]
 pub mod config;
@@ -26,6 +26,9 @@ mod sensor;
 
 #[cfg(target_os = "linux")]
 mod normalize;
+
+#[cfg(target_os = "linux")]
+mod redact;
 
 #[cfg(target_os = "linux")]
 pub use config::UprobesConfig;
