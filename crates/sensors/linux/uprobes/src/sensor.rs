@@ -1,20 +1,23 @@
 //! Uprobe sensor: loads eBPF programs, attaches uprobes to SSL/readline functions,
 //! drains ring buffers. Symbol resolution via [`crate::symbol_resolver`].
 //!
-//! **Status (Phase 5):** Full implementation - symbol resolution, uprobe attachment,
-//! ring buffer draining, and normalization to `schema::Event`.
+//! **Status (Phase 6):** Full implementation with configuration - symbol resolution,
+//! uprobe attachment, ring buffer draining, normalization, and budget enforcement.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use aya::maps::RingBuf;
 use aya::programs::uprobe::UProbeScope;
 use aya::programs::UProbe;
 use aya::Ebpf;
-use log::{info, warn};
+use log::{debug, info, warn};
 use schema::sensor::{Capabilities, EventSink, Sensor, SensorError};
-use sensor_linux_wire::{ReadlineInputEvent, TlsCaptureEvent};
+use sensor_linux_wire::{ReadlineInputEvent, TlsCaptureEvent, TASK_COMM_LEN};
 use tokio::sync::Notify;
 
+use crate::config::UprobesConfig;
 use crate::normalize;
 use crate::symbol_resolver::{self, SymbolInfo};
 
@@ -43,6 +46,102 @@ fn boot_epoch_offset_ns() -> u64 {
         .saturating_mul(1_000_000_000)
         .saturating_add(ts.tv_nsec as u64);
     epoch_ns.saturating_sub(monotonic_ns)
+}
+
+/// Per-process budget tracking for TLS capture (sliding window).
+struct TlsBudgetTracker {
+    /// Budget: bytes per process per second.
+    bytes_per_sec: u32,
+    /// Sliding window: `(pid, timestamp, bytes_captured)`.
+    windows: HashMap<u32, Vec<(Instant, u32)>>,
+    /// Cleanup interval (remove old entries every N checks).
+    cleanup_counter: u32,
+}
+
+impl TlsBudgetTracker {
+    fn new(bytes_per_sec: u32) -> Self {
+        Self {
+            bytes_per_sec,
+            windows: HashMap::new(),
+            cleanup_counter: 0,
+        }
+    }
+
+    /// Check if pid can capture `bytes` without exceeding budget.
+    /// Returns true if allowed, false if budget exceeded.
+    fn check_and_record(&mut self, pid: u32, bytes: u32) -> bool {
+        let now = Instant::now();
+        let window = Duration::from_secs(1);
+
+        // Get or create window for this pid
+        let entries = self.windows.entry(pid).or_default();
+
+        // Remove entries older than 1 second
+        entries.retain(|(ts, _)| now.duration_since(*ts) < window);
+
+        // Sum bytes in current window
+        let bytes_in_window: u32 = entries.iter().map(|(_, b)| b).sum();
+
+        // Check budget
+        if bytes_in_window + bytes > self.bytes_per_sec {
+            return false;
+        }
+
+        // Record this capture
+        entries.push((now, bytes));
+
+        // Periodic cleanup of old PIDs (every 100 checks)
+        self.cleanup_counter += 1;
+        if self.cleanup_counter >= 100 {
+            self.cleanup_counter = 0;
+            self.windows.retain(|_, entries| !entries.is_empty());
+        }
+
+        true
+    }
+}
+
+/// Per-process budget tracking for readline capture (sliding window).
+struct ReadlineBudgetTracker {
+    /// Budget: commands per process per second.
+    commands_per_sec: u32,
+    /// Sliding window: (pid, timestamps).
+    windows: HashMap<u32, Vec<Instant>>,
+    /// Cleanup interval.
+    cleanup_counter: u32,
+}
+
+impl ReadlineBudgetTracker {
+    fn new(commands_per_sec: u32) -> Self {
+        Self {
+            commands_per_sec,
+            windows: HashMap::new(),
+            cleanup_counter: 0,
+        }
+    }
+
+    /// Check if pid can capture one more command without exceeding budget.
+    fn check_and_record(&mut self, pid: u32) -> bool {
+        let now = Instant::now();
+        let window = Duration::from_secs(1);
+
+        let entries = self.windows.entry(pid).or_default();
+        entries.retain(|ts| now.duration_since(*ts) < window);
+
+        if entries.len() >= self.commands_per_sec as usize {
+            return false;
+        }
+
+        entries.push(now);
+
+        self.cleanup_counter += 1;
+        if self.cleanup_counter >= 100 {
+            self.cleanup_counter = 0;
+            self.windows.retain(|_, entries| !entries.is_empty());
+        }
+
+        true
+    }
 }
 
 /// Loads the embedded eBPF object from the main sensor-linux-ebpf crate.
@@ -129,8 +228,9 @@ fn attach_uprobe(
 }
 
 /// Drains TLS capture events from the ring buffer and emits normalized schema events.
+/// Applies budget enforcement and allowlist filtering.
 macro_rules! drain_tls {
-    ($guard:expr, $sink:expr, $offset:expr) => {{
+    ($guard:expr, $sink:expr, $offset:expr, $config:expr, $budget:expr, $dropped:expr) => {{
         let mut guard = $guard.map_err(|e| err(format!("TLS ring buffer poll failed: {e}")))?;
         let rb = guard.get_inner_mut();
         while let Some(item) = rb.next() {
@@ -140,6 +240,30 @@ macro_rules! drain_tls {
                 let event = unsafe {
                     core::ptr::read_unaligned(item.as_ptr() as *const TlsCaptureEvent)
                 };
+
+                // Allowlist check: if allowlist is non-empty, only allow listed processes
+                if !$config.tls.process_allowlist.is_empty() {
+                    let comm = comm_str(&event.meta.comm);
+                    if !$config.tls.process_allowlist.contains(&comm) {
+                        debug!(
+                            "sensor-linux-uprobes: TLS capture dropped (allowlist): pid={} comm={}",
+                            event.meta.pid, comm
+                        );
+                        $dropped += 1;
+                        continue;
+                    }
+                }
+
+                // Budget enforcement: check if pid hasn't exceeded bytes/sec budget
+                if !$budget.check_and_record(event.meta.pid, event.bytes_len) {
+                    debug!(
+                        "sensor-linux-uprobes: TLS capture dropped (budget): pid={} bytes={}",
+                        event.meta.pid, event.bytes_len
+                    );
+                    $dropped += 1;
+                    continue;
+                }
+
                 // Normalize and emit to sink
                 // TODO: container_id from /proc/<pid>/cgroup (issue #80)
                 let schema_event = normalize::tls_capture(&event, $offset, None);
@@ -150,9 +274,16 @@ macro_rules! drain_tls {
     }};
 }
 
+/// Helper to decode comm from wire format (shared with drain macros).
+fn comm_str(comm: &[u8; TASK_COMM_LEN]) -> String {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    String::from_utf8_lossy(&comm[..end]).into_owned()
+}
+
 /// Drains readline events from the ring buffer and emits normalized schema events.
+/// Applies budget enforcement and allowlist filtering.
 macro_rules! drain_readline {
-    ($guard:expr, $sink:expr, $offset:expr) => {{
+    ($guard:expr, $sink:expr, $offset:expr, $config:expr, $budget:expr, $dropped:expr) => {{
         let mut guard = $guard
             .map_err(|e| err(format!("readline ring buffer poll failed: {e}")))?;
         let rb = guard.get_inner_mut();
@@ -163,6 +294,30 @@ macro_rules! drain_readline {
                 let event = unsafe {
                     core::ptr::read_unaligned(item.as_ptr() as *const ReadlineInputEvent)
                 };
+
+                // Allowlist check: if allowlist is non-empty, only allow listed shells
+                if !$config.readline.process_allowlist.is_empty() {
+                    let comm = comm_str(&event.meta.comm);
+                    if !$config.readline.process_allowlist.contains(&comm) {
+                        debug!(
+                            "sensor-linux-uprobes: readline dropped (allowlist): pid={} comm={}",
+                            event.meta.pid, comm
+                        );
+                        $dropped += 1;
+                        continue;
+                    }
+                }
+
+                // Budget enforcement: check if pid hasn't exceeded commands/sec budget
+                if !$budget.check_and_record(event.meta.pid) {
+                    debug!(
+                        "sensor-linux-uprobes: readline dropped (budget): pid={}",
+                        event.meta.pid
+                    );
+                    $dropped += 1;
+                    continue;
+                }
+
                 // Normalize and emit to sink
                 // TODO: container_id from /proc/<pid>/cgroup (issue #80)
                 let schema_event = normalize::readline_input(&event, $offset, None);
@@ -176,6 +331,7 @@ macro_rules! drain_readline {
 /// Uprobe sensor. `run` blocks until Ctrl-C or [`Sensor::stop`].
 pub struct UprobesSensor {
     stop: Arc<Notify>,
+    config: UprobesConfig,
 }
 
 impl Default for UprobesSensor {
@@ -185,16 +341,40 @@ impl Default for UprobesSensor {
 }
 
 impl UprobesSensor {
+    /// Creates a new uprobe sensor with default configuration (all captures disabled).
     #[must_use]
     pub fn new() -> Self {
         Self {
             stop: Arc::new(Notify::new()),
+            config: UprobesConfig::new(),
+        }
+    }
+
+    /// Creates a new uprobe sensor with the given configuration.
+    #[must_use]
+    pub fn with_config(config: UprobesConfig) -> Self {
+        Self {
+            stop: Arc::new(Notify::new()),
+            config,
         }
     }
 
     async fn run_async(&mut self, sink: Box<dyn EventSink>) -> Result<(), SensorError> {
+        // Check if any capture is enabled
+        if !self.config.tls.enabled && !self.config.readline.enabled {
+            info!("sensor-linux-uprobes: all captures disabled, exiting");
+            return Ok(());
+        }
+
         let mut ebpf = load_ebpf()?;
         let offset = boot_epoch_offset_ns();
+
+        // Initialize budget trackers
+        let mut tls_budget = TlsBudgetTracker::new(self.config.tls.bytes_per_process_per_sec);
+        let mut readline_budget =
+            ReadlineBudgetTracker::new(self.config.readline.commands_per_process_per_sec);
+        let mut tls_dropped = 0u64;
+        let mut readline_dropped = 0u64;
 
         // Initialize eBPF logger
         match aya_log::EbpfLogger::init(&mut ebpf) {
@@ -215,46 +395,63 @@ impl UprobesSensor {
             }
         }
 
-        // Resolve and attach TLS uprobes
-        info!("sensor-linux-uprobes: resolving TLS symbols...");
-        let tls_symbols = symbol_resolver::resolve_tls_symbols()
-            .map_err(|e| err(format!("TLS symbol resolution failed: {e}")))?;
+        // Resolve and attach TLS uprobes (only if enabled)
+        if self.config.tls.enabled {
+            info!("sensor-linux-uprobes: TLS capture enabled, resolving symbols...");
+            let tls_symbols = symbol_resolver::resolve_tls_symbols()
+                .map_err(|e| err(format!("TLS symbol resolution failed: {e}")))?;
 
-        for symbol in &tls_symbols {
-            // Attach ssl_write to SSL_write/SSL_write_ex
-            if (symbol.name == "SSL_write" || symbol.name == "SSL_write_ex")
-                && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write", symbol)
-            {
-                warn!("sensor-linux-uprobes: failed to attach ssl_write: {e}");
+            for symbol in &tls_symbols {
+                // Skip libraries in denylist
+                if self.config.tls.library_denylist.contains(&symbol.library_path) {
+                    info!(
+                        "sensor-linux-uprobes: skipping denylisted library: {}",
+                        symbol.library_path.display()
+                    );
+                    continue;
+                }
+
+                // Attach ssl_write to SSL_write/SSL_write_ex
+                if (symbol.name == "SSL_write" || symbol.name == "SSL_write_ex")
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write", symbol)
+                {
+                    warn!("sensor-linux-uprobes: failed to attach ssl_write: {e}");
+                }
+                // Attach ssl_read_entry to SSL_read/SSL_read_ex
+                if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry", symbol)
+                {
+                    warn!("sensor-linux-uprobes: failed to attach ssl_read_entry: {e}");
+                }
+                // Also attach the uretprobe (ssl_read_exit)
+                if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit", symbol)
+                {
+                    warn!("sensor-linux-uprobes: failed to attach ssl_read_exit: {e}");
+                }
             }
-            // Attach ssl_read_entry to SSL_read/SSL_read_ex
-            if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
-                && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry", symbol)
-            {
-                warn!("sensor-linux-uprobes: failed to attach ssl_read_entry: {e}");
-            }
-            // Also attach the uretprobe (ssl_read_exit)
-            if (symbol.name == "SSL_read" || symbol.name == "SSL_read_ex")
-                && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit", symbol)
-            {
-                warn!("sensor-linux-uprobes: failed to attach ssl_read_exit: {e}");
-            }
+        } else {
+            info!("sensor-linux-uprobes: TLS capture disabled");
         }
 
-        // Resolve and attach readline uprobes
-        info!("sensor-linux-uprobes: resolving readline symbols...");
-        let readline_symbols = symbol_resolver::resolve_readline_symbols()
-            .map_err(|e| err(format!("readline symbol resolution failed: {e}")))?;
+        // Resolve and attach readline uprobes (only if enabled)
+        if self.config.readline.enabled {
+            info!("sensor-linux-uprobes: readline capture enabled, resolving symbols...");
+            let readline_symbols = symbol_resolver::resolve_readline_symbols()
+                .map_err(|e| err(format!("readline symbol resolution failed: {e}")))?;
 
-        for symbol in &readline_symbols {
-            if symbol.name == "readline"
-                && let Err(e) = attach_uprobe(&mut ebpf, "readline_exit", symbol)
-            {
-                warn!("sensor-linux-uprobes: failed to attach readline_exit: {e}");
+            for symbol in &readline_symbols {
+                if symbol.name == "readline"
+                    && let Err(e) = attach_uprobe(&mut ebpf, "readline_exit", symbol)
+                {
+                    warn!("sensor-linux-uprobes: failed to attach readline_exit: {e}");
+                }
             }
+        } else {
+            info!("sensor-linux-uprobes: readline capture disabled");
         }
 
-        // Open ring buffers
+        // Open ring buffers (only for enabled captures)
         let mut ring = |map: &str| -> Result<_, SensorError> {
             let m = ebpf
                 .take_map(map)
@@ -265,10 +462,19 @@ impl UprobesSensor {
                 .map_err(|e| err(format!("ring buffer fd for {map}: {e}")))
         };
 
-        let mut tls_ring_buf = ring("TLS_CAPTURE_EVENTS")?;
-        let mut readline_ring_buf = ring("READLINE_EVENTS")?;
+        let mut tls_ring_buf = if self.config.tls.enabled {
+            Some(ring("TLS_CAPTURE_EVENTS")?)
+        } else {
+            None
+        };
 
-        info!("sensor-linux-uprobes: listening for TLS/readline events");
+        let mut readline_ring_buf = if self.config.readline.enabled {
+            Some(ring("READLINE_EVENTS")?)
+        } else {
+            None
+        };
+
+        info!("sensor-linux-uprobes: listening for uprobe events");
 
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
@@ -276,13 +482,39 @@ impl UprobesSensor {
             tokio::select! {
                 _ = &mut ctrl_c => break,
                 _ = self.stop.notified() => break,
-                guard = tls_ring_buf.readable_mut() => {
-                    drain_tls!(guard, sink, offset);
+                guard = async {
+                    if let Some(ref mut rb) = tls_ring_buf {
+                        rb.readable_mut().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    drain_tls!(guard, sink, offset, self.config, tls_budget, tls_dropped);
                 }
-                guard = readline_ring_buf.readable_mut() => {
-                    drain_readline!(guard, sink, offset);
+                guard = async {
+                    if let Some(ref mut rb) = readline_ring_buf {
+                        rb.readable_mut().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    drain_readline!(guard, sink, offset, self.config, readline_budget, readline_dropped);
                 }
             }
+        }
+
+        // Log budget enforcement statistics
+        if tls_dropped > 0 {
+            info!(
+                "sensor-linux-uprobes: TLS captures dropped (budget/allowlist): {}",
+                tls_dropped
+            );
+        }
+        if readline_dropped > 0 {
+            info!(
+                "sensor-linux-uprobes: readline captures dropped (budget/allowlist): {}",
+                readline_dropped
+            );
         }
 
         info!("sensor-linux-uprobes: exiting");
