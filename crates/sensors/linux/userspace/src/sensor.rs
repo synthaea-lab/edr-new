@@ -6,6 +6,7 @@
 //! reuses them for the preflight (loads each program without attaching it), which is
 //! not part of the `Sensor` contract.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use log::warn;
@@ -246,6 +247,68 @@ fn read_container_id(pid: u32) -> Option<String> {
     }
 }
 
+/// Bounded cache over [`read_container_id`], keyed by pid.
+///
+/// Without this, every `file_open`/`exec`/`connect` event triggers a fresh
+/// `/proc/<pid>/cgroup` read — and for `file_open` specifically, that read is
+/// *itself* an `open()` syscall, which the `file_open` probe captures as a new
+/// `file_open` event for the same pid, which asks this same question again,
+/// forever: an unbounded, self-sustaining loop that pins a CPU core from the
+/// moment the agent starts (issue #199). The `drain!` call sites' own prior
+/// doc comment already flagged this exact shape of fix as a deferred
+/// followup ("revisit with a per-cgroup cache if a file-event-heavy workload
+/// makes it show up in profiling") — it has.
+///
+/// A pid's cgroup membership does not change over its lifetime the same way
+/// its argv can (see `read_proc_cmdline`'s doc comment on that distinction),
+/// so caching per pid is safe while the pid is alive. The only staleness risk
+/// is pid reuse after exit; rather than wire up exit notifications from the
+/// `sched_process_exit` tracepoint that already populates `PROC_LINEAGE`,
+/// this bounds the risk the same way `FlowPortDedup` (crates/rules) bounds
+/// its own best-effort state: a fixed-capacity LRU. Linux's pid recycling
+/// window is long enough in practice that a stale hit here is rare, and its
+/// consequence (an event briefly attributed to the wrong, no-longer-live
+/// container) is strictly less severe than the loop this replaces.
+struct ContainerIdCache {
+    entries: HashMap<u32, Option<String>>,
+    order: VecDeque<u32>,
+}
+
+/// Arbitrary but generous: a box with this many *concurrently live* distinct
+/// pids producing file/exec/connect events between evictions would need to be
+/// under genuinely unusual load — bound it rather than let it grow forever.
+const CONTAINER_ID_CACHE_CAP: usize = 4096;
+
+impl ContainerIdCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn resolve(&mut self, pid: u32) -> Option<String> {
+        self.resolve_with(pid, read_container_id)
+    }
+
+    /// `resolve`'s actual logic, parameterized over the fetch so tests can inject a
+    /// call-counting stub instead of touching real `/proc` entries.
+    fn resolve_with(&mut self, pid: u32, fetch: impl FnOnce(u32) -> Option<String>) -> Option<String> {
+        if let Some(cached) = self.entries.get(&pid) {
+            return cached.clone();
+        }
+        let id = fetch(pid);
+        self.entries.insert(pid, id.clone());
+        self.order.push_back(pid);
+        if self.order.len() > CONTAINER_ID_CACHE_CAP
+            && let Some(oldest) = self.order.pop_front()
+        {
+            self.entries.remove(&oldest);
+        }
+        id
+    }
+}
+
 /// Splits a `/proc/<pid>/stat` line into `(ppid, comm)`. `comm` is parenthesised and
 /// may itself contain spaces and `)` (e.g. `(a )b)`), so the fields after it are read
 /// from the last `)`, not by whitespace-splitting the whole line.
@@ -427,6 +490,7 @@ impl LinuxSensor {
 
         log::info!("sensor-linux: listening for exec/open/connect events");
 
+        let mut container_ids = ContainerIdCache::new();
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
         loop {
@@ -439,19 +503,19 @@ impl LinuxSensor {
                     // `spawn_blocking` yet — `/proc/<pid>/cgroup` has the same
                     // pseudo-fs-cheap, mmap_lock-independent profile).
                     drain!(guard, sensor_linux_wire::ExecEvent, sink, |e: &sensor_linux_wire::ExecEvent| {
-                        normalize::exec(e, offset, read_proc_cmdline(e.meta.pid), read_container_id(e.meta.pid))
+                        normalize::exec(e, offset, read_proc_cmdline(e.meta.pid), container_ids.resolve(e.meta.pid))
                     });
                 }
                 guard = file_open_ring_buf.readable_mut() => {
                     drain!(guard, sensor_linux_wire::FileOpenEvent, sink,
                         |e: &sensor_linux_wire::FileOpenEvent| {
-                            normalize::file_open(e, offset, read_container_id(e.meta.pid))
+                            normalize::file_open(e, offset, container_ids.resolve(e.meta.pid))
                         });
                 }
                 guard = connect_ring_buf.readable_mut() => {
                     drain!(guard, sensor_linux_wire::ConnectEvent, sink,
                         |e: &sensor_linux_wire::ConnectEvent| {
-                            normalize::connect(e, offset, read_container_id(e.meta.pid))
+                            normalize::connect(e, offset, container_ids.resolve(e.meta.pid))
                         });
                 }
             }
@@ -500,8 +564,9 @@ impl Sensor for LinuxSensor {
 mod tests {
     use super::{
         extract_container_id, is_proc_exit_race, parse_cgroup_container_id, parse_proc_cmdline,
-        parse_stat_ppid_comm,
+        parse_stat_ppid_comm, ContainerIdCache, CONTAINER_ID_CACHE_CAP,
     };
+    use std::cell::Cell;
 
     #[test]
     fn cmdline_splits_on_nul_and_drops_trailing_empty() {
@@ -657,5 +722,84 @@ mod tests {
     fn stat_garbage_is_none() {
         assert_eq!(parse_stat_ppid_comm("not a stat line"), None);
         assert_eq!(parse_stat_ppid_comm("123 (x) S notanumber"), None);
+    }
+
+    #[test]
+    fn container_id_cache_fetches_once_per_pid() {
+        // The bug this cache exists to fix (#199): resolving the same pid's container
+        // id twice should not re-run the fetch a second time. `read_container_id`
+        // itself does an `open()` that the real `file_open` probe would capture as a
+        // brand new event for the same pid — this is what turns a single re-fetch
+        // into an unbounded loop, so "no re-fetch" is the entire point of the cache.
+        let mut cache = ContainerIdCache::new();
+        let calls = Cell::new(0u32);
+        let fetch = |_pid: u32| {
+            calls.set(calls.get() + 1);
+            Some("abc".to_string())
+        };
+
+        assert_eq!(cache.resolve_with(42, fetch), Some("abc".to_string()));
+        assert_eq!(cache.resolve_with(42, fetch), Some("abc".to_string()));
+        assert_eq!(cache.resolve_with(42, fetch), Some("abc".to_string()));
+        assert_eq!(calls.get(), 1, "second/third resolve of the same pid must hit the cache, not fetch again");
+    }
+
+    #[test]
+    fn container_id_cache_none_result_is_also_cached() {
+        // A bare-metal process (no container) resolves to `None` — that negative
+        // result must be cached too, or every one of its events re-triggers the same
+        // self-feeding `open()` loop the cache exists to stop.
+        let mut cache = ContainerIdCache::new();
+        let calls = Cell::new(0u32);
+        let fetch = |_pid: u32| {
+            calls.set(calls.get() + 1);
+            None
+        };
+
+        assert_eq!(cache.resolve_with(7, fetch), None);
+        assert_eq!(cache.resolve_with(7, fetch), None);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn container_id_cache_distinct_pids_each_fetch_once() {
+        let mut cache = ContainerIdCache::new();
+        let calls = Cell::new(0u32);
+        let fetch = |pid: u32| {
+            calls.set(calls.get() + 1);
+            Some(format!("container-{pid}"))
+        };
+
+        assert_eq!(cache.resolve_with(1, fetch), Some("container-1".to_string()));
+        assert_eq!(cache.resolve_with(2, fetch), Some("container-2".to_string()));
+        assert_eq!(cache.resolve_with(1, fetch), Some("container-1".to_string()));
+        assert_eq!(calls.get(), 2, "one fetch per distinct pid, regardless of resolve order");
+    }
+
+    #[test]
+    fn container_id_cache_evicts_oldest_once_over_capacity() {
+        let mut cache = ContainerIdCache::new();
+        let fetch = |pid: u32| Some(format!("c{pid}"));
+
+        for pid in 0..CONTAINER_ID_CACHE_CAP as u32 {
+            cache.resolve_with(pid, fetch);
+        }
+        assert_eq!(cache.entries.len(), CONTAINER_ID_CACHE_CAP);
+
+        // One more pid pushes the cache over capacity: the oldest (pid 0) must be
+        // evicted so the cache stays bounded rather than growing forever.
+        cache.resolve_with(CONTAINER_ID_CACHE_CAP as u32, fetch);
+        assert_eq!(cache.entries.len(), CONTAINER_ID_CACHE_CAP);
+        assert!(!cache.entries.contains_key(&0), "oldest entry should have been evicted");
+
+        // Evicting pid 0 means it is no longer cached — re-resolving it must fetch
+        // again (proves eviction removed it from `entries`, not just `order`).
+        let refetch_calls = Cell::new(0u32);
+        let counting_fetch = |_pid: u32| {
+            refetch_calls.set(refetch_calls.get() + 1);
+            Some("c0-again".to_string())
+        };
+        cache.resolve_with(0, counting_fetch);
+        assert_eq!(refetch_calls.get(), 1);
     }
 }
