@@ -485,15 +485,139 @@ fn populate_excluded_pids(ebpf: &mut aya::Ebpf) -> Result<u32, SensorError> {
 
 ---
 
-### Phase 2: Container ID Cache ⏳ PENDING
+### Phase 2: Container ID Cache ✅ IMPLEMENTED
 
-**Status:** Not started - waiting for Phase 1 lab validation
+**Commit:** 295d89b
+**Date:** 2026-09-15
+
+**Userspace Changes (`crates/sensors/linux/userspace/src/sensor.rs`):**
+
+**ContainerIdCache struct:**
+```rust
+struct ContainerIdCache {
+    cache: HashMap<u32, (Option<String>, Instant)>,
+    ttl: Duration,              // 30 seconds
+    last_cleanup: Instant,
+    cleanup_interval: Duration, // 10 seconds or 1000 events
+    event_count_since_cleanup: u32,
+}
+```
+
+**get_or_fetch() method:**
+```rust
+fn get_or_fetch(&mut self, pid: u32) -> Option<String> {
+    let now = Instant::now();
+
+    // Check cache
+    if let Some((cached_id, timestamp)) = self.cache.get(&pid) {
+        if now.duration_since(*timestamp) < self.ttl {
+            return cached_id.clone(); // Cache hit
+        }
+    }
+
+    // Cache miss or expired - fetch from procfs
+    let container_id = read_container_id(pid);
+    self.cache.insert(pid, (container_id.clone(), now));
+
+    // Trigger cleanup if needed (1000 events or 10 seconds)
+    if self.event_count_since_cleanup >= 1000
+        || now.duration_since(self.last_cleanup) >= self.cleanup_interval
+    {
+        self.cleanup_expired();
+    }
+
+    container_id
+}
+```
+
+**Integration in run_async():**
+```rust
+// Create cache before event loop
+let mut container_id_cache = ContainerIdCache::new();
+
+// Replace read_container_id() calls with cache.get_or_fetch()
+drain!(guard, ExecEvent, sink, |e| {
+    normalize::exec(e, offset, read_proc_cmdline(e.meta.pid),
+                    container_id_cache.get_or_fetch(e.meta.pid))
+});
+
+drain!(guard, FileOpenEvent, sink, |e| {
+    normalize::file_open(e, offset, container_id_cache.get_or_fetch(e.meta.pid))
+});
+
+drain!(guard, ConnectEvent, sink, |e| {
+    normalize::connect(e, offset, container_id_cache.get_or_fetch(e.meta.pid))
+});
+```
+
+**Performance Impact:**
+
+**Cache hit (expected >95%):**
+- ~10-50ns (HashMap lookup)
+- No syscall, no procfs read
+
+**Cache miss:**
+- ~50-200µs (open + read + parse procfs)
+- Same as before, but result is cached for 30 seconds
+
+**Expected benefit:**
+Process with 1000 file_open events/sec:
+- Before: 1000 procfs reads (~50-200ms CPU)
+- After: 1 read + 999 cache hits (~50µs total)
+- **~1000x improvement for high-volume processes**
+
+**Testing:**
+- ✅ 6 new unit tests covering cache behavior
+- ✅ Cache hit returns same value
+- ✅ Cache stores None for nonexistent PIDs
+- ✅ Cleanup removes expired entries
+- ✅ Cleanup keeps fresh entries
+- ✅ Auto-cleanup after 1000 events
+- ✅ Multiple PIDs handled correctly
+- ✅ Code compiles (cargo check passes)
+
+**Observability:**
+- Log on cache initialization: "container ID cache initialized (TTL: 30s)"
+- Log on exit: "exiting (container ID cache final size: N)"
+- Debug log on cleanup: "cache cleanup: N entries remaining"
+- stats() method for future metrics integration
+
+**Impact:**
+
+**Fixes Phase 1 limitations:**
+- ✅ Helps ALL processes, not just agent self-reference
+- ✅ Reduces syscall overhead across the board
+- ✅ Addresses doc comment's TODO about caching
+- ✅ Improves performance for legitimate high-volume processes (build systems, web servers)
+
+**Combined with Phase 1:**
+- Phase 1: Prevents agent's own syscalls from being captured (eBPF exclusion)
+- Phase 2: Caches results, so even if captured, no repeated reads
+- Defense-in-depth: both layers protect against loop
+
+**Status:**
+- ✅ Code complete and pushed
+- ✅ 6 unit tests added and passing
+- ⏳ Pending lab validation (real workload testing)
+- ⏳ Pending cache hit rate measurement in production
+
+**Known Limitations:**
+- Cache is unbounded (relies on TTL cleanup and process lifetime)
+- No explicit cache size limit (acceptable - PIDs are bounded by kernel)
+- Cache hit rate not measured (future work: add metrics)
+- No explicit cache invalidation on container migration (acceptable - TTL handles it)
+
+**Next Steps:**
+- Lab validation with real workload (build system, web server)
+- Measure cache hit rate and verify >95% in steady state
+- Monitor cache size and cleanup frequency
+- If successful, consider Phase 3 (rate limiting - optional)
 
 ---
 
 ### Phase 3: Rate Limiting ⏳ PENDING
 
-**Status:** Not started - optional after Phase 2
+**Status:** Not started - optional defense-in-depth after Phase 2 validation
 
 ---
 
