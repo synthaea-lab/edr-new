@@ -65,10 +65,23 @@ silently skipped, not emitted with fabricated metadata. This is the mapping issu
 #92's "listening-port drift" done-when item needs, but nothing yet calls it on a
 cadence or diffs consecutive snapshots for drift, and nothing feeds its output to
 `crates/correlator`'s `EventBus` — both are a caller's job that doesn't exist yet.
-Conntrack's and proc connector's own schema/`tamper` wiring are explicitly deferred
-past this slice too — see the crate doc's "Deliberately not here yet" section for
-why (conntrack flows carry no PID from the kernel at all; proc connector's role is a
-`tamper` cross-check that may not want to be a `schema::Event` in the first place).
+Conntrack flows now reach `schema::Event` too — `conntrack_flow_events()` maps a
+`dump_conntrack()` dump to `Event::NetworkFlow` (schema v11 -> v12). A conntrack
+entry carries no PID from the kernel at all (unlike `sock_diag`'s inode join), so
+attribution instead joins the flow's tuple against a concurrent `sock_diag`
+snapshot's `local`/`remote`/state — two orientations are checked (this host as the
+connection's initiator, or as the one accepted into), since `ctnetlink` doesn't say
+which end `orig` started from, and the `orig`/`reply` byte counters are swapped
+accordingly before becoming `bytes_sent`/`bytes_received` for whichever orientation
+matched. TCP only (`sock_diag` here never queries UDP, so a UDP flow can never
+match); a flow nothing could attribute produces no event, same discipline as
+listening sockets. This is the mapping issue #92's "conntrack features reach the
+correlator" done-when item needs — polling cadence, the beacon-scenario validation
+itself, and `crates/correlator` wiring remain a caller's job that doesn't exist yet
+(no lab VM here to build one against). Proc connector's own schema/`tamper` wiring
+is still explicitly deferred past this slice — see the crate doc's "Deliberately
+not here yet" section for why (its role is a `tamper` cross-check that may not want
+to be a `schema::Event` in the first place).
 
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's
