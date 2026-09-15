@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, net::IpAddr};
 
-use schema::{ConnectEvent, ExecEvent, FileOpenEvent, NetworkFlowEvent, User};
+use schema::{ConnectEvent, ExecEvent, FileOpenEvent, ListenPortEvent, NetworkFlowEvent, User};
 use store::BoundedMap;
 
 use crate::{
@@ -52,6 +52,14 @@ pub struct RuleState {
     /// [`FlowPortDedup`]'s doc); `on_connect`'s discrete syscall trace needs no
     /// dedup, each `ConnectEvent` already is one real connection attempt.
     beacon_flow_dedup: BoundedMap<(String, String, u16), FlowPortDedup>,
+    /// (`local_addr`, `local_port`) → seen, for LISTENER-DRIFT (issue #92, T1571).
+    /// [`Self::seed_listen_ports`] pre-fills this from one startup snapshot so
+    /// every service already listening when the agent attaches is the baseline,
+    /// not noise — the same "seed from the world as it already is" principle as
+    /// [`Self::seed_from_proc`]/`seed_pid_comm`. LRU-bounded: the realistic
+    /// listener space is a few dozen, not unbounded, but a hostile loop binding
+    /// many ports must not grow this without limit either.
+    known_listeners: BoundedMap<(IpAddr, u16), ()>,
 }
 
 /// Same bound as the correlator's entity table: the realistic live-pid space.
@@ -75,6 +83,18 @@ impl RuleState {
             self_spawn: BoundedMap::new(COUNTER_CAP),
             beacon: BoundedMap::new(COUNTER_CAP),
             beacon_flow_dedup: BoundedMap::new(COUNTER_CAP),
+            known_listeners: BoundedMap::new(COUNTER_CAP),
+        }
+    }
+
+    /// Pre-fills the LISTENER-DRIFT baseline from the agent's own startup
+    /// snapshot — without this, every service already listening when the agent
+    /// attaches (sshd, nginx started by systemd at boot) would look exactly like
+    /// a freshly planted backdoor listener on the very first poll after startup.
+    /// Same principle, same caller responsibility, as [`Self::seed_from_proc`].
+    pub fn seed_listen_ports(&mut self, ports: impl IntoIterator<Item = (IpAddr, u16)>) {
+        for key in ports {
+            self.known_listeners.insert(key, ());
         }
     }
 
@@ -454,6 +474,40 @@ impl RuleState {
     /// polling, issue #92) — see [`Self::check_beacon_flow`].
     pub fn on_network_flow(&mut self, event: &NetworkFlowEvent) -> Vec<Alert> {
         self.check_beacon_flow(event).into_iter().collect()
+    }
+
+    /// LISTENER-DRIFT (issue #92, T1571 — non-standard port is the closest
+    /// existing tag in this crate; no better precedent for "a new listener
+    /// appeared" exists here yet, calibratable later) — a listening socket that
+    /// wasn't in the startup baseline ([`Self::seed_listen_ports`]) nor already
+    /// alerted on this run. One alert per (`local_addr`, `local_port`): the second
+    /// poll to see the same listener is expected (a poll-based source re-reports
+    /// it every cycle while it stays open, same reasoning as
+    /// [`Self::check_beacon_flow`]'s dedup), not a second finding.
+    ///
+    /// No name/path exclusion list yet — unlike BEACON's `BROWSERS`/
+    /// `STANDARD_PORTS`, there is no lab capture here to calibrate one honestly
+    /// against (a dev server or `docker-proxy` binding a fresh port after
+    /// startup will alert; a documented, known noise source, not a bug).
+    fn check_listen_port_drift(&mut self, event: &ListenPortEvent) -> Option<Alert> {
+        let key = (event.local_addr, event.local_port);
+        if self.known_listeners.get(&key).is_some() {
+            return None;
+        }
+        self.known_listeners.insert(key, ());
+        Some(Alert {
+            technique: "T1571",
+            message: format!(
+                "pid={} comm={} new listener on {}:{} — not seen at agent startup",
+                event.meta.pid, event.meta.comm, event.local_addr, event.local_port,
+            ),
+        })
+    }
+
+    /// To be called for every `ListenPortEvent` in the stream (Linux `sock_diag`
+    /// polling, issue #92) — see [`Self::check_listen_port_drift`].
+    pub fn on_listen_port(&mut self, event: &ListenPortEvent) -> Vec<Alert> {
+        self.check_listen_port_drift(event).into_iter().collect()
     }
 
     /// To be called for every `FileOpenEvent` in the stream. Does not produce alerts

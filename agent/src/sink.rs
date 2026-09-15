@@ -114,6 +114,13 @@ impl DetectionSink {
         }
     }
 
+    /// `ListenPort` events (`sock_diag` polling, issue #92): LISTENER-DRIFT.
+    fn detect_listen_port(&self, event: &schema::ListenPortEvent) {
+        for alert in self.rule_state.lock().unwrap().on_listen_port(event) {
+            self.emit(alert.technique, &alert.message);
+        }
+    }
+
     fn emit(&self, technique: &str, message: &str) {
         // Alerts go to stderr (stdout carries nothing in run mode; the raw stream
         // lives in events.jsonl) and are highlighted — an alert must not get lost in
@@ -196,6 +203,7 @@ impl EventSink for DetectionSink {
             Event::FileOpen(e) => self.detect_file_open(e),
             Event::Connect(e) => self.detect_connect(e),
             Event::NetworkFlow(e) => self.detect_network_flow(e),
+            Event::ListenPort(e) => self.detect_listen_port(e),
             // New telemetry categories reach the engines as they land; until a rule
             // consumes them, logging below is the whole treatment.
             _ => {}

@@ -2,7 +2,9 @@
 //! (`linux` — stateless + download/exec/web-server lineage; `windows` —
 //! SELF-SPAWN, PARENT-SUSPECT, LOLBIN, BEACON).
 
-use schema::{ConnectEvent, EventMeta, ExecEvent, FileOpenEvent, NetworkFlowEvent, User};
+use schema::{
+    ConnectEvent, EventMeta, ExecEvent, FileOpenEvent, ListenPortEvent, NetworkFlowEvent, User,
+};
 
 use crate::{
     O_CREAT, O_WRONLY, RuleState, check_base64_decode, check_persistence_write,
@@ -121,6 +123,24 @@ fn network_flow_event_full(
         bytes_received: None,
         packets_sent: None,
         packets_received: None,
+    }
+}
+
+fn listen_port_event_full(
+    pid: u32,
+    comm: &str,
+    local_addr_v4: [u8; 4],
+    local_port: u16,
+    timestamp_ns: u64,
+) -> ListenPortEvent {
+    let mut meta = meta();
+    meta.pid = pid;
+    meta.timestamp_ns = timestamp_ns;
+    meta.comm = comm.to_string();
+    ListenPortEvent {
+        meta,
+        local_addr: std::net::IpAddr::V4(local_addr_v4.into()),
+        local_port,
     }
 }
 

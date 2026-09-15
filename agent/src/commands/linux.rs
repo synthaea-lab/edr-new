@@ -11,9 +11,26 @@ use crate::sink::DetectionSink;
 /// `RuleState` pre-filled with the processes already running at startup — without
 /// it, the parent-side exclusions and lineage rules don't apply to processes
 /// launched before the agent, the most common case in practice (see `RuleState`).
+/// Also seeds the LISTENER-DRIFT baseline (issue #92) from one startup
+/// `sock_diag` snapshot, same reasoning: every listener already up when the
+/// agent attaches (sshd, nginx started by systemd at boot) is the baseline, not
+/// a finding. Best-effort — a snapshot failure (permissions, kernel support)
+/// leaves the baseline empty rather than failing agent startup, same posture as
+/// the netlink poller itself.
 fn seeded_rule_state() -> rules::RuleState {
     let mut rule_state = rules::RuleState::new();
     rule_state.seed_from_proc();
+    match sensor_linux_netlink::snapshot() {
+        Ok(entries) => {
+            rule_state.seed_listen_ports(
+                entries
+                    .iter()
+                    .filter(|entry| entry.state == sensor_linux_netlink::SocketState::Listen)
+                    .map(|entry| (entry.local.ip(), entry.local.port())),
+            );
+        }
+        Err(e) => log::warn!("listen-port baseline: sock_diag snapshot failed: {e}"),
+    }
     rule_state
 }
 
