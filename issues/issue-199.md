@@ -414,6 +414,89 @@ impl AttributionRateLimiter {
 
 ---
 
+## Implementation Status
+
+### Phase 1: Self-PID Exclusion ✅ IMPLEMENTED
+
+**Commit:** 8234422
+**Date:** 2026-09-15
+
+**eBPF Changes (`crates/sensors/linux/ebpf/src/main.rs`):**
+- ✅ Added `EXCLUDED_PIDS` HashMap<u32, u8> with 256 max entries
+- ✅ Check PID/TID at start of `try_sys_enter_openat()`
+- ✅ Early return if PID or TID is in exclusion set
+- ✅ Handles both TGID (main PID) and TID (thread IDs)
+
+**Userspace Changes (`crates/sensors/linux/userspace/src/sensor.rs`):**
+- ✅ Created `populate_excluded_pids()` function
+- ✅ Reads agent's own PID with `std::process::id()`
+- ✅ Reads all thread IDs from `/proc/self/task/*`
+- ✅ Inserts all IDs into EXCLUDED_PIDS before attaching probes
+- ✅ Logs count of excluded PIDs/TIDs
+
+**Code Example:**
+```rust
+// eBPF probe check (main.rs)
+let pid_tgid = bpf_get_current_pid_tgid();
+let tid = pid_tgid as u32;
+let pid = (pid_tgid >> 32) as u32;
+
+if unsafe { EXCLUDED_PIDS.get(&tid).is_some() || EXCLUDED_PIDS.get(&pid).is_some() } {
+    return Ok(0); // Skip this event silently
+}
+```
+
+```rust
+// Userspace population (sensor.rs)
+fn populate_excluded_pids(ebpf: &mut aya::Ebpf) -> Result<u32, SensorError> {
+    let agent_pid = std::process::id();
+    excluded.insert(agent_pid, 0, 0)?;
+
+    // Insert all thread IDs from /proc/self/task/*
+    for entry in std::fs::read_dir("/proc/self/task")?.flatten() {
+        if let Ok(tid) = entry.file_name().to_str()?.parse::<u32>() {
+            excluded.insert(tid, 0, 0)?;
+        }
+    }
+    Ok(excluded_count)
+}
+```
+
+**Impact:**
+- ✅ Breaks self-referential loop (file_open → read_container_id → open → ∞)
+- ✅ Zero overhead for non-agent processes (single HashMap lookup)
+- ✅ Handles tokio worker threads (different TIDs)
+- ✅ Userspace code compiles (cargo check passes)
+
+**Status:**
+- ✅ Code complete and pushed
+- ⏳ Pending lab validation (requires bpf-linker + BTF kernel)
+- ⏳ Pending acceptance test (CPU usage, BEACON scenario)
+
+**Known Limitations:**
+- Only fixes self-reference, not the general pattern
+- Does not refresh thread IDs (if tokio spawns new workers at runtime)
+- Requires lab validation to confirm eBPF verifier accepts code
+
+**Next Steps:**
+- Lab validation with bpf-linker (Task #8)
+- Run acceptance tests (CPU <5%, BEACON fires)
+- If successful, proceed to Phase 2 (container ID cache)
+
+---
+
+### Phase 2: Container ID Cache ⏳ PENDING
+
+**Status:** Not started - waiting for Phase 1 lab validation
+
+---
+
+### Phase 3: Rate Limiting ⏳ PENDING
+
+**Status:** Not started - optional after Phase 2
+
+---
+
 ## Testing Strategy
 
 ### Unit Tests
