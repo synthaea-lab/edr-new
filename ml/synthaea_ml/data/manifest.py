@@ -238,7 +238,9 @@ def load_manifest(baseline_dir: Path) -> Manifest:
     )
 
 
-def verify_manifest(baseline_dir: Path) -> None:
+def verify_manifest(
+    baseline_dir: Path, *, baseline_filename: str = DEFAULT_BASELINE_FILENAME
+) -> None:
     """Re-hash the baseline and check it matches `manifest.sample_sha256`.
 
     Called by the (upcoming) registry glue before a training run — a mismatch
@@ -246,13 +248,20 @@ def verify_manifest(baseline_dir: Path) -> None:
     training against it would silently produce a model card that names a
     dataset version it was not actually trained on.
 
+    Args:
+        baseline_dir: Directory containing the manifest and the baseline.
+        baseline_filename: Name of the samples file inside `baseline_dir`.
+            Defaults to `"baseline.jsonl"`; must match whatever name was
+            passed to `write_manifest` for a legacy capture that kept its
+            original file name (e.g. `"baseline_benign.jsonl"`).
+
     Raises:
         FileNotFoundError: See `load_manifest`.
         ValueError: If the recomputed hash or sample count does not match
             what the manifest records.
     """
     manifest = load_manifest(baseline_dir)
-    baseline_path = baseline_dir / DEFAULT_BASELINE_FILENAME
+    baseline_path = baseline_dir / baseline_filename
     if not baseline_path.exists():
         raise FileNotFoundError(f"baseline not found: {baseline_path}")
 
