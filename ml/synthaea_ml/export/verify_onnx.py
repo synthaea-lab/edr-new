@@ -44,18 +44,76 @@ import onnxruntime as ort
 from synthaea_ml.features.cmdline import extract_features
 from synthaea_ml.registry.training_record import (
     TRAINING_RECORD_FILENAME,
+    load_training_record,
     verify_training_record,
 )
-from synthaea_ml.training.train_windows import SANITY_CHECK_SAMPLES
+from synthaea_ml.training.train_linux import SANITY_CHECK_SAMPLES as _LINUX_SAMPLES
+from synthaea_ml.training.train_windows import SANITY_CHECK_SAMPLES as _WINDOWS_SAMPLES
 
 REGISTRY = Path(__file__).resolve().parents[2] / "registry"
 BASELINES = Path(__file__).resolve().parents[2] / "datasets" / "baselines"
 
 _STRICT_PROVENANCE_ENV = "SYNTHAEA_STRICT_PROVENANCE"
 
+_PLATFORM_SAMPLES: dict[str, dict[str, str]] = {
+    "linux": _LINUX_SAMPLES,
+    "windows": _WINDOWS_SAMPLES,
+}
+
 
 class VerificationError(AssertionError):
     """A shipped model failed a property the agent depends on."""
+
+
+def _platform_from_training_record(model_dir: Path) -> str | None:
+    """Read the platform a model was trained on off its `training.json`, if any.
+
+    `DatasetVersion.name` follows `default_dataset_name`'s
+    `<platform>__<workload_label>__<host_id>__<date>` convention — the platform
+    is its first component. Returns `None` when there's no training record
+    (pre-#44 legacy entry) or its platform isn't one we have sanity samples for.
+    """
+    if not (model_dir / TRAINING_RECORD_FILENAME).exists():
+        return None
+    record = load_training_record(model_dir)
+    if not record.dataset_versions:
+        return None
+    platform = record.dataset_versions[0].name.split("__", 1)[0]
+    return platform if platform in _PLATFORM_SAMPLES else None
+
+
+def _platform_from_model_dir(model_dir: Path) -> str | None:
+    """Fall back to the registry family directory name, e.g.
+    `cmdline-iforest-linux/0.1.0` -> `"linux"`. Brittle (a naming convention,
+    not data) but it is what every pre-#44 legacy entry has to go on."""
+    family = model_dir.parent.name
+    for platform in _PLATFORM_SAMPLES:
+        if family.endswith(f"-{platform}"):
+            return platform
+    return None
+
+
+def sanity_samples_for(model_dir: Path) -> dict[str, str]:
+    """Pick the sanity-check command lines matching the platform `model_dir` targets.
+
+    Prefers the training record's dataset platform (works once every registry
+    entry has a `training.json`, see #44); falls back to the registry directory
+    naming convention for legacy entries that predate it. Deliberately does not
+    default to either platform's samples when both signals are inconclusive —
+    silently scoring a model against the wrong platform's samples is exactly
+    the bug this function exists to fix.
+
+    Raises:
+        VerificationError: If neither the training record nor the directory
+            name resolves to a known platform.
+    """
+    platform = _platform_from_training_record(model_dir) or _platform_from_model_dir(model_dir)
+    if platform is None:
+        raise VerificationError(
+            f"{model_dir}: cannot determine platform (no training.json dataset "
+            f"platform, and directory name doesn't end in -{'/-'.join(_PLATFORM_SAMPLES)})"
+        )
+    return _PLATFORM_SAMPLES[platform]
 
 
 def verify(model_path: Path) -> None:
@@ -67,8 +125,9 @@ def verify(model_path: Path) -> None:
     if "scores" not in output_names:
         raise VerificationError(f"{model_path}: no 'scores' output (got {output_names})")
 
+    samples = sanity_samples_for(model_path.parent)
     feats = np.array(
-        [extract_features(cmdline) for cmdline in SANITY_CHECK_SAMPLES.values()],
+        [extract_features(cmdline) for cmdline in samples.values()],
         dtype=np.float32,
     )
     run1 = dict(zip(output_names, session.run(None, {input_name: feats}), strict=True))
@@ -91,7 +150,7 @@ def verify(model_path: Path) -> None:
                 f"labels={labels.tolist()} scores={scores.round(4).tolist()}"
             )
 
-    for (label, cmdline), score in zip(SANITY_CHECK_SAMPLES.items(), scores, strict=True):
+    for (label, cmdline), score in zip(samples.items(), scores, strict=True):
         verdict = "ANOMALY" if score < 0 else "normal"
         print(f"  {label}: score={score:+.4f} -> {verdict}")
     print(f"  ok: {len(scores)} samples, finite, deterministic, label/score consistent")
