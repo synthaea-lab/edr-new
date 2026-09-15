@@ -13,9 +13,9 @@
 # (musl-static, bundles its own LLVM) sidesteps that entirely and was
 # verified to work against BOTH the pinned nightly (LLVM 22) and a plain
 # `rustup toolchain install nightly` (LLVM 23) on Alpine 3.24 — no alignment
-# dance needed. See BpfLinker_Alpine_Crash_Explique.md at the repo root for
-# the full source-build post-mortem, kept for reference in case a future
-# bpf-linker release regresses this.
+# dance needed. Full source-build post-mortem (three stacked bugs, how each
+# was diagnosed) is in the #123 PR discussion if a future bpf-linker release
+# regresses this and the prebuilt-release workaround stops being enough.
 set -euo pipefail
 
 APK="sudo apk"
