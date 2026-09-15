@@ -1,9 +1,8 @@
 # lab/vagrant-hyperv — Hyper-V harness (Windows hosts)
 #
 # Sibling of ../vagrant (QEMU on Apple Silicon). Same machine matrix
-# (../MATRIX.md), same provider-neutral provisioning scripts (per-family:
-# ../provisioning/linux-toolchain.sh for apt/dnf, arch-toolchain.sh for
-# pacman). x86_64 rows only — see README.md for the box situation.
+# (../MATRIX.md), same provisioning (../provisioning/linux-toolchain.sh).
+# The Debian-family x86_64 rows only — see README.md for the box situation.
 #
 #   # from an ELEVATED PowerShell (the Hyper-V provider requires it):
 #   $env:VAGRANT_HYPERV_SWITCH = "Default Switch"
@@ -20,7 +19,6 @@
 LINUX_MACHINES = {
   "ubuntu2204" => { box: "generic/ubuntu2204", primary: true }, # 5.15 — oldest LTS
   "debian12"   => { box: "generic/debian12" },                  # 6.1  — Debian stable
-  "arch"       => { box: "generic/arch", provision: "../provisioning/arch-toolchain.sh" }, # rolling — #124
 }.freeze
 
 Vagrant.configure("2") do |config|
@@ -60,10 +58,8 @@ Vagrant.configure("2") do |config|
         hv.enable_virtualization_extensions = false
       end
 
-      # Provider-neutral, shared by every harness. Debian/RPM machines use the
-      # apt/dnf script; a machine on a different package manager (pacman,
-      # apk) names its own companion script via `provision:`.
-      m.vm.provision "shell", path: opts[:provision] || "../provisioning/linux-toolchain.sh", privileged: false
+      # Provider-neutral, shared by every harness.
+      m.vm.provision "shell", path: "../provisioning/linux-toolchain.sh", privileged: false
     end
   end
 end
