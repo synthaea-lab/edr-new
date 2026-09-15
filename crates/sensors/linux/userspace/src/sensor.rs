@@ -267,6 +267,48 @@ fn parse_stat_ppid_comm(stat: &str) -> Option<(u32, &str)> {
 /// systemd units started at boot) would report `ppid = 0`. Best-effort: a `/proc/<pid>`
 /// that vanishes mid-scan is skipped; a full map stops the scan. There is a small race
 /// window (a process forking between this scan and the `sched_process_fork` attach) —
+/// Populates the `EXCLUDED_PIDS` map with the agent's own PID and thread IDs to
+/// prevent self-referential feedback loop (issue #199).
+///
+/// When `read_container_id()` opens `/proc/{pid}/cgroup`, that triggers a new
+/// `FileOpenEvent` which calls `read_container_id()` again, creating an unbounded
+/// loop. Excluding the agent's own threads from file_open capture breaks the cycle.
+///
+/// # Errors
+///
+/// Returns [`SensorError`] if the map is missing or cannot be written to.
+fn populate_excluded_pids(ebpf: &mut aya::Ebpf) -> Result<u32, SensorError> {
+    let map = ebpf
+        .map_mut("EXCLUDED_PIDS")
+        .ok_or_else(|| err("map EXCLUDED_PIDS not found in eBPF object".to_string()))?;
+    let mut excluded: aya::maps::HashMap<_, u32, u8> = aya::maps::HashMap::try_from(map)
+        .map_err(|e| err(format!("EXCLUDED_PIDS is not a hash map: {e}")))?;
+
+    // Insert the agent's own PID (process group leader)
+    let agent_pid = std::process::id();
+    let _ = excluded.insert(agent_pid, 0, 0);
+    let mut excluded_count = 1u32;
+
+    // Insert all thread IDs (tokio workers have different TIDs than the TGID)
+    // Read from /proc/self/task/* to get all thread IDs for this process
+    if let Ok(entries) = std::fs::read_dir("/proc/self/task") {
+        for entry in entries.flatten() {
+            if let Some(tid_str) = entry.file_name().to_str() {
+                if let Ok(tid) = tid_str.parse::<u32>() {
+                    if tid != agent_pid {
+                        // Only insert if different from main PID (already inserted)
+                        if excluded.insert(tid, 0, 0).is_ok() {
+                            excluded_count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(excluded_count)
+}
+
 /// accepted, it self-heals on that process's next child.
 fn prime_proc_lineage(ebpf: &mut aya::Ebpf) -> Result<u32, SensorError> {
     let map = ebpf
@@ -405,6 +447,15 @@ impl LinuxSensor {
             Ok(n) => log::info!("sensor-linux: primed {n} processes into PROC_LINEAGE"),
             Err(e) => warn!(
                 "sensor-linux: PROC_LINEAGE priming failed ({e}) — ppid known only for post-attach forks"
+            ),
+        }
+
+        // Populate EXCLUDED_PIDS with agent's own PID + thread IDs to prevent
+        // self-referential feedback loop (issue #199).
+        match populate_excluded_pids(&mut ebpf) {
+            Ok(n) => log::info!("sensor-linux: excluded {n} PIDs/TIDs from file_open capture"),
+            Err(e) => warn!(
+                "sensor-linux: EXCLUDED_PIDS population failed ({e}) — self-referential loop may occur"
             ),
         }
 

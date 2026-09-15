@@ -182,6 +182,14 @@ static FILE_OPEN_EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 #[map]
 static OPEN_SCRATCH: PerCpuArray<FileOpenEvent> = PerCpuArray::with_max_entries(1, 0);
 
+/// PIDs to exclude from `file_open` capture (agent's own PID + thread IDs). Populated
+/// by userspace at agent startup to prevent self-referential feedback loop when
+/// `read_container_id()` opens `/proc/{pid}/cgroup` — that syscall would trigger a
+/// new `FileOpenEvent`, which would call `read_container_id()` again, ad infinitum
+/// (issue #199). Key is the PID/TID, value is unused (presence check only).
+#[map]
+static EXCLUDED_PIDS: HashMap<u32, u8> = HashMap::with_max_entries(256, 0);
+
 /// Offsets of the `syscalls:sys_enter_openat` tracepoint (x86_64). Standard, stable format of
 /// the `syscalls:*` subsystem (documented, unlike `sched:*` tracepoints whose layout can vary
 /// more): an 8-byte common header, `__syscall_nr` (4 bytes + padding), then the syscall
@@ -217,6 +225,18 @@ pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sys_enter_openat(ctx: TracePointContext) -> Result<u32, u32> {
+    // Check if this PID/TID should be excluded (agent's own threads, issue #199).
+    // Read the raw PID/TID (lower 32 bits = TID, upper 32 bits = TGID/PID).
+    // We check both to handle tokio worker threads that have different TIDs.
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let tid = pid_tgid as u32;
+    let pid = (pid_tgid >> 32) as u32;
+
+    // Check if either the TID or PID is in the exclusion set
+    if unsafe { EXCLUDED_PIDS.get(&tid).is_some() || EXCLUDED_PIDS.get(&pid).is_some() } {
+        return Ok(0); // Skip this event silently
+    }
+
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let filename_ptr: u64 = unsafe { ctx.read_at(OPENAT_FILENAME_PTR_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
@@ -240,7 +260,7 @@ fn try_sys_enter_openat(ctx: TracePointContext) -> Result<u32, u32> {
     unsafe {
         core::ptr::write_bytes(e, 0, 1);
 
-        (*e).meta.pid = (bpf_get_current_pid_tgid() >> 32) as u32;
+        (*e).meta.pid = pid;
         (*e).meta.ppid = lineage_ppid();
         (*e).meta.uid = uid_gid as u32;
         (*e).meta.gid = (uid_gid >> 32) as u32;
