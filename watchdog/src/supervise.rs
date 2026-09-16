@@ -465,14 +465,16 @@ mod tests {
     fn tick_only_checks_the_file_once_per_interval() {
         // interval = 5s, POLL_TICK = 500ms -> 10 ticks per check.
         let mut m = monitor(1);
-        std::fs::write("/tmp/heartbeat-monitor-tick-test.txt", "1").unwrap();
-        m.path = PathBuf::from("/tmp/heartbeat-monitor-tick-test.txt");
+        let path = std::env::temp_dir()
+            .join(format!("heartbeat-monitor-tick-test-{}.txt", std::process::id()));
+        std::fs::write(&path, "1").unwrap();
+        m.path = path.clone();
         for i in 1..10 {
             assert!(!m.tick(), "tick {i} should not have checked the file yet");
         }
         // The 10th tick performs the check: same value as the (nonexistent)
         // baseline read on first check -> not yet a miss (first real reading).
         assert!(!m.tick());
-        std::fs::remove_file("/tmp/heartbeat-monitor-tick-test.txt").ok();
+        std::fs::remove_file(&path).ok();
     }
 }
