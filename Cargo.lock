@@ -29,10 +29,13 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "policy",
  "rules",
  "schema",
  "sensor-linux",
+ "sensor-linux-netlink",
  "sensor-windows",
+ "sensor-windows-eventlog",
  "serde",
  "sigma",
  "sinks",
@@ -2461,6 +2464,10 @@ dependencies = [
 [[package]]
 name = "sensor-windows-eventlog"
 version = "0.1.0"
+dependencies = [
+ "log",
+ "schema",
+]
 
 [[package]]
 name = "serde"
