@@ -57,6 +57,11 @@ impl DetectionSink {
         })
     }
 
+    /// Returns a reference to the enrichment queue for health telemetry.
+    pub(crate) fn enrich_queue(&self) -> &EnrichQueue {
+        &self.enrich_queue
+    }
+
     /// Cross-event correlation (co-occurrence rules + Bayesian belief).
     fn correlate(&self, event: &Event) {
         for alert in self.correlator.lock().unwrap().on_event(event.clone()) {

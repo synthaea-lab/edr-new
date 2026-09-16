@@ -98,10 +98,35 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
         alerts.display(),
         events.display()
     );
+
+    // Spawn health beacon thread — emits periodic self-diagnostics to the control
+    // plane (issue #134). Uses no-op sources for now (sensors, spool) until those
+    // components expose the necessary APIs.
+    let health_config = crate::health::HealthCollectorConfig::default();
+    let health = crate::health::HealthCollector::new(
+        health_config,
+        std::sync::Arc::new(crate::health::NoopSensorHealth),
+        std::sync::Arc::new(crate::health::NoopSpoolStats),
+        std::sync::Arc::new(sink.enrich_queue().clone()) as std::sync::Arc<dyn crate::health::DroppedCounter>,
+        |beacon| {
+            // For now, just log the beacon. Once transport (#24) integration is
+            // complete, this will emit via the dedicated health channel.
+            log::info!(
+                "health beacon: {} sensors, {} spool bytes, {} enrich dropped",
+                beacon.sensors.len(),
+                beacon.spool_bytes,
+                beacon.enrich_dropped
+            );
+        },
+    );
+    let (_health_handle, _health_stop) = health.spawn();
+
     let mut sensor = sensor_linux::LinuxSensor::new();
     sensor
         .run(Box::new(sink))
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
+    // Health beacon thread stops when the process exits (sensor.run() blocks until
+    // Ctrl-C). For graceful shutdown, call health_stop.stop() before exiting.
 }
 
 /// Linux: rules-filtered benign capture via `BaselineSink` (Ctrl-C handled by the
