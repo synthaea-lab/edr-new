@@ -633,9 +633,10 @@ fn try_ssl_write(ctx: ProbeContext, lib_type: u8) -> Result<u32, u32> {
 
         // Batch read: single bpf_probe_read_user_buf() call instead of 256
         // individual bpf_probe_read_user() calls (verifier-friendly).
+        let data_slice = &mut (*e).data;
         (*e).bytes_len = if let Ok(()) = bpf_probe_read_user_buf(
             buf_ptr as *const u8,
-            &mut (*e).data[..to_read],
+            &mut data_slice[..to_read],
         ) {
             to_read as u32
         } else {
@@ -714,7 +715,7 @@ pub fn ssl_read_exit_gnutls(ctx: RetProbeContext) -> u32 {
 }
 
 fn try_ssl_read_exit(ctx: RetProbeContext) -> Result<u32, u32> {
-    let retval: i32 = unsafe { ctx.ret().ok_or(1u32)? }; // SSL_read's return value
+    let retval: i32 = ctx.ret::<i32>(); // SSL_read's return value
     if retval <= 0 {
         return Ok(0); // Read failed or no data
     }
@@ -757,9 +758,10 @@ fn try_ssl_read_exit(ctx: RetProbeContext) -> Result<u32, u32> {
 
         // Batch read: single bpf_probe_read_user_buf() call instead of 256
         // individual bpf_probe_read_user() calls (verifier-friendly).
+        let data_slice = &mut (*e).data;
         (*e).bytes_len = if let Ok(()) = bpf_probe_read_user_buf(
             buf_ptr as *const u8,
-            &mut (*e).data[..to_read],
+            &mut data_slice[..to_read],
         ) {
             to_read as u32
         } else {
@@ -799,7 +801,7 @@ pub fn readline_exit(ctx: RetProbeContext) -> u32 {
 }
 
 fn try_readline_exit(ctx: RetProbeContext) -> Result<u32, u32> {
-    let line_ptr: u64 = unsafe { ctx.ret().ok_or(1u32)? }; // readline's return value
+    let line_ptr: u64 = ctx.ret::<u64>(); // readline's return value
     if line_ptr == 0 {
         return Ok(0); // EOF or error
     }

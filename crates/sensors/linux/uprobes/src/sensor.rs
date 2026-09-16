@@ -569,6 +569,7 @@ impl Sensor for UprobesSensor {
             exec_events: false,
             file_events: false,
             connect_events: false,
+            auth_events: false,      // No authentication events
             user_attribution: true,  // EventMeta includes uid/gid
             parent_lineage: true,    // EventMeta includes ppid/parent_comm
         }
