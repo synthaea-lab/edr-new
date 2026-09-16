@@ -41,11 +41,11 @@ pub(crate) fn cmd_uninstall() -> anyhow::Result<()> {
 /// Subcommand `status`: the service manager's view. The query command's own exit
 /// code is informational (a stopped or absent service is a valid answer, not an
 /// error). Linux delegates to `linux::cmd_status` since the query itself is
-/// service-manager-dependent (systemd vs. OpenRC, detected there).
+/// service-manager-dependent (systemd vs. `OpenRC`, detected there).
 pub(crate) fn cmd_status() -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
-        return linux::cmd_status();
+        linux::cmd_status()
     }
 
     #[cfg(not(target_os = "linux"))]

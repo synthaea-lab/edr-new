@@ -1,8 +1,8 @@
-//! Linux: service-manager integration — systemd unit or OpenRC `init.d` script,
+//! Linux: service-manager integration — systemd unit or `OpenRC` `init.d` script,
 //! both with unlimited automatic respawn (`Restart=always` / bare `supervise-daemon`
 //! with no `respawn_max`), so the service manager restarts the watchdog, the
 //! watchdog restarts the agent. Alpine and other non-glibc/non-systemd distros run
-//! OpenRC, not systemd (issue #213) — detected at install time, not assumed.
+//! `OpenRC`, not systemd (issue #213) — detected at install time, not assumed.
 
 use std::path::PathBuf;
 
@@ -20,9 +20,9 @@ enum InitSystem {
 }
 
 /// Detects the running init system the same way systemd itself does (`sd_booted()`):
-/// `/run/systemd/system` only exists when systemd is PID 1. OpenRC never creates it;
+/// `/run/systemd/system` only exists when systemd is PID 1. `OpenRC` never creates it;
 /// `openrc-run` (the interpreter every `/etc/init.d` script is run through) is the
-/// OpenRC marker instead.
+/// `OpenRC` marker instead.
 fn detect_init_system() -> anyhow::Result<InitSystem> {
     if std::path::Path::new("/run/systemd/system").exists() {
         Ok(InitSystem::Systemd)
