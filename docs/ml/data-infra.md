@@ -311,12 +311,15 @@ the `0.1.0` entries.
   work is a trivial ~10 line follow-up flagged in the #194 review. Until then,
   verifying a legacy baseline requires the Python one-liner shown in "Legacy
   state" above.
-- **CRLF hash-drift on Windows contributors** (issue #196). Nothing in the
-  repo pins `ml/datasets/**/*.jsonl` to `text eol=lf`; a contributor on
-  Git-for-Windows with the default `core.autocrlf=true` gets CRLF-rewritten
-  baselines on checkout, and every `verify_manifest` fails with a hash
-  mismatch that looks like a real bug. Fix: add a `.gitattributes` covering
-  the datasets tree and the parity fixtures.
+- **CRLF hash-drift on Windows contributors** — historic gap, **fixed by
+  #198**. Nothing used to pin `ml/datasets/**/*.jsonl` to `text eol=lf`, so
+  a contributor on Git-for-Windows with the default `core.autocrlf=true`
+  got CRLF-rewritten baselines on checkout and every `verify_manifest`
+  failed with a hash mismatch that looked like a real bug. #198 landed a
+  `.gitattributes` covering exactly `ml/datasets/**/*.jsonl` and
+  `manifest.json` — the schema/ml golden fixtures are read semantically
+  (whitespace-insensitive JSON parsing), don't hash their own bytes, and
+  don't need the same pinning.
 - **GitHub Actions billing is currently blocked at the `synthaea-lab` org
   level** (see the comment in `.github/workflows/ml.yml`). Until it is
   restored, `SYNTHAEA_STRICT_PROVENANCE=1` runs locally only. Every PR
@@ -347,8 +350,8 @@ the `0.1.0` entries.
 - PR #194 — `verify_manifest` accepts `--baseline-filename` for legacy
   captures (closes #190).
 - Issue #191 — `verify_onnx` sanity samples hardcoded to Windows.
-- Issue #196 — `.gitattributes` needed to pin datasets JSONL to LF on
-  Windows contributors.
+- Issue #196 — CRLF hash-drift on Windows contributors (closed by #198,
+  which pinned `ml/datasets/**/*.jsonl` and `manifest.json` to LF).
 - `ml/README.md` — the three rules this stack enforces.
 - ADR-0002 — model artifacts are signed data delivered via canary rings, not
   binary-embedded assets. The provenance chain here is what those signatures
