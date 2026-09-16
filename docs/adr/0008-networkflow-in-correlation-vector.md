@@ -14,8 +14,8 @@ every already-calibrated model was trained against.
 
 Two ML vectors exist in this workspace and both are natural candidates:
 
-- **T1: `BehaviorVector`** (`crates/ml/src/features/behavior.rs`) — feeds
-  the BAYES rule (`crates/rules/src/state/bayes.rs`). Positional struct
+- **T1: `BehaviorVector`** (`crates/correlator/src/behavior.rs`) — feeds
+  the BAYES rule (`crates/correlator/src/bayes.rs`). Positional struct
   (`bayes.rs` indexes by match index), fragile to a mid-struct insertion.
   Today it carries `connect_count`, `distinct_dports` — already touching
   the network-signal surface, but from `Event::Connect` only.
@@ -94,7 +94,7 @@ Two Rust edits, both in `crates/ml/src/features/correlation.rs`:
    `daddr` / `dport` from that variant and feeds the same
    `HashSet<IpAddr>` / `HashSet<u16>` accumulators as Connect.
 
-**Python parity**: `crates/ml/python/synthaea_ml/features/correlation.py`
+**Python parity**: `ml/synthaea_ml/features/correlation.py`
 carries the same logic in Python and is the source of truth for the
 training-time feature computation. The two edits above must be mirrored
 there **before** #44 generates the first NetworkFlow-inclusive baseline,
@@ -165,10 +165,10 @@ Explicitly discarded from the MVP (from the #193 review discussion):
 
 - #193 — `sensor-linux-netlink` conntrack + listener drift (merged);
   the review comment on that PR is the seed of this ADR.
-- `crates/rules/src/state/bayes.rs` — T1 consumer, `BehaviorVector`
+- `crates/correlator/src/bayes.rs` — T1 consumer, `BehaviorVector`
   positional indexing.
 - `crates/ml/src/features/correlation.rs` — T2 vector construction.
-- `crates/ml/python/synthaea_ml/features/correlation.py` — Python
+- `ml/synthaea_ml/features/correlation.py` — Python
   parity for training.
 - ADR-0002 — ML model delivery and inference.
 - Issue #44 — first NetworkFlow-inclusive baseline capture (unblocked
