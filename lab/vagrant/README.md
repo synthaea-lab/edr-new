@@ -2,7 +2,8 @@
 
 One of possibly several virtualization harnesses for the lab (see `../README.md`).
 Implements the machine matrix from `../MATRIX.md`; each VM runs the shared
-provisioning from `../provisioning/`. For Windows hosts, see `../vagrant-hyperv/`.
+provisioning from `../provisioning/`. For Windows hosts running Hyper-V, see
+`../vagrant-hyperv/`.
 
 ## Host setup (macOS / Apple Silicon)
 
@@ -10,6 +11,32 @@ provisioning from `../provisioning/`. For Windows hosts, see `../vagrant-hyperv/
 - **Vagrant** + the QEMU provider plugin: `vagrant plugin install vagrant-qemu`
 - Windows boxes are **amd64** (VirtualBox / Hyper-V): unusable under QEMU on Apple
   Silicon — run them on an x86 host instead (issue #22).
+
+## Host setup (Windows / x86, VirtualBox) — Alpine row only
+
+The `alpine319` machine is amd64, same as the Windows boxes — unusable under QEMU
+on Apple Silicon. Unlike them it's a Linux guest, so it doesn't need
+`../vagrant-hyperv/`'s Hyper-V provider either: it runs directly on VirtualBox,
+which a Windows lab machine already needs for other work.
+
+- **VirtualBox** (any recent 7.x) + **Vagrant**: `winget install Hashicorp.Vagrant`
+- Neither installer adds itself to `PATH` reliably on Windows — open a fresh shell
+  (or add `C:\Program Files\Vagrant\bin` yourself) before the commands below.
+
+```
+cd lab\vagrant
+vagrant up alpine319 --provider virtualbox
+vagrant ssh alpine319
+vagrant destroy -f alpine319   # rollback = destroy + up
+```
+
+`generic/alpine319` (3.19/6.6) is the newest Alpine Vagrant Cloud publishes with a
+virtualbox/amd64 provider — not the 3.24/6.18 `../MATRIX.md` and issue #123 were
+manually validated against, but this row exists to prove musl/BusyBox toolchain
+portability, not kernel-version drift (that's the `arch` row's job). Provisioning
+is `../provisioning/alpine-toolchain.sh`; verified end to end on this box — build,
+`agent status` (5/5 eBPF programs accepted by the verifier), and the full
+`lab/scenarios/beacon.sh` walking-skeleton (T1071/T1041 alert fires as expected).
 
 ## Usage
 
