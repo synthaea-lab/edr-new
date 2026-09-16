@@ -2,10 +2,14 @@
 //! (`linux` — stateless + download/exec/web-server lineage; `windows` —
 //! SELF-SPAWN, PARENT-SUSPECT, LOLBIN, BEACON).
 
-use schema::{ConnectEvent, EventMeta, ExecEvent, FileOpenEvent, User};
+use schema::{
+    ConnectEvent, ContainerContext, EventMeta, ExecEvent, FileOpenEvent, ListenPortEvent,
+    NetworkFlowEvent, User,
+};
 
 use crate::{
     O_CREAT, O_WRONLY, RuleState, check_base64_decode, check_persistence_write,
+    check_proc_root_escape,
     exclusions::{BEACON_THRESHOLD, SELF_SPAWN_THRESHOLD},
 };
 
@@ -81,6 +85,16 @@ fn file_open_event_full(
     event
 }
 
+fn file_open_event_containerized(path: &str, container_id: &str) -> FileOpenEvent {
+    let mut event = file_open_event(path, O_RDONLY);
+    event.meta.container = Some(ContainerContext {
+        id: container_id.to_string(),
+        image: None,
+        name: None,
+    });
+    event
+}
+
 fn connect_event_full(
     pid: u32,
     comm: &str,
@@ -96,6 +110,49 @@ fn connect_event_full(
         meta,
         daddr: std::net::IpAddr::V4(daddr_v4.into()),
         dport,
+    }
+}
+
+fn network_flow_event_full(
+    pid: u32,
+    comm: &str,
+    local_port: u16,
+    daddr_v4: [u8; 4],
+    dport: u16,
+    timestamp_ns: u64,
+) -> NetworkFlowEvent {
+    let mut meta = meta();
+    meta.pid = pid;
+    meta.timestamp_ns = timestamp_ns;
+    meta.comm = comm.to_string();
+    NetworkFlowEvent {
+        meta,
+        local_port,
+        daddr: std::net::IpAddr::V4(daddr_v4.into()),
+        dport,
+        protocol: 6, // IPPROTO_TCP
+        bytes_sent: None,
+        bytes_received: None,
+        packets_sent: None,
+        packets_received: None,
+    }
+}
+
+fn listen_port_event_full(
+    pid: u32,
+    comm: &str,
+    local_addr_v4: [u8; 4],
+    local_port: u16,
+    timestamp_ns: u64,
+) -> ListenPortEvent {
+    let mut meta = meta();
+    meta.pid = pid;
+    meta.timestamp_ns = timestamp_ns;
+    meta.comm = comm.to_string();
+    ListenPortEvent {
+        meta,
+        local_addr: std::net::IpAddr::V4(local_addr_v4.into()),
+        local_port,
     }
 }
 

@@ -27,7 +27,7 @@ issue filed), **rejected** (deliberate, reason given).
 | ETW kernel providers (Process/File/Network) | used | `sensors/windows/etw` |
 | ETW expansion (Registry, DNS, image load, AMSI, PowerShell, WMI) | planned | #21 |
 | ETW: DotNETRuntime (in-memory assemblies), SMB/RPC/TCPIP | planned | #97 |
-| Windows Event Log channels (EvtSubscribe) | planned | `sensors/windows/eventlog` (#94) |
+| Windows Event Log channels (`wevtutil` polling — `EvtSubscribe` evaluation still pending, see ADR-0004) | used | `sensors/windows/eventlog` (#94) |
 | Kernel callbacks: process/image/registry (driver) | planned | `sensors/windows/driver` |
 | ObRegisterCallbacks — handle access (LSASS credential-theft signal) | planned | #137 (on driver #39) |
 | Minifilter (file deletes/renames/pipes, timestomping via SetInformation, Alternate Data Streams, raw volume access) | planned | #136 (on driver #39) |

@@ -24,6 +24,8 @@ pub struct Capabilities {
     pub exec_events: bool,
     pub file_events: bool,
     pub connect_events: bool,
+    /// True when this sensor can emit [`crate::Event::Auth`].
+    pub auth_events: bool,
     /// True when emitted events carry real user attribution ([`crate::User`] not
     /// `Unknown`).
     pub user_attribution: bool,
@@ -40,6 +42,16 @@ pub struct Capabilities {
 /// sinks match on the variants they understand and ignore the rest.
 pub trait EventSink: Send + Sync {
     fn on_event(&self, event: Event);
+}
+
+/// Lets several producers share one sink behind an `Arc` — e.g. issue #92's
+/// netlink poller running on its own thread alongside a platform `Sensor` that
+/// still needs to own a `Box<dyn EventSink>` for [`Sensor::run`]. `Arc<T>` is
+/// already `Send + Sync` whenever `T` is, so this only has to forward the call.
+impl<T: EventSink + ?Sized> EventSink for std::sync::Arc<T> {
+    fn on_event(&self, event: Event) {
+        (**self).on_event(event);
+    }
 }
 
 /// Sensor for a given platform. `run` blocks and pushes observed events to `sink` as

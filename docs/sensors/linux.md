@@ -61,27 +61,41 @@ machine (the kernel rejects an unprivileged subscribe with `EPERM`, reported bac
 resolving each joined PID's `comm`/`ppid`/`gid` from `/proc/<pid>/status` (uid is
 kernel-reported by `sock_diag` itself, no `/proc` read needed for that one). An
 unattributable PID (exited between the two queries, or another user's process) is
-silently skipped, not emitted with fabricated metadata. This is the mapping issue
-#92's "listening-port drift" done-when item needs, but nothing yet calls it on a
-cadence or diffs consecutive snapshots for drift, and nothing feeds its output to
-`crates/correlator`'s `EventBus` — both are a caller's job that doesn't exist yet.
+silently skipped, not emitted with fabricated metadata.
 Conntrack flows now reach `schema::Event` too — `conntrack_flow_events()` maps a
-`dump_conntrack()` dump to `Event::NetworkFlow` (schema v11 -> v12). A conntrack
-entry carries no PID from the kernel at all (unlike `sock_diag`'s inode join), so
-attribution instead joins the flow's tuple against a concurrent `sock_diag`
-snapshot's `local`/`remote`/state — two orientations are checked (this host as the
-connection's initiator, or as the one accepted into), since `ctnetlink` doesn't say
-which end `orig` started from, and the `orig`/`reply` byte counters are swapped
-accordingly before becoming `bytes_sent`/`bytes_received` for whichever orientation
-matched. TCP only (`sock_diag` here never queries UDP, so a UDP flow can never
-match); a flow nothing could attribute produces no event, same discipline as
-listening sockets. This is the mapping issue #92's "conntrack features reach the
-correlator" done-when item needs — polling cadence, the beacon-scenario validation
-itself, and `crates/correlator` wiring remain a caller's job that doesn't exist yet
-(no lab VM here to build one against). Proc connector's own schema/`tamper` wiring
-is still explicitly deferred past this slice — see the crate doc's "Deliberately
-not here yet" section for why (its role is a `tamper` cross-check that may not want
-to be a `schema::Event` in the first place).
+`dump_conntrack()` dump to `Event::NetworkFlow` (schema v11 -> v12, `local_port`
+added on top in v12 -> v13 — see below). A conntrack entry carries no PID from the
+kernel at all (unlike `sock_diag`'s inode join), so attribution instead joins the
+flow's tuple against a concurrent `sock_diag` snapshot's `local`/`remote`/state —
+two orientations are checked (this host as the connection's initiator, or as the
+one accepted into), since `ctnetlink` doesn't say which end `orig` started from,
+and the `orig`/`reply` byte counters are swapped accordingly before becoming
+`bytes_sent`/`bytes_received` for whichever orientation matched. TCP only
+(`sock_diag` here never queries UDP, so a UDP flow can never match); a flow
+nothing could attribute produces no event, same discipline as listening sockets.
+Proc connector's own schema/`tamper` wiring is still explicitly deferred past this
+slice — see the crate doc's "Deliberately not here yet" section for why (its role
+is a `tamper` cross-check that may not want to be a `schema::Event` in the first
+place).
+
+**Status (issue #92, caller/detection wiring, PR #193):** The caller that was
+missing above now exists — `agent`'s Linux `run` command spawns a background
+poller (`sock_diag` + conntrack, 10s cadence) that feeds both event kinds to the
+same `DetectionSink` the eBPF sensor uses, shared via a new
+`impl<T: EventSink> EventSink for Arc<T>` in `schema::sensor`.
+`NetworkFlowEvent` gained `local_port` (schema v12 -> v13) — the stable per-flow
+identity the beacon rule below needs, already computed internally for the
+`sock_diag` join but not previously exposed. `crates/rules::check_beacon_flow`
+closes the "conntrack features reach the correlator for a beacon scenario"
+done-when: same T1071/T1041 rule as the existing `ConnectEvent`-driven
+`check_beacon`, fed by `NetworkFlowEvent` instead, deduped by `local_port` so a
+poll-based source doesn't mistake one long-lived flow re-polled several times for
+several distinct connections (the false-positive a naive per-poll counter would
+otherwise produce on any ordinary long-lived session). `crates/correlator` also
+now pushes `NetworkFlow` to its bus (`is_correlated`), deliberately without a new
+co-occurrence rule or `BehaviorVector` feature yet — see that crate's `event.rs`
+for why. Listen-port drift detection (the other done-when) and the proc-connector
+cross-check (`tamper`) are not part of #193 — see the sections above/below.
 
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's
