@@ -58,6 +58,7 @@ impl DetectionSink {
     }
 
     /// Returns a reference to the enrichment queue for health telemetry.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn enrich_queue(&self) -> &EnrichQueue {
         &self.enrich_queue
     }
