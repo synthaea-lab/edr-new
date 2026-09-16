@@ -32,16 +32,56 @@ tracepoint-sourced one), and all three lab-validated "Done when" items on #91 ar
 follow-ups — this machine has no way to validate a real attach (root needed, and no
 confirmation "bpf" is a registered LSM here even though the BTF type is present).
 
-**Status (issue #92, sock_diag):** Foundation landed — `crates/sensors/linux/netlink`
-queries TCP listening/established sockets (IPv4 + IPv6) via a hand-rolled
-`NETLINK_SOCK_DIAG` client, joined to owning PID(s) via a `/proc` fd scan (the same
-technique `ss`/`lsof` use). Verified unprivileged against this dev machine's real
-kernel — no root needed for `sock_diag`, confirmed empirically. Conntrack and proc
-connector are deliberately not here: both were confirmed reachable in this sandbox
-(session had passwordless `sudo`), but each is a distinct netlink sub-protocol with
-its own parser (conntrack's attributes are TLV-nested, a meaningfully bigger job than
-`sock_diag`'s fixed-size struct) — scoped out to keep this slice reviewable, tracked
-as follow-ups on #92, not silently dropped.
+**Status (issue #92, netlink sensors):** Foundation landed for all three —
+`crates/sensors/linux/netlink` queries TCP listening/established sockets (IPv4 + IPv6)
+via a hand-rolled `NETLINK_SOCK_DIAG` client, joined to owning PID(s) via a `/proc` fd
+scan (the same technique `ss`/`lsof` use); verified unprivileged against this dev
+machine's real kernel — no root needed for `sock_diag`, confirmed empirically.
+`dump_conntrack()` (`NETLINK_NETFILTER`/`ctnetlink`) decodes the kernel's conntrack
+table (IPv4 + IPv6): both directions' 5-tuple, status, timeout, and packet/byte
+accounting when the kernel provides it — the recursive `nlattr` tree this needed
+(`CTA_TUPLE_ORIG` -> `CTA_TUPLE_IP` -> `CTA_IP_V4_SRC`) is what made conntrack "a
+distinct netlink sub-protocol" rather than a `sock_diag`-sized job, confirmed against a
+real capture on this dev machine byte for byte before being pinned into tests.
+Accounting requires `net.netfilter.nf_conntrack_acct=1` on the target kernel — off by
+default, confirmed empirically (no `CTA_COUNTERS_*` attribute appears at all until it
+is turned on). Unprivileged reachability of conntrack is not characterized (every
+capture here ran as root). `CTA_PROTOINFO`'s TCP state (`CTA_PROTOINFO_TCP` ->
+`CTA_PROTOINFO_TCP_STATE`) is now decoded too — a third level of `nlattr` nesting,
+only present for TCP flows (confirmed empirically: UDP dump entries carry no
+`CTA_PROTOINFO` attribute at all). The sibling wscale/flags sub-attributes are decoded
+on the wire but not surfaced, same scoping call as `CTA_STATUS`'s individual bits.
+`ProcEventSubscription` (`NETLINK_CONNECTOR`, `CN_IDX_PROC` group) decodes live
+fork/exec/exit broadcasts — root/`CAP_NET_ADMIN`-only, confirmed against this dev
+machine (the kernel rejects an unprivileged subscribe with `EPERM`, reported back as a
+`NetlinkError`, not a panic); verified end to end against the real kernel as root.
+
+**Status (issue #92, schema wiring):** Listening sockets now reach `schema::Event` —
+`listen_port_events()` maps a snapshot to `Event::ListenPort` (schema v10 -> v11),
+resolving each joined PID's `comm`/`ppid`/`gid` from `/proc/<pid>/status` (uid is
+kernel-reported by `sock_diag` itself, no `/proc` read needed for that one). An
+unattributable PID (exited between the two queries, or another user's process) is
+silently skipped, not emitted with fabricated metadata. This is the mapping issue
+#92's "listening-port drift" done-when item needs, but nothing yet calls it on a
+cadence or diffs consecutive snapshots for drift, and nothing feeds its output to
+`crates/correlator`'s `EventBus` — both are a caller's job that doesn't exist yet.
+Conntrack flows now reach `schema::Event` too — `conntrack_flow_events()` maps a
+`dump_conntrack()` dump to `Event::NetworkFlow` (schema v11 -> v12). A conntrack
+entry carries no PID from the kernel at all (unlike `sock_diag`'s inode join), so
+attribution instead joins the flow's tuple against a concurrent `sock_diag`
+snapshot's `local`/`remote`/state — two orientations are checked (this host as the
+connection's initiator, or as the one accepted into), since `ctnetlink` doesn't say
+which end `orig` started from, and the `orig`/`reply` byte counters are swapped
+accordingly before becoming `bytes_sent`/`bytes_received` for whichever orientation
+matched. TCP only (`sock_diag` here never queries UDP, so a UDP flow can never
+match); a flow nothing could attribute produces no event, same discipline as
+listening sockets. This is the mapping issue #92's "conntrack features reach the
+correlator" done-when item needs — polling cadence, the beacon-scenario validation
+itself, and `crates/correlator` wiring remain a caller's job that doesn't exist yet
+(no lab VM here to build one against). Proc connector's own schema/`tamper` wiring
+is still explicitly deferred past this slice — see the crate doc's "Deliberately
+not here yet" section for why (its role is a `tamper` cross-check that may not want
+to be a `schema::Event` in the first place).
 
 **Status (issue #93, journald):** Foundation landed — `crates/sensors/linux/journal`
 tails `journalctl -f -o json` (subprocess, not `libsystemd` FFI — see the crate's

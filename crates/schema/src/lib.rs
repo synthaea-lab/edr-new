@@ -30,14 +30,16 @@ pub mod sensor;
 /// Version of the serialized event model. Bumped on any serialization-visible change,
 /// together with a new golden-fixture directory (see crate docs).
 ///
-/// Bumped 10 → 11 for [`Event::Auth`] (#94): a new enum variant is a new possible
+/// Bumped 12 → 13 for [`Event::Auth`] (#94): a new enum variant is a new possible
 /// `"type"` tag value, which counts as serialization-visible per the rule above —
 /// even though it breaks nothing for readers of *old* data (see `tests/v1_compat.rs`,
 /// which pins that `tests/fixtures/v1/*.json`, frozen and never edited, still
-/// deserialize under the current `Event` type). `tests/fixtures/v11/` is a full
+/// deserialize under the current `Event` type). `tests/fixtures/v13/` is a full
 /// snapshot (every golden fixture, not only the new `Auth` ones), matching the
-/// precedent already established by versions 2 through 10.
-pub const SCHEMA_VERSION: u32 = 11;
+/// precedent already established by versions 2 through 12. Originally claimed as
+/// 10 → 11 while this branch was open; rebased to 13 once #189 (`NetworkFlow`,
+/// 11 → 12) merged into `main` first — same coordination note as ADR-0005.
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -383,6 +385,24 @@ pub struct UdpSendEvent {
     pub size: u32,
 }
 
+/// A TCP socket found listening, from a periodic socket-table snapshot rather than a
+/// discrete `bind`/`listen()` syscall trace (Linux: `NETLINK_SOCK_DIAG`, issue #92 —
+/// a probe-free source that runs where eBPF/ETW cannot, or as a redundant cross-check
+/// alongside them).
+///
+/// `meta.timestamp_ns` is when the snapshot was taken, not when the socket actually
+/// started listening — a snapshot can only observe "listening as of now", so a
+/// short-lived listener between two polls is invisible to this source (the polling
+/// cadence is a caller decision, not a schema concern). Detection value is in the
+/// series across snapshots (listen-port drift: a new port appearing that wasn't there
+/// last poll), not any single event in isolation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ListenPortEvent {
+    pub meta: EventMeta,
+    pub local_addr: core::net::IpAddr,
+    pub local_port: u16,
+}
+
 /// Outbound network connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectEvent {
@@ -390,6 +410,38 @@ pub struct ConnectEvent {
     /// Destination address, v4 or v6 (audit F-7: v6 is first-class, not an unset flag).
     pub daddr: core::net::IpAddr,
     pub dport: u16,
+}
+
+/// Conntrack flow accounting — bytes/packets transferred over a tracked connection,
+/// the beacon-detection volume feature a point-in-time [`ConnectEvent`] can't carry
+/// (Linux: `NETLINK_NETFILTER`/`ctnetlink`, issue #92).
+///
+/// A conntrack dump entry carries no PID of its own — this event only exists because
+/// the sensor joined the flow's tuple against a concurrent `sock_diag` snapshot to
+/// attribute it (see `sensor-linux-netlink`'s `normalize::conntrack_flow_events_for`);
+/// a flow the join couldn't attribute (already closed, owned by another user's
+/// unreadable `/proc/<pid>/fd`) produces no event at all rather than one with
+/// fabricated metadata, same discipline as [`ListenPortEvent`].
+///
+/// `bytes_*`/`packets_*` are `None` when the kernel's
+/// `net.netfilter.nf_conntrack_acct` accounting is disabled (the default) — a flow
+/// with `None` counters is still worth an event (its address/port/protocol alone),
+/// just without volume data. `meta.timestamp_ns` is the poll time, not flow start —
+/// same "snapshot, not a discrete trace" caveat as [`ListenPortEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkFlowEvent {
+    pub meta: EventMeta,
+    /// The peer address, from this host's perspective — whichever side of the
+    /// flow's tuple isn't the locally-attributed socket (see the join doc above).
+    pub daddr: core::net::IpAddr,
+    pub dport: u16,
+    /// IP protocol number (`IPPROTO_TCP` = 6; the only value this source currently
+    /// attributes — see the sensor crate doc for why UDP isn't joined yet).
+    pub protocol: u8,
+    pub bytes_sent: Option<u64>,
+    pub bytes_received: Option<u64>,
+    pub packets_sent: Option<u64>,
+    pub packets_received: Option<u64>,
 }
 
 /// Health status of a single sensor.
@@ -529,6 +581,8 @@ pub enum Event {
     SmbConnect(SmbConnectEvent),
     UdpSend(UdpSendEvent),
     Auth(AuthEvent),
+    ListenPort(ListenPortEvent),
+    NetworkFlow(NetworkFlowEvent),
 }
 
 impl Event {
@@ -552,6 +606,12 @@ impl Event {
             Event::SmbConnect(e) => &e.meta,
             Event::UdpSend(e) => &e.meta,
             Event::Auth(e) => &e.meta,
+            Event::ListenPort(e) => &e.meta,
+            Event::NetworkFlow(e) => &e.meta,
+            // Non-exhaustive: new telemetry variants must be added here.
+            // This arm ensures a compile-time reminder when adding variants.
+            #[allow(unreachable_patterns)]
+            _ => unreachable!("all Event variants must have meta — add the new variant here"),
         }
     }
 }
