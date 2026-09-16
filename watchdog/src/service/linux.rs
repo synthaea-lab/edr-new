@@ -1,6 +1,6 @@
 //! Linux: service-manager integration — systemd unit or `OpenRC` `init.d` script,
-//! both with unlimited automatic respawn (`Restart=always` / bare `supervise-daemon`
-//! with no `respawn_max`), so the service manager restarts the watchdog, the
+//! both with unlimited automatic respawn (`Restart=always` / `supervise-daemon`
+//! with `respawn_max="0"`), so the service manager restarts the watchdog, the
 //! watchdog restarts the agent. Alpine and other non-glibc/non-systemd distros run
 //! `OpenRC`, not systemd (issue #213) — detected at install time, not assumed.
 
@@ -144,11 +144,14 @@ fn status_systemd() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `supervise-daemon` with no `respawn_max`/`respawn_period` set respawns
-/// indefinitely — confirmed on Alpine 6.18: those knobs exist only to bound a
-/// crash loop (`supervise-daemon` refuses a `respawn_period` too short to avoid
-/// one), not to opt into respawning at all. That's the `Restart=always` equivalent
-/// we want, so neither is set here.
+/// `respawn_max` defaults to `5` (within a 1800s `respawn_period`), not unlimited —
+/// confirmed on Alpine by `ps aux` showing `supervise-daemon` invoked with those
+/// exact values despite the generated script setting neither: they come from the
+/// site-wide `/etc/rc.conf` `SUPERVISE DAEMON CONFIGURATION VARIABLES` block,
+/// applied to every `supervisor=supervise-daemon` service that doesn't override
+/// them. `/etc/rc.conf` documents `respawn_max=0` as "unlimited" — that's the
+/// `Restart=always` equivalent we want, so it's set explicitly rather than relying
+/// on OpenRC's own default.
 fn install_openrc(agent_bin: Option<PathBuf>, alerts: PathBuf) -> anyhow::Result<()> {
     let paths = resolve_paths(agent_bin, alerts)?;
 
@@ -159,6 +162,7 @@ fn install_openrc(agent_bin: Option<PathBuf>, alerts: PathBuf) -> anyhow::Result
          command=\"{watchdog}\"\n\
          command_args=\"run --agent-bin \\\"{agent}\\\" --alerts \\\"{out}\\\"\"\n\
          pidfile=\"/run/${{RC_SVCNAME}}.pid\"\n\
+         respawn_max=\"0\"\n\
          output_log=\"/var/log/synthaea-watchdog.log\"\n\
          error_log=\"/var/log/synthaea-watchdog.log\"\n\n\
          depend() {{\n\
