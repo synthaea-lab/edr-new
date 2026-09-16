@@ -54,15 +54,27 @@ fn lineage_ppid() -> u32 {
 
 // --- sched:sched_process_fork -------------------------------------------------------
 //
-// Records `child_pid -> {parent_pid, parent_comm}`. All three come from the
-// tracepoint's own record — a `char[16]` and two `pid_t`s — so the offsets are the
-// standard tracepoint layout (8-byte common header, then the fields) and do not vary
-// with pointer width across the x86_64 / i686 / aarch64 targets. Verify against
-// `/sys/kernel/tracing/events/sched/sched_process_fork/format` when adding a kernel
-// row to `lab/MATRIX.md`.
-const FORK_PARENT_COMM_OFFSET: usize = 8;
-const FORK_PARENT_PID_OFFSET: usize = 24;
-const FORK_CHILD_PID_OFFSET: usize = 44;
+// Records `child_pid -> {parent_pid, parent_comm}`. Verified on 2026-09-15 on Alpine
+// (kernel 6.18.50-0-virt, x86_64) via
+// `/sys/kernel/tracing/events/sched/sched_process_fork/format` — and found NOT to
+// match the layout previously assumed here. This kernel emits `parent_comm`/
+// `child_comm` as `__data_loc` (dynamic-offset) fields, not inline `char[16]`s, which
+// also shifts every field after them:
+//
+//   field:__data_loc char[] parent_comm;  offset:8;  size:4;
+//   field:pid_t parent_pid;               offset:12; size:4;
+//   field:__data_loc char[] child_comm;   offset:16; size:4;
+//   field:pid_t child_pid;                offset:20; size:4;
+//
+// `parent_comm` is read the same way `sched_process_exec` already reads `filename`
+// (issue #111): a `u32` data-locator (low 16 bits = byte offset from the record
+// start, high 16 bits = length), then a bounded string copy from that offset. All
+// fields are ints/u32s, no pointers — arch-independent, unlike `sys_enter_openat`
+// below. Re-verify against `/format` on any kernel row added to `lab/MATRIX.md`;
+// this layout has apparently changed across kernel versions before and can again.
+const FORK_PARENT_COMM_DATA_LOC_OFFSET: usize = 8;
+const FORK_PARENT_PID_OFFSET: usize = 12;
+const FORK_CHILD_PID_OFFSET: usize = 20;
 
 #[tracepoint]
 pub fn sched_process_fork(ctx: TracePointContext) -> u32 {
@@ -71,17 +83,49 @@ pub fn sched_process_fork(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sched_process_fork(ctx: &TracePointContext) -> Result<(), i64> {
-    let child_pid: i32 = unsafe { ctx.read_at(FORK_CHILD_PID_OFFSET).map_err(|_| 1i64)? };
-    let parent_pid: i32 = unsafe { ctx.read_at(FORK_PARENT_PID_OFFSET).map_err(|_| 1i64)? };
-    let comm: [u8; TASK_COMM_LEN] =
-        unsafe { ctx.read_at(FORK_PARENT_COMM_OFFSET).map_err(|_| 1i64)? };
+    let parent_pid: i32 = unsafe {
+        ctx.read_at(FORK_PARENT_PID_OFFSET).map_err(|_| {
+            warn!(ctx, "sensor-linux-ebpf: fork read parent_pid failed");
+            1i64
+        })?
+    };
+    let child_pid: i32 = unsafe {
+        ctx.read_at(FORK_CHILD_PID_OFFSET).map_err(|_| {
+            warn!(ctx, "sensor-linux-ebpf: fork read child_pid failed");
+            1i64
+        })?
+    };
+    let data_loc: u32 = unsafe {
+        ctx.read_at(FORK_PARENT_COMM_DATA_LOC_OFFSET).map_err(|_| {
+            warn!(
+                ctx,
+                "sensor-linux-ebpf: fork read parent_comm data_loc failed"
+            );
+            1i64
+        })?
+    };
+
+    let mut comm = [0u8; TASK_COMM_LEN];
+    let comm_offset = (data_loc & 0xffff) as usize;
+    let comm_src = unsafe { (ctx.as_ptr() as *const u8).add(comm_offset) };
+    let _ = unsafe { bpf_probe_read_kernel_str_bytes(comm_src, &mut comm) };
 
     let entry = LineageEntry {
         ppid: parent_pid as u32,
         comm,
     };
     // BPF_ANY: overwrite a stale entry left by pid reuse.
-    let _ = PROC_LINEAGE.insert(&(child_pid as u32), &entry, 0);
+    let inserted = PROC_LINEAGE.insert(&(child_pid as u32), &entry, 0);
+    match inserted {
+        Ok(_) => info!(
+            ctx,
+            "sensor-linux-ebpf: fork child={} parent={} inserted=1", child_pid, parent_pid
+        ),
+        Err(_) => info!(
+            ctx,
+            "sensor-linux-ebpf: fork child={} parent={} inserted=0", child_pid, parent_pid
+        ),
+    }
     Ok(())
 }
 
@@ -186,9 +230,8 @@ static OPEN_SCRATCH: PerCpuArray<FileOpenEvent> = PerCpuArray::with_max_entries(
 /// the `syscalls:*` subsystem (documented, unlike `sched:*` tracepoints whose layout can vary
 /// more): an 8-byte common header, `__syscall_nr` (4 bytes + padding), then the syscall
 /// arguments aligned on 8 bytes each — `dfd`(16), `filename`(24), `flags`(32), `mode`(40).
-/// Not yet verified against `/sys/kernel/tracing/events/syscalls/sys_enter_openat/format` on
-/// this machine (reading requires root) — to be confirmed before trusting the data outside
-/// the lab.
+/// Verified on 2026-09-16 on Alpine (kernel 6.18.50-0-virt, x86_64) via
+/// `/sys/kernel/tracing/events/syscalls/sys_enter_openat/format`.
 ///
 /// Known limit: `filename` is the raw path passed by the caller, not resolved against `dfd` —
 /// a path relative to a non-standard directory descriptor will appear as-is, without the
@@ -207,6 +250,27 @@ const OPENAT_FLAGS_OFFSET: usize = 32;
 const OPENAT_FILENAME_PTR_OFFSET: usize = 16;
 #[cfg(bpf_target_arch = "x86")]
 const OPENAT_FLAGS_OFFSET: usize = 20;
+
+/// Offsets of the `syscalls:sys_enter_open` tracepoint — the plain `open(2)` syscall, one
+/// argument short of `openat` above (no leading `dfd`), so `filename`/`flags` land 8 bytes
+/// (x86_64/aarch64) / 4 bytes (i686) earlier. Needed because musl — and every busybox applet
+/// linked against it, `cat` included — still issues `open(2)` directly; glibc has rewritten
+/// `open()` to call `openat(AT_FDCWD, ...)` internally since 2.26, which is why this gap did
+/// not show up on the glibc labs in `lab/MATRIX.md`. Attaching only `sys_enter_openat`
+/// therefore captured zero file-open events on Alpine — confirmed via
+/// `strace -e trace=open,openat cat /etc/hostname` showing a bare `open()`, then via
+/// `/sys/kernel/tracing/events/syscalls/sys_enter_open/format` on 2026-09-16 (same kernel as
+/// above): `filename`(16), `flags`(24), `mode`(32). i686 offsets are inferred by the same
+/// 4-byte shift from the verified `sys_enter_openat` i686 layout, not independently confirmed
+/// on hardware.
+#[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+const OPEN_FILENAME_PTR_OFFSET: usize = 16;
+#[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+const OPEN_FLAGS_OFFSET: usize = 24;
+#[cfg(bpf_target_arch = "x86")]
+const OPEN_FILENAME_PTR_OFFSET: usize = 12;
+#[cfg(bpf_target_arch = "x86")]
+const OPEN_FLAGS_OFFSET: usize = 16;
 
 #[tracepoint]
 pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
@@ -230,6 +294,42 @@ fn try_sys_enter_openat(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(bpf_target_arch = "x86")]
     let flags: i64 = unsafe { ctx.read_at::<i32>(OPENAT_FLAGS_OFFSET).map_err(|_| 1u32)? as i64 };
 
+    emit_file_open_event(&ctx, filename_ptr, flags)
+}
+
+#[tracepoint]
+pub fn sys_enter_open(ctx: TracePointContext) -> u32 {
+    match try_sys_enter_open(ctx) {
+        Ok(ret) => ret,
+        Err(ret) => ret,
+    }
+}
+
+fn try_sys_enter_open(ctx: TracePointContext) -> Result<u32, u32> {
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+    let filename_ptr: u64 = unsafe { ctx.read_at(OPEN_FILENAME_PTR_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let filename_ptr: u64 = unsafe {
+        ctx.read_at::<u32>(OPEN_FILENAME_PTR_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
+
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+    let flags: i64 = unsafe { ctx.read_at(OPEN_FLAGS_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let flags: i64 = unsafe { ctx.read_at::<i32>(OPEN_FLAGS_OFFSET).map_err(|_| 1u32)? as i64 };
+
+    emit_file_open_event(&ctx, filename_ptr, flags)
+}
+
+/// Shared by `sys_enter_openat` and `sys_enter_open` above: both land on the same
+/// `FileOpenEvent` shape/`FILE_OPEN_EVENTS` ring buffer, and differ only in where
+/// `filename`/`flags` sit in the tracepoint record.
+fn emit_file_open_event(
+    ctx: &TracePointContext,
+    filename_ptr: u64,
+    flags: i64,
+) -> Result<u32, u32> {
     let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
     let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
 
@@ -262,7 +362,7 @@ fn try_sys_enter_openat(ctx: TracePointContext) -> Result<u32, u32> {
 
         if FILE_OPEN_EVENTS.output::<FileOpenEvent>(&*e, 0).is_err() {
             warn!(
-                &ctx,
+                ctx,
                 "sensor-linux-ebpf: ring buffer full, dropping open event"
             );
         }
