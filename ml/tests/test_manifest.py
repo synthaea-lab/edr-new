@@ -292,3 +292,38 @@ def test_verify_manifest_detects_edited_baseline(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="baseline hash mismatch"):
         verify_manifest(tmp_path)
+
+
+def test_verify_manifest_accepts_legacy_baseline_filename(tmp_path: Path) -> None:
+    """A manifest written for a legacy file name (kept as-is rather than renamed
+    to `baseline.jsonl`) must verify against that same name, not the default."""
+    lines = ['{"argv": ["ls"]}', '{"argv": ["whoami"]}']
+    _write_baseline(tmp_path, lines, name="baseline_benign.jsonl")
+    write_manifest(
+        tmp_path,
+        platform="linux",
+        os_version="22.04",
+        workload_label="dev",
+        capture_start=_START,
+        capture_end=_END,
+        hostname="solkapc",
+        baseline_filename="baseline_benign.jsonl",
+    )
+    # No exception — matching the write_manifest call above, not the default.
+    verify_manifest(tmp_path, baseline_filename="baseline_benign.jsonl")
+
+
+def test_verify_manifest_wrong_filename_reports_the_missing_file(tmp_path: Path) -> None:
+    _write_baseline(tmp_path, ['{"argv": ["ls"]}'], name="baseline_benign.jsonl")
+    write_manifest(
+        tmp_path,
+        platform="linux",
+        os_version="22.04",
+        workload_label="dev",
+        capture_start=_START,
+        capture_end=_END,
+        hostname="solkapc",
+        baseline_filename="baseline_benign.jsonl",
+    )
+    with pytest.raises(FileNotFoundError, match="baseline.jsonl"):
+        verify_manifest(tmp_path)
