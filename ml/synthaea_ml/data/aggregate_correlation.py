@@ -32,8 +32,10 @@ from pathlib import Path
 from synthaea_ml.features.correlation import FEATURE_NAMES, extract_features
 
 # Wire tags as `crates/schema::Event` serializes them (serde `rename_all = "snake_case"`
-# on the `FileOpen` variant): distinct from `correlation.py`'s "fileopen" (see below).
-RAW_EVENT_TYPES = ("exec", "connect", "file_open")
+# on the `FileOpen`/`NetworkFlow` variants): distinct from `correlation.py`'s "fileopen"
+# (see below). `network_flow` added by ADR-0008 (NetworkFlow absorbed into T2's
+# daddr/dport sets alongside `connect`).
+RAW_EVENT_TYPES = ("exec", "connect", "file_open", "network_flow")
 
 
 def _flatten(raw: dict) -> dict | None:
@@ -52,7 +54,7 @@ def _flatten(raw: dict) -> dict | None:
         "pid": meta["pid"],
         "ts_ns": meta["timestamp_ns"],
     }
-    if event_type == "connect":
+    if event_type in ("connect", "network_flow"):
         e["daddr_v4"] = [raw["daddr"]]
         e["dport"] = raw["dport"]
     elif event_type == "file_open":
