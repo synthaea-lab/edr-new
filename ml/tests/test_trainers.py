@@ -2,7 +2,7 @@
 
 The trainers are what mechanically enforce rule 3 of ml/README.md: they refuse
 to run against a baseline that does not verify against its manifest, and every
-run they do complete emits a `training.json` next to `model.onnx` that names
+run they do complete emits a `model_record.json` next to `model.onnx` that names
 the exact `DatasetVersion` the model was trained on.
 
 These tests exercise the full pipeline (manifest -> load -> train -> export -> record)
