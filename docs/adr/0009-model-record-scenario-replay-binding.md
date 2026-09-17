@@ -61,7 +61,14 @@ class Environment:
     """OS/kernel/arch on which the replay ran. Minimum for v1;
     libc, glibc/musl and toolchain versions are v2 candidates (Deferred)."""
     os: str          # "linux" | "windows" | "darwin"
-    kernel: str      # `uname -r` verbatim
+    kernel: str      # `platform.release()` verbatim, cross-platform via the Python
+                     # stdlib helper — on Linux/macOS the value equals `uname -r`
+                     # (e.g. "6.6.0-generic", "23.6.0"); on Windows it is the major
+                     # version only (e.g. "10"), NOT the full build (that would be
+                     # `platform.version()` or `[System.Environment]::OSVersion.Version`
+                     # under PowerShell). Chosen for uniform API and single source
+                     # over precision — a full Windows build string would need its
+                     # own field, deferred until we have a case that requires it.
     arch: str        # "x86_64" | "aarch64" | ...
 
 @dataclass(frozen=True)
