@@ -6,7 +6,7 @@ Complete implementation of TLS plaintext capture and shell readline monitoring u
 
 **Issue:** https://github.com/synthaea-lab/edr-new/issues/90
 **Pull Request:** https://github.com/synthaea-lab/edr-new/pull/178
-**Status:** Phases 1-7, 9-10 complete. Phase 8 pending lab validation.
+**Status:** Phases 1-7, 9-10 complete (including critical curl/OpenSSL fix 73a6e2f). Phase 8 pending lab validation.
 
 ---
 
@@ -20,7 +20,7 @@ Complete implementation of TLS plaintext capture and shell readline monitoring u
 | 4 | Userspace loader | ✅ Complete | 84ce7d5 |
 | 5 | Schema extension + normalization | ✅ Complete | c42749e |
 | 6 | Configuration + budget enforcement | ✅ Complete | 643a786 |
-| 7 | Critical fixes (verifier + lib_type) | ✅ Complete | e40f796 |
+| 7 | Critical fixes (verifier + lib_type + load deduplication) | ✅ Complete | e40f796, 73a6e2f |
 | 8 | Integration tests | ⏳ Pending | Requires lab |
 | 9 | Security enhancements | ✅ Complete | f79d575, 9a88d2c, 7156779 |
 | 10 | Agent integration (operator guide) | ✅ Complete | 71142e9 |
@@ -361,9 +361,74 @@ attach_uprobe(&mut ebpf, probe_name, symbol)?;
 
 ---
 
+### Issue #3 - Program Load Deduplication (CRITICAL) ✅
+
+**Commit:** 73a6e2f (2026-09-17)
+
+**Problem:** OpenSSL 3.x exports both classic and modern API versions (e.g., `SSL_write` at 0x25ad3 and `SSL_write_ex` at 0x25b65). `symbol_resolver::resolve_tls_symbols()` returns both as separate `SymbolInfo` entries. The attach loop in `sensor.rs` called `attach_uprobe(&mut ebpf, "ssl_write_openssl", symbol)` once per symbol, and `attach_uprobe()` unconditionally called `program.load()` before `program.attach()`.
+
+**Root Cause:** An eBPF program can only be loaded into the kernel once. When attaching to the second symbol offset, `program.load()` failed with "already loaded" error, silently preventing the second `attach()` from running.
+
+**Impact:** Only one of `{SSL_write, SSL_write_ex}` got hooked (whichever the resolver returned first). `curl` uses the classic `SSL_write` API, which lost the race → **zero TLS events captured for curl**.
+
+**Discovered By:** @Jihair54 during Alpine VM validation (2026-09-17 14:09) - GnuTLS worked perfectly, OpenSSL generated zero events.
+
+**Solution:** Track which programs are already loaded using `HashSet<String>`, load each program once, then attach to all matching symbol offsets.
+
+**Implementation:**
+
+```rust
+// sensor.rs line 414
+let mut loaded_programs = HashSet::new();
+
+// Modified attach_uprobe() signature (line 201)
+fn attach_uprobe(
+    ebpf: &mut Ebpf,
+    program_name: &str,
+    symbol: &SymbolInfo,
+    loaded_programs: &mut std::collections::HashSet<String>,
+) -> Result<(), SensorError> {
+    let program: &mut UProbe = ebpf
+        .program_mut(program_name)
+        .ok_or_else(|| err(format!("program `{program_name}` not found")))?
+        .try_into()
+        .map_err(|e| err(format!("`{program_name}` is not a uprobe: {e}")))?;
+
+    // Load program only once per unique program name (CRITICAL FIX)
+    if !loaded_programs.contains(program_name) {
+        program.load()
+            .map_err(|e| err(format!("kernel verifier rejected `{program_name}`: {e}")))?;
+        loaded_programs.insert(program_name.to_string());
+        log::debug!("sensor-linux-uprobes: loaded program {program_name}");
+    }
+
+    // Attach uprobe (can attach same program to multiple offsets)
+    program.attach(symbol.offset, &symbol.library_path, UProbeScope::AllProcesses)
+        .map_err(|e| err(format!("failed to attach {program_name} to {}: {e}", symbol.library_path)))?;
+
+    Ok(())
+}
+```
+
+**Changes Made:**
+- Added `use std::collections::HashSet` to imports
+- Modified `attach_uprobe()` to accept `&mut HashSet<String>` parameter
+- Load programs only once per unique name, tracked in `loaded_programs`
+- Allow multiple `attach()` calls on the same loaded program
+- Updated all 9 call sites to pass `&mut loaded_programs`
+
+**Expected Outcome:**
+- ✅ Both `SSL_write` and `SSL_write_ex` hooked on same loaded program
+- ✅ `curl` (classic API) now generates TLS events with `lib_type: OpenSSL`
+- ✅ `gnutls-cli` continues working (already confirmed in Alpine VM)
+
+**Validation Status:** Awaiting re-test on Alpine VM (fix pushed 2026-09-17).
+
+---
+
 **Files Modified:**
 - `crates/sensors/linux/ebpf/src/main.rs` (eBPF probe functions)
-- `crates/sensors/linux/uprobes/src/sensor.rs` (userspace attachment logic)
+- `crates/sensors/linux/uprobes/src/sensor.rs` (userspace attachment logic + load deduplication)
 - `crates/sensors/linux/uprobes/src/symbol_resolver.rs` (added GnuTLS symbols)
 
 **Testing:**
@@ -1143,5 +1208,5 @@ agent:
 
 ---
 
-**Last Updated:** 2026-09-15
-**Status:** Phases 1-7, 9-10 complete. Phase 8 pending lab validation.
+**Last Updated:** 2026-09-17
+**Status:** Phases 1-7 (including critical load deduplication fix), 9-10 complete. Phase 8 pending lab validation.
