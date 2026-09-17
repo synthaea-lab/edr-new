@@ -17,7 +17,7 @@ use sensor_linux_wire as wire;
 use crate::redact;
 
 /// Tripwire: bumping the wire ABI must come here to revisit the mappings below.
-const _: () = assert!(wire::WIRE_VERSION == 4);
+const _: () = assert!(wire::WIRE_VERSION == 5);
 
 /// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
 /// sensor property (reported by conformance), not a schema limit.

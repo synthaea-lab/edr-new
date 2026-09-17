@@ -507,7 +507,11 @@ pub fn resolve_readline_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
 - ✅ `ReadlineInput` events captured for interactive bash/zsh sessions
 - ✅ Works on all standard distros with dynamically-linked bash
 
-**Validation Status:** Awaiting re-test on Alpine VM (fix pushed 2026-09-17).
+**Validation Status:** ✅ Confirmed working on Alpine VM (2026-09-17 14:37):
+- Symbols resolved in both `libreadline.so.8` and `libedit.so.0.0.77`
+- Uprobes attached successfully to both libraries
+- `ReadlineInput` events captured for interactive bash sessions
+- Required pty (pseudo-terminal) to trigger readline (pipes don't activate readline)
 
 ---
 
@@ -632,6 +636,73 @@ pub fn resolve_readline_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
 - Kernel 5.15+ with BTF enabled
 - bpf-linker installed
 - Root or CAP_BPF + CAP_PERFMON
+
+---
+
+## Lab Validation Results (Alpine VM, 2026-09-17)
+
+**Environment:** Alpine Linux, kernel 6.18.13, bpf-linker 0.11.1, BTF enabled
+
+### ✅ Phase 7 Critical Fixes Validated
+
+**Issue #3 - OpenSSL Load Deduplication (commit 73a6e2f):**
+- **Status:** ✅ Confirmed working (2026-09-17 14:23)
+- **Test:** curl HTTPS request
+- **Results:**
+  ```
+  EVENT: TlsCapture(..., comm: "curl", direction: Write, lib_type: OpenSsl, data: [...])
+  EVENT: TlsCapture(..., comm: "curl", direction: Read,  lib_type: OpenSsl, data: [...])
+  ```
+- **Validation:** Both `SSL_write` (0x25ad3) and `SSL_write_ex` (0x25b65) attached successfully
+- **Impact:** curl (classic OpenSSL API) now generates events as expected
+
+**Issue #4 - Readline Resolution (commit 78488d8):**
+- **Status:** ✅ Confirmed working (2026-09-17 14:37)
+- **Test:** Interactive bash session with pty
+- **Results:**
+  ```
+  [DEBUG] symbol_resolver: found readline @ 0x16d51 in /usr/lib/libedit.so.0.0.77
+  [DEBUG] symbol_resolver: found readline @ 0x165fe in /usr/lib/libreadline.so.8
+  [INFO] symbol_resolver: resolved 2 readline symbols across 2 libraries
+
+  EVENT: ReadlineInput(..., comm: "bash", shell_type: Bash, input: "echo hello_readline_test")
+  EVENT: ReadlineInput(..., comm: "bash", shell_type: Bash, input: "exit")
+  ```
+- **Validation:** Symbols found in both libreadline.so.8 and libedit.so.0.0.77
+- **Note:** Requires pty (pseudo-terminal) - plain pipes don't trigger readline
+
+### ✅ Multi-Library TLS Capture
+
+**OpenSSL + GnuTLS side-by-side:**
+- **Status:** ✅ Both working simultaneously
+- **OpenSSL (curl):** `lib_type: OpenSsl` (value 0)
+- **GnuTLS (gnutls-cli):** `lib_type: GnuTls` (value 2)
+- **Validation:** Correct library attribution per process
+
+### ✅ Budget Enforcement (Phase 6)
+
+**TLS Budget Test - High Volume:**
+- **Status:** ✅ Working as designed
+- **Test:** 5 MB file download via HTTPS (curl)
+- **Config:** Default budget 4096 bytes/sec/process
+- **Results:**
+  - Hundreds of explicit drop logs: `TLS capture dropped (budget): pid=11964 bytes=256`
+  - Each drop traced individually (no silent loss)
+  - Ring buffer (256 KB) never overflowed - stayed stable
+  - **Two-tier protection validated:**
+    1. **Userspace budget enforcement** absorbs excessive load
+    2. **eBPF ring buffer** remains under control thanks to tier 1
+
+**Key Finding:** Budget enforcement works exactly as designed - userspace layer prevents ring buffer overflow by dropping events before they reach eBPF ring buffer.
+
+### ⏳ Remaining Tests (Not Yet Validated)
+
+- Readline budget enforcement (commands/sec limit)
+- Process allowlist filtering
+- Library denylist filtering
+- Compliance mode preset validation (GDPR/HIPAA budgets)
+- Redaction pattern validation (HTTP headers, shell commands)
+- Multi-process sustained load (stress test)
 
 ---
 
@@ -1193,13 +1264,14 @@ agent:
 ## Statistics
 
 **Commits:** 14 (cf0541c → 78488d8)
-**Phases completed:** 1-7 (including 4 critical bug fixes), 9-10 (Phase 8 requires lab)
+**Phases completed:** 1-7 (including 4 critical bug fixes - all validated ✅), 9-10 (Phase 8 partially validated)
 **Files created:** 7 (normalize.rs, config.rs, redact.rs, README.md, DATA_FLOW.md, OPERATOR_GUIDE.md, issue-90.md)
 **Files modified:** 8 (schema, ebpf/main.rs, sensor.rs, symbol_resolver.rs, lib.rs, wire, Cargo.toml, Cargo.lock)
 **Lines added:** ~3900 (1290 production + 950 tests + 1660 docs)
 **Tests:** 57 unit tests (100% pass on userspace)
 **Schema version:** 10 → 13 (combines issue #90 + #92)
 **Critical bugs fixed:** 4 (eBPF verifier risk, lib_type detection, load deduplication, readline resolution)
+**Lab validation:** Alpine VM (kernel 6.18.13, bpf-linker 0.11.1) - 7 eBPF tests + 5 integration tests passing
 
 ---
 
@@ -1221,38 +1293,45 @@ agent:
 - [x] WIRE_VERSION tripwire correctly bumped (3→4)
 - [x] **Total: 57 unit tests (all pass on userspace)**
 
-### eBPF Validation (Phase 7 Task #3)
-- [ ] eBPF programs compile to bytecode (requires bpf-linker)
-- [ ] Kernel verifier accepts programs (requires BTF kernel)
-- [ ] Uprobes attach successfully (requires root/CAP_BPF)
-- [ ] Ring buffers drain events correctly
-- [ ] lib_type correctness validated (OpenSSL vs GnuTLS)
+### eBPF Validation (Phase 7 Task #3) - Alpine VM 2026-09-17
+- [x] eBPF programs compile to bytecode (bpf-linker 0.11.1)
+- [x] Kernel verifier accepts programs (kernel 6.18.13, BTF enabled)
+- [x] Uprobes attach successfully (OpenSSL, GnuTLS, readline)
+- [x] Ring buffers drain events correctly (stable under load)
+- [x] lib_type correctness validated (OpenSSL=0, GnuTLS=2)
+- [x] Load deduplication works (SSL_write + SSL_write_ex both hooked)
+- [x] Readline resolution works (libreadline.so.8 + libedit.so.0.0.77)
 
-### Integration Tests (Phase 8)
-- [ ] curl HTTPS captures HTTP request line (redacted)
-- [ ] bash interactive commands (cd, export) captured (redacted)
-- [ ] Budget enforcement drops events as expected
-- [ ] Allowlist filtering works
-- [ ] Compliance mode budgets enforced
-- [ ] Redaction patterns validated with real captures
+### Integration Tests (Phase 8) - Alpine VM 2026-09-17
+- [x] curl HTTPS captures TLS plaintext (OpenSSL lib_type=0)
+- [x] gnutls-cli HTTPS captures TLS plaintext (GnuTLS lib_type=2)
+- [x] bash interactive commands captured (requires pty)
+- [x] TLS budget enforcement drops events (hundreds of drops on 5 MB download)
+- [x] Ring buffer stays stable under load (no overflow, 256 KB buffer)
+- [ ] Readline budget enforcement (not yet tested)
+- [ ] Process allowlist filtering (not yet tested)
+- [ ] Library denylist filtering (not yet tested)
+- [ ] Compliance mode budgets enforced (not yet tested)
+- [ ] Redaction patterns validated with real captures (not yet tested)
 
 ---
 
 ## Next Steps
 
-### Immediate (Post-Lab Validation)
-1. **Phase 7 Task #3 (CRITICAL):** Lab validation
-   - Test eBPF compilation with bpf-linker
-   - Validate kernel verifier accepts batch read changes
-   - Test OpenSSL + GnuTLS side-by-side (lib_type correctness)
-   - Platform: Ubuntu 22.04 or Debian 12, kernel 5.15+, BTF enabled
+### ✅ Completed Lab Validation (Alpine VM 2026-09-17)
+- **Phase 7 Critical Fixes:** All 4 bugs validated (verifier, lib_type, load dedup, readline)
+- **TLS Capture:** OpenSSL + GnuTLS working side-by-side with correct lib_type attribution
+- **Readline Capture:** Working on interactive bash sessions (requires pty)
+- **Budget Enforcement:** TLS budget validated with high-volume test (5 MB download)
+- **Ring Buffer Stability:** No overflow under sustained load
 
-2. **Phase 8:** Integration tests
-   - curl HTTPS capture with redaction validation
-   - bash readline capture with redaction validation
-   - Budget enforcement validation
-   - Allowlist filtering validation
-   - Compliance mode enforcement validation
+### Remaining Integration Tests (Phase 8)
+1. **Readline budget enforcement:** Test commands/sec limit
+2. **Process allowlist filtering:** Verify only allowlisted processes captured
+3. **Library denylist filtering:** Verify denylisted libraries skipped
+4. **Compliance mode validation:** Test GDPR/HIPAA preset budgets
+5. **Redaction validation:** Test HTTP header and shell command redaction with real traffic
+6. **Multi-process stress test:** Sustained load across multiple processes
 
 ### Future Work
 
@@ -1295,5 +1374,6 @@ agent:
 ---
 
 **Last Updated:** 2026-09-17
-**Status:** Phases 1-7 complete (including 4 critical bug fixes: verifier, lib_type, load dedup, readline), 9-10 complete. Phase 8 pending lab validation.
-**Latest commits:** 73a6e2f (OpenSSL load dedup), 09e7afb (docs), 78488d8 (readline resolution)
+**Status:** Phases 1-7 complete ✅ (4 critical bug fixes validated on Alpine VM), 9-10 complete ✅. Phase 8 partially validated (7/7 eBPF tests + 5/10 integration tests passing).
+**Latest commits:** 73a6e2f (OpenSSL load dedup), 78488d8 (readline resolution), c807d3c (docs)
+**Lab validation:** Alpine VM confirms all core functionality working (TLS capture, readline capture, budget enforcement, ring buffer stability)

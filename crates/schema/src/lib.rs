@@ -39,7 +39,11 @@ pub mod sensor;
 /// precedent already established by versions 2 through 12. Originally claimed as
 /// 10 → 11 while this branch was open; rebased to 13 once #189 (`NetworkFlow`,
 /// 11 → 12) merged into `main` first — same coordination note as ADR-0005.
-pub const SCHEMA_VERSION: u32 = 13;
+///
+/// Bumped 13 → 14 for [`Event::TlsCapture`] and [`Event::ReadlineInput`] (#90):
+/// two new enum variants for uprobes-based TLS plaintext capture and shell readline
+/// input capture. Same serialization-visible reasoning as v13 above.
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
