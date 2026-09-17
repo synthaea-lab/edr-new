@@ -11,6 +11,12 @@ Expected input format: a list of JSON-Lines events, one object per event, as pro
     {"type": "connect",  "pid": 1234, "ts_ns": 2000000000, "daddr_v4": [127,0,0,1],
                          "dport": 4444, "is_ipv6": false}
     {"type": "fileopen", "pid": 1234, "ts_ns": 3000000000, "path": "...", "flags": 65}
+    {"type": "network_flow", "pid": 1234, "ts_ns": 4000000000, "daddr_v4": [10,0,0,1],
+                         "dport": 9999}
+
+`network_flow` (netlink-observed, ADR-0008) is absorbed into the same `unique_daddr_count`/
+`unique_dport_count` sets as `connect` — see `extract_features` below. `connect_count` stays
+`connect`-only.
 
 `flags` is logged raw; the filtering on write intent (`O_WRONLY|O_RDWR|O_CREAT`) happens
 here, exactly mirroring `synthaea_correlator::TimedEvent::is_file_write` on the Rust side
@@ -53,8 +59,13 @@ def extract_features(events: list[dict], pid: int) -> list[float]:
     connect_count = sum(1 for e in pid_events if e["type"] == "connect")
     filewrite_count = sum(1 for e in pid_events if _is_file_write(e))
 
-    daddrs = {tuple(e["daddr_v4"]) for e in pid_events if e["type"] == "connect"}
-    dports = {e["dport"] for e in pid_events if e["type"] == "connect"}
+    # ADR-0008: Connect and NetworkFlow (netlink) are absorbed into the same
+    # daddr/dport sets — one count of "distinct destinations touched" regardless of
+    # which sensor captured them. connect_count above stays Connect-only.
+    daddrs = {
+        tuple(e["daddr_v4"]) for e in pid_events if e["type"] in ("connect", "network_flow")
+    }
+    dports = {e["dport"] for e in pid_events if e["type"] in ("connect", "network_flow")}
 
     has_full_chain = (
         1.0 if (spawn_count >= 1 and connect_count >= 1 and filewrite_count >= 1) else 0.0
@@ -140,6 +151,36 @@ if __name__ == "__main__":
     assert fn[3] == 1.0, "unique_daddr_count"
     assert fn[4] == 2.0, "unique_dport_count"
     print(f"[OK] distinct destinations: {fn}")
+
+    # network_flow_absorbe_dans_les_memes_sets_daddr_dport_que_connect (ADR-0008)
+    mixte = [
+        {
+            "type": "connect",
+            "pid": 7,
+            "ts_ns": 0,
+            "daddr_v4": [127, 0, 0, 1],
+            "dport": 4444,
+        },
+        {
+            "type": "network_flow",
+            "pid": 7,
+            "ts_ns": 1_000_000_000,
+            "daddr_v4": [10, 0, 0, 1],
+            "dport": 4444,
+        },
+        {
+            "type": "network_flow",
+            "pid": 7,
+            "ts_ns": 2_000_000_000,
+            "daddr_v4": [10, 0, 0, 2],
+            "dport": 9999,
+        },
+    ]
+    fm = extract_features(mixte, 7)
+    assert fm[3] == 3.0, "unique_daddr_count spans connect + network_flow"
+    assert fm[4] == 2.0, "unique_dport_count spans connect + network_flow"
+    assert fm[7] == 3.0, "event_count includes network_flow"
+    print(f"[OK] network_flow absorbed into connect's daddr/dport sets: {fm}")
 
     # pids_differents_isoles
     mix = [
