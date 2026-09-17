@@ -16,15 +16,22 @@ produced:
 ## Provenance (release gate)
 
 In addition to the ONNX-runtime checks above, each registry version directory is
-required to carry a `training.json` recording the datasets it was trained on
-(see `synthaea_ml.registry.training_record`, rule 3 of `ml/README.md`). When
-present, `verify_training_record` is called: every referenced baseline must still
-exist under `ml/datasets/baselines/` and still hash to the value the record locked.
+required to carry a `model_record.json` recording the datasets it was trained on and
+the scenario replays that validated it (see
+`synthaea_ml.registry.training_record`, ADR-0009, rule 3 of `ml/README.md`).
+When present, `verify_training_record` is called: every referenced baseline must
+still exist under `ml/datasets/baselines/` and still hash to the value the record
+locked, and every referenced scenario yaml must still exist under `lab/scenarios/`
+and still hash to the value the record locked.
 
 Pre-#44 legacy entries (`cmdline-iforest-{linux,windows}/0.1.0/`) predate the
-training record and have no `training.json`. In interactive/dev mode they pass with
-a warning. In strict mode, they fail — that is what release CI runs. Toggle with the
-`SYNTHAEA_STRICT_PROVENANCE=1` environment variable so the CLI stays compatible.
+record concept and have no `model_record.json`. In interactive/dev mode they pass
+with a warning. In strict mode, they fail — that is what release CI runs. Toggle
+with the `SYNTHAEA_STRICT_PROVENANCE=1` environment variable so the CLI stays
+compatible.
+
+Renamed from `training.json` to `model_record.json` in ADR-0009 (schema v2 bump
+carried the widening from dataset-only binding to dataset+replay binding).
 
 Exits non-zero on the first violation.
 
@@ -43,7 +50,7 @@ import onnxruntime as ort
 
 from synthaea_ml.features.cmdline import extract_features
 from synthaea_ml.registry.training_record import (
-    TRAINING_RECORD_FILENAME,
+    MODEL_RECORD_FILENAME,
     load_training_record,
     verify_training_record,
 )
@@ -52,6 +59,10 @@ from synthaea_ml.training.train_windows import SANITY_CHECK_SAMPLES as _WINDOWS_
 
 REGISTRY = Path(__file__).resolve().parents[2] / "registry"
 BASELINES = Path(__file__).resolve().parents[2] / "datasets" / "baselines"
+# Scenarios live at repo-root `lab/scenarios/` — two levels above `ml/` (which is
+# `parents[2]`). Introduced by ADR-0009: replays bind to their source yaml by
+# content hash, and this constant is where verify_training_record looks them up.
+SCENARIOS = Path(__file__).resolve().parents[3] / "lab" / "scenarios"
 
 _STRICT_PROVENANCE_ENV = "SYNTHAEA_STRICT_PROVENANCE"
 
@@ -66,14 +77,14 @@ class VerificationError(AssertionError):
 
 
 def _platform_from_training_record(model_dir: Path) -> str | None:
-    """Read the platform a model was trained on off its `training.json`, if any.
+    """Read the platform a model was trained on off its `model_record.json`, if any.
 
     `DatasetVersion.name` follows `default_dataset_name`'s
     `<platform>__<workload_label>__<host_id>__<date>` convention — the platform
-    is its first component. Returns `None` when there's no training record
+    is its first component. Returns `None` when there's no model record
     (pre-#44 legacy entry) or its platform isn't one we have sanity samples for.
     """
-    if not (model_dir / TRAINING_RECORD_FILENAME).exists():
+    if not (model_dir / MODEL_RECORD_FILENAME).exists():
         return None
     record = load_training_record(model_dir)
     if not record.dataset_versions:
@@ -96,22 +107,23 @@ def _platform_from_model_dir(model_dir: Path) -> str | None:
 def sanity_samples_for(model_dir: Path) -> dict[str, str]:
     """Pick the sanity-check command lines matching the platform `model_dir` targets.
 
-    Prefers the training record's dataset platform (works once every registry
-    entry has a `training.json`, see #44); falls back to the registry directory
-    naming convention for legacy entries that predate it. Deliberately does not
-    default to either platform's samples when both signals are inconclusive —
-    silently scoring a model against the wrong platform's samples is exactly
-    the bug this function exists to fix.
+    Prefers the model record's dataset platform (works once every registry
+    entry has a `model_record.json`, see #44); falls back to the registry
+    directory naming convention for legacy entries that predate it.
+    Deliberately does not default to either platform's samples when both
+    signals are inconclusive — silently scoring a model against the wrong
+    platform's samples is exactly the bug this function exists to fix.
 
     Raises:
-        VerificationError: If neither the training record nor the directory
+        VerificationError: If neither the model record nor the directory
             name resolves to a known platform.
     """
     platform = _platform_from_training_record(model_dir) or _platform_from_model_dir(model_dir)
     if platform is None:
         raise VerificationError(
-            f"{model_dir}: cannot determine platform (no training.json dataset "
-            f"platform, and directory name doesn't end in -{'/-'.join(_PLATFORM_SAMPLES)})"
+            f"{model_dir}: cannot determine platform (no {MODEL_RECORD_FILENAME} "
+            f"dataset platform, and directory name doesn't end in "
+            f"-{'/-'.join(_PLATFORM_SAMPLES)})"
         )
     return _PLATFORM_SAMPLES[platform]
 
@@ -156,23 +168,31 @@ def verify(model_path: Path) -> None:
     print(f"  ok: {len(scores)} samples, finite, deterministic, label/score consistent")
 
 
-def verify_provenance(model_dir: Path, baselines_root: Path, *, strict: bool) -> None:
-    """Check the training record next to a registry model matches the baselines on disk.
+def verify_provenance(
+    model_dir: Path,
+    baselines_root: Path,
+    scenarios_root: Path,
+    *,
+    strict: bool,
+) -> None:
+    """Check the model record next to a registry model matches the baselines and
+    scenario yamls on disk.
 
-    A model_dir without `training.json` is a pre-#44 legacy entry: passes with a
-    warning in interactive mode, fails in strict mode. When `training.json` is
-    present, `verify_training_record` re-checks every referenced baseline (existence,
-    manifest verify, sample_sha256 match) — the release gate that rule 3 of
-    `ml/README.md` mandates.
+    A model_dir without `model_record.json` is a pre-#44 legacy entry: passes
+    with a warning in interactive mode, fails in strict mode. When
+    `model_record.json` is present, `verify_training_record` re-checks every
+    referenced baseline (existence, manifest verify, sample_sha256 match) and
+    every referenced scenario replay (yaml existence, yaml sha256 match,
+    passed re-computation) — the release gate ADR-0009 mandates.
 
     Raises:
-        VerificationError: In strict mode when no `training.json` is found, or
-            whenever `verify_training_record` raises.
+        VerificationError: In strict mode when no `model_record.json` is
+            found, or whenever `verify_training_record` raises.
     """
-    training_record = model_dir / TRAINING_RECORD_FILENAME
-    if not training_record.exists():
+    model_record = model_dir / MODEL_RECORD_FILENAME
+    if not model_record.exists():
         msg = (
-            f"{model_dir}: no {TRAINING_RECORD_FILENAME} — pre-#44 legacy entry, "
+            f"{model_dir}: no {MODEL_RECORD_FILENAME} — pre-#44 legacy entry, "
             f"provenance not verified"
         )
         if strict:
@@ -181,12 +201,12 @@ def verify_provenance(model_dir: Path, baselines_root: Path, *, strict: bool) ->
         return
 
     try:
-        verify_training_record(model_dir, baselines_root)
+        verify_training_record(model_dir, baselines_root, scenarios_root)
     except (FileNotFoundError, ValueError) as e:
         # The two exceptions the release gate exists to raise, funneled through
         # our own type so main()'s single except clause catches them.
         raise VerificationError(f"{model_dir}: provenance check failed — {e}") from e
-    print("  provenance: ok (training.json + baselines match)")
+    print(f"  provenance: ok ({MODEL_RECORD_FILENAME} + baselines + scenarios match)")
 
 
 def _is_strict_provenance() -> bool:
@@ -202,7 +222,7 @@ def main() -> None:
     for model in models:
         try:
             verify(model)
-            verify_provenance(model.parent, BASELINES, strict=strict)
+            verify_provenance(model.parent, BASELINES, SCENARIOS, strict=strict)
         except VerificationError as e:
             print(f"FAIL {e}", file=sys.stderr)
             failures += 1
