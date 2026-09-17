@@ -6,7 +6,7 @@ Complete implementation of TLS plaintext capture and shell readline monitoring u
 
 **Issue:** https://github.com/synthaea-lab/edr-new/issues/90
 **Pull Request:** https://github.com/synthaea-lab/edr-new/pull/178
-**Status:** Phases 1-7, 9-10 complete (including critical curl/OpenSSL fix 73a6e2f). Phase 8 pending lab validation.
+**Status:** Phases 1-7, 9-10 complete (including 4 critical bug fixes: verifier, lib_type, load dedup, readline). Phase 8 pending lab validation.
 
 ---
 
@@ -20,7 +20,7 @@ Complete implementation of TLS plaintext capture and shell readline monitoring u
 | 4 | Userspace loader | ✅ Complete | 84ce7d5 |
 | 5 | Schema extension + normalization | ✅ Complete | c42749e |
 | 6 | Configuration + budget enforcement | ✅ Complete | 643a786 |
-| 7 | Critical fixes (verifier + lib_type + load deduplication) | ✅ Complete | e40f796, 73a6e2f |
+| 7 | Critical fixes (verifier + lib_type + load dedup + readline) | ✅ Complete | e40f796, 73a6e2f, 78488d8 |
 | 8 | Integration tests | ⏳ Pending | Requires lab |
 | 9 | Security enhancements | ✅ Complete | f79d575, 9a88d2c, 7156779 |
 | 10 | Agent integration (operator guide) | ✅ Complete | 71142e9 |
@@ -422,6 +422,91 @@ fn attach_uprobe(
 - ✅ `curl` (classic API) now generates TLS events with `lib_type: OpenSSL`
 - ✅ `gnutls-cli` continues working (already confirmed in Alpine VM)
 
+**Validation Status:** ✅ Confirmed working on Alpine VM (2026-09-17 14:23) - both curl and gnutls-cli generate events.
+
+---
+
+### Issue #4 - Readline Symbol Resolution (CRITICAL) ✅
+
+**Commit:** 78488d8 (2026-09-17)
+
+**Problem:** `resolve_readline_symbols()` searched for the `readline` symbol directly in shell binaries (`/bin/bash`, `/bin/zsh`) returned by `find_shell_binaries()`. On standard distros:
+
+```bash
+$ nm -D /bin/bash | grep readline
+                 U readline
+```
+
+`readline` is an **undefined (U)** symbol in bash's dynamic symbol table - it's imported from `libreadline.so.8`, not implemented inside bash itself. The filter `sym.st_value > 0` correctly excluded undefined imports, resulting in **0 readline symbols resolved** → no uprobes attached → zero `ReadlineInput` events captured.
+
+**Root Cause:** Same shape as Issue #3 - searching for symbols in the **calling binary** instead of the **implementing library**. `find_ssl_libraries()` correctly searches for OpenSSL/GnuTLS libraries that implement SSL functions, but `resolve_readline_symbols()` didn't do the equivalent for readline - it never looked in `libreadline.so*`, only in the shell binary.
+
+**Impact:** On any distro where bash links dynamically against libreadline (Alpine, Debian, Ubuntu, Arch - the common case), readline capture doesn't work. Only rare statically-linked bash builds would have worked. **The readline half of the PR's headline feature was non-functional.**
+
+**Discovered By:** @Jihair54 during Alpine VM validation (2026-09-17 14:29) - logged `resolved 0 readline symbols across 1 shells`.
+
+**Solution:** Mirror the `find_ssl_libraries()` approach - search for `libreadline.so*` (and `libedit.so*`, since some bash builds use BSD editline instead) in system library paths, and resolve `readline` there.
+
+**Implementation:**
+
+```rust
+/// Finds readline libraries in common system paths, deduplicating symlinks.
+pub fn find_readline_libraries() -> Result<Vec<PathBuf>, ResolverError> {
+    let search_paths = [
+        "/lib", "/usr/lib", "/lib64", "/usr/lib64",
+        "/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu",
+        "/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu",  // ARM64 support
+    ];
+
+    let mut libraries = Vec::new();
+    let mut seen_inodes = HashSet::new();
+
+    for &search_path in &search_paths {
+        // ... scan for libreadline.so* and libedit.so*
+        // Deduplicate symlinks by inode (same as find_ssl_libraries)
+    }
+
+    Ok(libraries)
+}
+
+/// Resolves readline symbols from readline libraries (libreadline.so, libedit.so).
+pub fn resolve_readline_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
+    let libraries = find_readline_libraries()?;  // Changed from find_shell_binaries()
+    let target_symbols = ["readline"];
+
+    let mut all_symbols = Vec::new();
+    for lib in &libraries {
+        match resolve_symbols(lib, &target_symbols) {
+            Ok(mut symbols) => all_symbols.append(&mut symbols),
+            Err(e) => {
+                log::warn!("symbol_resolver: failed to parse {}: {e}", lib.display());
+            }
+        }
+    }
+
+    log::info!(
+        "symbol_resolver: resolved {} readline symbols across {} libraries",
+        all_symbols.len(),
+        libraries.len()
+    );
+    Ok(all_symbols)
+}
+```
+
+**Changes Made:**
+- Added `find_readline_libraries()` function (mirrors `find_ssl_libraries()`)
+- Searches for `libreadline.so*` and `libedit.so*` in system library paths
+- Modified `resolve_readline_symbols()` to search libraries instead of shell binaries
+- Deduplicate symlinks by inode
+- Added ARM64 paths (`/lib/aarch64-linux-gnu`, `/usr/lib/aarch64-linux-gnu`)
+- Updated module-level documentation
+
+**Expected Outcome:**
+- ✅ `readline` symbol resolved in `libreadline.so.8` (or `libedit.so`)
+- ✅ Uprobes attach to `readline()` function in the library
+- ✅ `ReadlineInput` events captured for interactive bash/zsh sessions
+- ✅ Works on all standard distros with dynamically-linked bash
+
 **Validation Status:** Awaiting re-test on Alpine VM (fix pushed 2026-09-17).
 
 ---
@@ -429,7 +514,7 @@ fn attach_uprobe(
 **Files Modified:**
 - `crates/sensors/linux/ebpf/src/main.rs` (eBPF probe functions)
 - `crates/sensors/linux/uprobes/src/sensor.rs` (userspace attachment logic + load deduplication)
-- `crates/sensors/linux/uprobes/src/symbol_resolver.rs` (added GnuTLS symbols)
+- `crates/sensors/linux/uprobes/src/symbol_resolver.rs` (added GnuTLS symbols + readline library resolution)
 
 **Testing:**
 - Compilation: all checks pass
@@ -1107,13 +1192,14 @@ agent:
 
 ## Statistics
 
-**Commits:** 11 (cf0541c → 71142e9)
-**Phases completed:** 1-7, 9-10 (Phase 8 requires lab)
-**Files created:** 6 (normalize.rs, config.rs, redact.rs, README.md, DATA_FLOW.md, OPERATOR_GUIDE.md)
+**Commits:** 14 (cf0541c → 78488d8)
+**Phases completed:** 1-7 (including 4 critical bug fixes), 9-10 (Phase 8 requires lab)
+**Files created:** 7 (normalize.rs, config.rs, redact.rs, README.md, DATA_FLOW.md, OPERATOR_GUIDE.md, issue-90.md)
 **Files modified:** 8 (schema, ebpf/main.rs, sensor.rs, symbol_resolver.rs, lib.rs, wire, Cargo.toml, Cargo.lock)
-**Lines added:** ~3740 (1210 production + 950 tests + 1580 docs)
+**Lines added:** ~3900 (1290 production + 950 tests + 1660 docs)
 **Tests:** 57 unit tests (100% pass on userspace)
 **Schema version:** 10 → 13 (combines issue #90 + #92)
+**Critical bugs fixed:** 4 (eBPF verifier risk, lib_type detection, load deduplication, readline resolution)
 
 ---
 
@@ -1209,4 +1295,5 @@ agent:
 ---
 
 **Last Updated:** 2026-09-17
-**Status:** Phases 1-7 (including critical load deduplication fix), 9-10 complete. Phase 8 pending lab validation.
+**Status:** Phases 1-7 complete (including 4 critical bug fixes: verifier, lib_type, load dedup, readline), 9-10 complete. Phase 8 pending lab validation.
+**Latest commits:** 73a6e2f (OpenSSL load dedup), 09e7afb (docs), 78488d8 (readline resolution)
