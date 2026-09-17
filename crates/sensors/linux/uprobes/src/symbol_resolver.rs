@@ -1,7 +1,7 @@
 //! ELF symbol resolution for uprobe attachment.
 //!
-//! Scans system library paths for SSL libraries (OpenSSL, `GnuTLS`) and shell binaries
-//! (bash, zsh), parses their ELF symbol tables with goblin, and returns offsets for
+//! Scans system library paths for SSL libraries (OpenSSL, `GnuTLS`) and readline libraries
+//! (libreadline, libedit), parses their ELF symbol tables with goblin, and returns offsets for
 //! uprobe attachment. Built from the Phase 1 spike (`examples/symbol_resolution_spike.rs`),
 //! now production-ready: deduplication, error handling, library type detection.
 
@@ -147,6 +147,74 @@ pub fn find_shell_binaries() -> Result<Vec<(PathBuf, ShellType)>, ResolverError>
         .collect())
 }
 
+/// Finds readline libraries in common system paths, deduplicating symlinks.
+///
+/// Searches for `libreadline.so*` and `libedit.so*` (some bash builds use libedit instead).
+///
+/// # Errors
+///
+/// Returns [`ResolverError`] if directory traversal fails.
+pub fn find_readline_libraries() -> Result<Vec<PathBuf>, ResolverError> {
+    let search_paths = [
+        "/lib",
+        "/usr/lib",
+        "/lib64",
+        "/usr/lib64",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/aarch64-linux-gnu",
+        "/usr/lib/aarch64-linux-gnu",
+    ];
+
+    let mut libraries = Vec::new();
+    let mut seen_inodes = HashSet::new();
+
+    for &search_path in &search_paths {
+        let path = Path::new(search_path);
+        if !path.exists() {
+            continue;
+        }
+
+        let entries = match fs::read_dir(path) {
+            Ok(e) => e,
+            Err(_) => continue, // Skip inaccessible dirs
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let filename = match path.file_name().and_then(|s| s.to_str()) {
+                Some(f) => f,
+                None => continue,
+            };
+
+            // Look for libreadline.so* or libedit.so*
+            if !filename.starts_with("libreadline.so") && !filename.starts_with("libedit.so") {
+                continue;
+            }
+
+            // Deduplicate symlinks by inode
+            if let Ok(metadata) = fs::metadata(&path) {
+                #[cfg(target_os = "linux")]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let inode = metadata.ino();
+                    if metadata.is_file() && seen_inodes.insert(inode) {
+                        libraries.push(path);
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    if metadata.is_file() {
+                        libraries.push(path);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(libraries)
+}
+
 /// Resolves ELF symbols from a library's dynamic symbol table.
 ///
 /// # Errors
@@ -248,32 +316,36 @@ pub fn resolve_tls_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
     Ok(all_symbols)
 }
 
-/// Resolves readline symbols from shell binaries (bash/zsh).
+/// Resolves readline symbols from readline libraries (libreadline.so, libedit.so).
+///
+/// Searches for the `readline` function in readline libraries, not shell binaries.
+/// Shell binaries (bash, zsh) import `readline` from these libraries - the symbol is
+/// undefined (U) in bash itself, only defined in libreadline.so/libedit.so.
 ///
 /// # Errors
 ///
-/// Returns [`ResolverError`] if shell discovery or symbol parsing fails.
+/// Returns [`ResolverError`] if library discovery or symbol parsing fails.
 pub fn resolve_readline_symbols() -> Result<Vec<SymbolInfo>, ResolverError> {
-    let shells = find_shell_binaries()?;
+    let libraries = find_readline_libraries()?;
     let target_symbols = ["readline"];
 
     let mut all_symbols = Vec::new();
-    for (shell_path, _shell_type) in &shells {
-        match resolve_symbols(shell_path, &target_symbols) {
+    for lib in &libraries {
+        match resolve_symbols(lib, &target_symbols) {
             Ok(mut symbols) => all_symbols.append(&mut symbols),
             Err(e) => {
                 log::warn!(
                     "symbol_resolver: failed to parse {}: {e}",
-                    shell_path.display()
+                    lib.display()
                 );
             }
         }
     }
 
     log::info!(
-        "symbol_resolver: resolved {} readline symbols across {} shells",
+        "symbol_resolver: resolved {} readline symbols across {} libraries",
         all_symbols.len(),
-        shells.len()
+        libraries.len()
     );
     Ok(all_symbols)
 }
