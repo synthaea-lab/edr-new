@@ -1,6 +1,6 @@
 # ADR-0008: NetworkFlow feeds the correlation vector, not the behavior vector
 
-- **Status**: proposed
+- **Status**: accepted
 - **Date**: 2026-09-16
 
 ## Context
