@@ -4,7 +4,7 @@
 //! **Status (Phase 6):** Full implementation with configuration - symbol resolution,
 //! uprobe attachment, ring buffer draining, normalization, and budget enforcement.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -191,10 +191,18 @@ fn load_ebpf() -> Result<Ebpf, SensorError> {
 /// # Errors
 ///
 /// Returns [`SensorError`] if the program is not found or attachment fails.
+///
+/// # Note
+///
+/// The `loaded_programs` parameter tracks which programs have already been loaded
+/// to avoid calling `program.load()` multiple times for the same program name.
+/// This is critical when attaching to multiple symbol offsets (e.g., both `SSL_write`
+/// and `SSL_write_ex` in OpenSSL 3.x) which must share the same eBPF program instance.
 fn attach_uprobe(
     ebpf: &mut Ebpf,
     program_name: &str,
     symbol: &SymbolInfo,
+    loaded_programs: &mut std::collections::HashSet<String>,
 ) -> Result<(), SensorError> {
     let program: &mut UProbe = ebpf
         .program_mut(program_name)
@@ -202,11 +210,19 @@ fn attach_uprobe(
         .try_into()
         .map_err(|e| err(format!("`{program_name}` is not a uprobe: {e}")))?;
 
-    program
-        .load()
-        .map_err(|e| err(format!("kernel verifier rejected `{program_name}`: {e}")))?;
+    // Load program only once per unique program name
+    // (critical fix: OpenSSL 3.x exports both SSL_write and SSL_write_ex,
+    // both must attach to the same "ssl_write_openssl" program instance)
+    if !loaded_programs.contains(program_name) {
+        program
+            .load()
+            .map_err(|e| err(format!("kernel verifier rejected `{program_name}`: {e}")))?;
+        loaded_programs.insert(program_name.to_string());
+        log::debug!("sensor-linux-uprobes: loaded program {program_name}");
+    }
 
     // Attach uprobe: point = offset, target = library path, scope = all processes
+    // (can attach same program to multiple offsets)
     program
         .attach(symbol.offset, &symbol.library_path, UProbeScope::AllProcesses)
         .map_err(|e| {
@@ -395,6 +411,9 @@ impl UprobesSensor {
             }
         }
 
+        // Track which eBPF programs have been loaded (to avoid duplicate load() calls)
+        let mut loaded_programs = HashSet::new();
+
         // Resolve and attach TLS uprobes (only if enabled)
         if self.config.tls.enabled {
             info!("sensor-linux-uprobes: TLS capture enabled, resolving symbols...");
@@ -419,13 +438,13 @@ impl UprobesSensor {
                         symbol_resolver::LibraryType::GnuTLS => "ssl_write_gnutls",
                         symbol_resolver::LibraryType::Unknown => "ssl_write_openssl", // Default to OpenSSL
                     };
-                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol, &mut loaded_programs) {
                         warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
                     }
                 }
                 // GnuTLS uses gnutls_record_send instead of SSL_write
                 if symbol.name == "gnutls_record_send"
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write_gnutls", symbol)
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_write_gnutls", symbol, &mut loaded_programs)
                 {
                     warn!("sensor-linux-uprobes: failed to attach ssl_write_gnutls: {e}");
                 }
@@ -437,13 +456,13 @@ impl UprobesSensor {
                         symbol_resolver::LibraryType::GnuTLS => "ssl_read_entry_gnutls",
                         symbol_resolver::LibraryType::Unknown => "ssl_read_entry_openssl", // Default
                     };
-                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol, &mut loaded_programs) {
                         warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
                     }
                 }
                 // GnuTLS uses gnutls_record_recv instead of SSL_read
                 if symbol.name == "gnutls_record_recv"
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry_gnutls", symbol)
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_entry_gnutls", symbol, &mut loaded_programs)
                 {
                     warn!("sensor-linux-uprobes: failed to attach ssl_read_entry_gnutls: {e}");
                 }
@@ -455,13 +474,13 @@ impl UprobesSensor {
                         symbol_resolver::LibraryType::GnuTLS => "ssl_read_exit_gnutls",
                         symbol_resolver::LibraryType::Unknown => "ssl_read_exit_openssl", // Default
                     };
-                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol) {
+                    if let Err(e) = attach_uprobe(&mut ebpf, probe_name, symbol, &mut loaded_programs) {
                         warn!("sensor-linux-uprobes: failed to attach {probe_name}: {e}");
                     }
                 }
                 // GnuTLS uretprobe for gnutls_record_recv
                 if symbol.name == "gnutls_record_recv"
-                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit_gnutls", symbol)
+                    && let Err(e) = attach_uprobe(&mut ebpf, "ssl_read_exit_gnutls", symbol, &mut loaded_programs)
                 {
                     warn!("sensor-linux-uprobes: failed to attach ssl_read_exit_gnutls: {e}");
                 }
@@ -478,7 +497,7 @@ impl UprobesSensor {
 
             for symbol in &readline_symbols {
                 if symbol.name == "readline"
-                    && let Err(e) = attach_uprobe(&mut ebpf, "readline_exit", symbol)
+                    && let Err(e) = attach_uprobe(&mut ebpf, "readline_exit", symbol, &mut loaded_programs)
                 {
                     warn!("sensor-linux-uprobes: failed to attach readline_exit: {e}");
                 }
