@@ -551,16 +551,24 @@ mod pdeathsig_tests {
             .spawn()
             .expect("spawn fake watchdog");
 
+        // The test harness itself writes preamble lines ("running 1 test", a
+        // blank line, ...) to stdout before our test body runs — skip past
+        // those to find the one line we actually care about.
         let stdout = fake_watchdog.stdout.take().expect("piped stdout");
         let mut reader = std::io::BufReader::new(stdout);
-        let mut line = String::new();
-        reader.read_line(&mut line).expect("read grandchild pid");
-        let grandchild_pid: libc::pid_t = line
-            .trim()
-            .strip_prefix("GRANDCHILD_PID=")
-            .expect("expected GRANDCHILD_PID= line")
-            .parse()
-            .expect("valid pid");
+        let mut grandchild_pid = None;
+        for _ in 0..20 {
+            let mut line = String::new();
+            if reader.read_line(&mut line).expect("read line") == 0 {
+                break; // EOF
+            }
+            if let Some(pid_str) = line.trim().strip_prefix("GRANDCHILD_PID=") {
+                grandchild_pid = pid_str.parse::<libc::pid_t>().ok();
+                break;
+            }
+        }
+        let grandchild_pid =
+            grandchild_pid.expect("fake watchdog never printed a GRANDCHILD_PID= line");
 
         // Give the grandchild a moment to actually spawn and register PDEATHSIG
         // before we pull the rug out from under its parent.
