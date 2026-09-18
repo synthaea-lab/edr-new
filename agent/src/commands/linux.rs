@@ -151,6 +151,12 @@ pub(crate) fn cmd_run(
     enable_kill: bool,
     enable_quarantine: bool,
 ) -> anyhow::Result<()> {
+    // Kill-loudness (#71): must run before any other thread exists — the signal mask
+    // set here is inherited by every thread spawned below, including `DetectionSink`'s
+    // own worker threads.
+    crate::kill_loudness::block_termination_signals();
+    crate::kill_loudness::spawn_watcher(alerts.to_path_buf());
+
     let sink = Arc::new(DetectionSink::new(seeded_rule_state(), alerts, events)?);
     eprintln!("Synthaea agent — detection active (Ctrl-C to stop)");
     eprintln!(
