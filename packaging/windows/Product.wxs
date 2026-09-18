@@ -31,7 +31,7 @@
       each build) is what SHOULD change every build; Version is what actually
       drives upgrade/downgrade comparisons.
     -->
-    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" Platform="x64" />
 
     <!--
       perMachine (via Package above) already implies elevation is required;
@@ -43,10 +43,10 @@
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
         <Directory Id="INSTALLFOLDER" Name="Synthaea">
-          <Component Id="AgentExe" Guid="855B0481-4C70-4A29-A15D-23625BD085AE">
+          <Component Id="AgentExe" Guid="855B0481-4C70-4A29-A15D-23625BD085AE" Win64="yes">
             <File Id="AgentExeFile" Source="$(var.RepoRoot)\target\release\agent.exe" KeyPath="yes" />
           </Component>
-          <Component Id="WatchdogExe" Guid="4BE7B00A-A454-4E8D-B786-A15E32D22AFF">
+          <Component Id="WatchdogExe" Guid="4BE7B00A-A454-4E8D-B786-A15E32D22AFF" Win64="yes">
             <File Id="WatchdogExeFile" Source="$(var.RepoRoot)\target\release\watchdog.exe" KeyPath="yes" />
           </Component>
         </Directory>
