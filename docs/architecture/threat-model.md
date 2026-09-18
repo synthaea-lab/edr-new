@@ -112,10 +112,11 @@ self-protection property, and the heartbeat is its enforcement.**
 
 ## Tracked work
 
-#71 (`tamper`: integrity, sensor-silence, protected resources — the crate this document
-specifies), #101 (watchdog backoff), #102 (watchdog liveness/hung-agent), #103
-(artifact/binary protection), #104 (spike: self-protection vs. hiding techniques), and
-the kernel-floor milestones #39 and #91. Each detection row above is a conformance
+#71 (`tamper`: integrity, sensor-silence, protected resources, kill-loudness — the
+crate this document specifies), #101 (watchdog backoff), #102 (watchdog
+liveness/hung-agent), #103 (artifact/binary protection), #104 (spike: self-protection
+vs. hiding techniques — see ADR-0014 for the adopt/reject/defer verdicts), and the
+kernel-floor milestones #39 and #91. Each detection row above is a conformance
 target, validated the scenario-driven way the ransomware pack is
 (`docs/detection/ransomware.md`): a benign lab tool performs the bypass, and the agent
 must produce the alert within the interval.
