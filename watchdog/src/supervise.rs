@@ -538,7 +538,6 @@ mod pdeathsig_tests {
     fn agent_dies_when_watchdog_is_sigkilled() {
         if std::env::var_os(FAKE_WATCHDOG_ENV).is_some() {
             run_as_fake_watchdog();
-            return;
         }
 
         let exe = std::env::current_exe().expect("current_exe");
