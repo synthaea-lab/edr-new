@@ -210,30 +210,30 @@ pub(crate) fn watchdog_loop(
 
     while !stop_flag.load(Ordering::SeqCst) {
         #[cfg(target_os = "linux")]
-        if let Some(baseline) = &definition_baseline {
-            if let Ok(current) = crate::service::snapshot_definition() {
-                for line in crate::service::drift_report(baseline, &current) {
-                    report_self_protection_event(alerts, &line);
-                }
+        if let Some(baseline) = &definition_baseline
+            && let Ok(current) = crate::service::snapshot_definition()
+        {
+            for line in crate::service::drift_report(baseline, &current) {
+                report_self_protection_event(alerts, &line);
             }
         }
 
-        if let Some(pin) = &binary_pin {
-            if !pin.verify() {
-                report_self_protection_event(
-                    alerts,
-                    &format!(
-                        "agent binary at {} no longer matches its pinned hash — \
-                         refusing to launch it",
-                        agent.display()
-                    ),
-                );
-                let (delay, _) = backoff.record_exit(Duration::ZERO);
-                if !sleep_unless_stopped(stop_flag, delay) {
-                    return;
-                }
-                continue;
+        if let Some(pin) = &binary_pin
+            && !pin.verify()
+        {
+            report_self_protection_event(
+                alerts,
+                &format!(
+                    "agent binary at {} no longer matches its pinned hash — \
+                     refusing to launch it",
+                    agent.display()
+                ),
+            );
+            let (delay, _) = backoff.record_exit(Duration::ZERO);
+            if !sleep_unless_stopped(stop_flag, delay) {
+                return;
             }
+            continue;
         }
 
         eprintln!("[watchdog] starting the agent...");
