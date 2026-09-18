@@ -10,9 +10,9 @@ Subfolders are created when work on a platform starts.
 | `linux/` | .deb and .rpm, static musl build option | systemd units (agent + watchdog), sysusers/tmpfiles |
 
 `windows/` (#37) is the first subfolder with real content: `Product.wxs` (WiX v3),
-`build.ps1`, and its own `README.md` with install/build/test steps. Authored and
-reviewed by hand but not yet build-tested on a real Windows machine — see that
-README's "Status" note before relying on it. The "ETW manifest registration" this
+`build.ps1`, and its own `README.md` with install/build/test steps. Build-tested
+end to end (install, uninstall, clean removal) on a real Windows 11 machine — see
+that README's "Status" note for details. The "ETW manifest registration" this
 table used to list for Windows has been dropped: `sensor-windows-etw` only
 *consumes* existing OS/ETW providers, it doesn't publish its own manifest-based
 provider, so there is nothing to register for that sensor. If a future sensor

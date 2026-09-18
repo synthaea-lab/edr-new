@@ -5,13 +5,22 @@ Builds `SynthaeaAgent.msi`: installs `agent.exe` + `watchdog.exe` into
 register the `SynthaEDR` Windows service (the watchdog self-registers - see
 `watchdog/src/service/windows.rs` - this MSI does not duplicate that with
 WiX's own ServiceInstall/ServiceControl elements). On uninstall it runs
-`watchdog.exe uninstall` before removing the files.
+`watchdog.exe uninstall`, then force-deletes everything left under
+`INSTALLFOLDER` via a `cmd.exe /c rd /s /q` custom action - including files
+the running agent/watchdog wrote at runtime (`alerts.ndjson`,
+`alerts.heartbeat`, `events.jsonl`) that MSI itself never installed and would
+otherwise leave behind (see `Product.wxs`'s `CleanupInstallFolder` comment
+for why, and why it isn't done via WiX's `util:RemoveFolderEx`).
 
-**Status: authored, not yet build-tested on a real Windows machine.** WiX
-itself cannot run in this repo's Linux-sandboxed authoring environment (no
-network path to nuget.org for the newer dotnet-based WiX v4/v5), so this is a
-first pass reviewed by hand against well-known WiX v3 conventions - build it
-and test a real install/uninstall before trusting it.
+**Status: build-tested (2026-09-18) end to end on a real Windows 11 machine**
+(install, service running, uninstall, service and all files gone). Issues
+found and fixed during that pass, already reflected in `Product.wxs`/
+`build.ps1`: ICE80 (needed `Win64="yes"` on both components plus
+`Platform="x64"` on `<Package>`), and incomplete uninstall cleanup (MSI only
+removes files it installed itself, not the runtime-generated ones - now
+handled by the `CleanupInstallFolder` custom action). First-pass authoring
+notes below are kept for context but the "not yet build-tested" caveat no
+longer applies.
 
 ## Install WiX v3
 
@@ -46,11 +55,31 @@ Get-Process agent, watchdog
 
 msiexec /x packaging\windows\out\SynthaeaAgent.msi /quiet /l*v uninstall.log
 sc query SynthaEDR   # should report "service does not exist"
+Get-ChildItem "C:\Program Files\Synthaea" -ErrorAction SilentlyContinue  # should be empty/gone
 ```
 
 `install.log` / `uninstall.log` (the `/l*v` verbose MSI log) are the first
 place to look if either step fails - in particular around the
-`InstallService` / `UninstallService` custom actions in `Product.wxs`.
+`InstallService` / `UninstallService` / `CleanupInstallFolder` custom actions
+in `Product.wxs`. Note: right after `msiexec` returns, the Windows Installer
+service can still be finishing asynchronously - if a verification command
+run immediately after shows nothing, wait a moment and re-check before
+concluding it failed. Also run each `msiexec` call as its own step, not
+back-to-back with the next one pasted immediately after - a second `msiexec`
+invocation started before the first has actually finished can produce
+confusing, hard-to-read results.
+
+## Uninstall data retention - deliberate choice, not a default
+
+The `CleanupInstallFolder` custom action deletes `events.jsonl`/
+`alerts.ndjson`/`alerts.heartbeat` along with the binaries on uninstall. This
+trades away forensic value (an EDR's own local logs surviving after someone
+removes the agent, useful for incident response) in favor of
+`packaging/README.md`'s stated rule that uninstall must be clean and
+complete. If the team later decides log retention-after-uninstall matters
+more for a given deployment, that needs an explicit, separate decision (e.g.
+an MSI property to opt out of the cleanup) - not a silent revert of this
+behavior.
 
 ## Signing - not yet decided
 

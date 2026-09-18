@@ -14,9 +14,22 @@
   enough toolchains - see lab/provisioning/windows-toolchain.ps1) or to build
   with it.
 
-  NOT YET BUILD-TESTED (#37, first pass): no Windows machine was available to
-  run candle.exe/light.exe against this while authoring it. Build and test
-  install/uninstall on a real machine before relying on it - see README.md.
+  Build-tested (2026-09-18) end to end on a real Windows 11 machine: install,
+  service running, uninstall, service gone. INSTALLFOLDER wipe took three
+  iterations to get right - see README.md "Status" and the
+  CleanupInstallFolder comment below for what each attempt found.
+
+  A first attempt at the uninstall cleanup used WixUtilExtension's
+  util:RemoveFolderEx (the textbook WiX answer for "delete everything under
+  this folder on uninstall, not just what MSI itself installed"). In practice
+  on this build it never even appeared in the verbose install log - not a
+  runtime failure, just never scheduled - and debugging a third-party
+  extension's internals blind, without MSI table-inspection tooling (orca/
+  lessmsi) on the test machine, wasn't worth it against a mechanism already
+  proven to work in this exact file: the CleanupInstallFolder CustomAction
+  below reuses the same deferred + Impersonate="no" + FileKey/Directory
+  pattern already confirmed (via the verbose log) to resolve [INSTALLFOLDER]
+  correctly for InstallService/UninstallService.
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
   <Product Id="*"
@@ -94,6 +107,74 @@
                   Impersonate="no"
                   Return="ignore" />
 
+    <!--
+      Forces INSTALLFOLDER empty on uninstall, including files the running
+      agent/watchdog wrote at runtime (alerts.ndjson, alerts.heartbeat,
+      events.jsonl) that no MSI Component here declares - MSI's own RemoveFiles
+      standard action only ever removes files a Component actually installed,
+      so without this, those (and the now-non-empty INSTALLFOLDER itself) were
+      left behind after a real uninstall - confirmed on a real machine
+      2026-09-18, which is what led to adding this.
+
+      Directory="TARGETDIR" + ExeCommand (WiX "Type 18": launch ExeCommand
+      with that Directory as the working directory, target resolved via the
+      system PATH - cmd.exe always is) - deliberately not FileKey-based like
+      the two CustomActions above, since this must still run even if
+      watchdog.exe/agent.exe are already gone by the time it executes.
+
+      Directory is deliberately TARGETDIR (the drive root), not INSTALLFOLDER
+      itself: an earlier version used Directory="INSTALLFOLDER" and every
+      real-machine test hit error 32 (ERROR_SHARING_VIOLATION) on the very
+      first delete, unaffected by the ping-based wait below - because
+      Directory sets the *launched cmd.exe's own current working directory*,
+      and Windows will not let you delete a directory that is some process's
+      CWD. cmd.exe was locking the exact folder it was told to delete. Using
+      an unrelated, never-deleted directory as the working directory (the
+      actual delete target is still passed via [INSTALLFOLDER] in
+      ExeCommand, independent of Directory) removed that self-lock.
+
+      The trailing "." in "[INSTALLFOLDER]." is not a typo: INSTALLFOLDER
+      expands with a trailing backslash (e.g. "C:\Program Files\Synthaea\"),
+      and a backslash immediately before the closing quote is parsed by
+      Windows' argument parser as an escaped quote, not a path separator -
+      corrupting the quoting. Appending "." after the property reference (a
+      no-op for the actual path) keeps the character before the closing quote
+      a literal ".", sidestepping that.
+
+      This is a deliberate product choice, not just a packaging nicety: an
+      uninstall wipes local telemetry (events.jsonl) along with the binaries.
+      Weighed against forensic value (keeping local logs around after someone
+      removes the agent), packaging/README.md's own rule - "Uninstall must be
+      clean and complete - an EDR that leaves residue destroys trust" - is
+      what this defers to. Revisit if the team decides log
+      retention-after-uninstall matters more than that rule for incident
+      response.
+
+      "ping -n 4 127.0.0.1 >nul" before the actual rd /s /q: kept as a cheap
+      safety margin for the separate, still-real possibility that stopping
+      the service via the SCM (what watchdog.exe uninstall does, immediately
+      before this runs) is asynchronous, so agent.exe/watchdog.exe could
+      still be mid-exit and briefly hold their own file handles open right
+      after the SCM reports the stop as done. `timeout` doesn't work here (it
+      needs a console to redirect from, which a deferred CA running as SYSTEM
+      doesn't have) - pinging localhost a few times is the standard, reliable
+      way to get a plain ~3s wait out of cmd.exe alone, with no extra
+      tooling. Note this alone did NOT fix the error 32 seen on real-machine
+      testing (see above) - the Directory="INSTALLFOLDER" self-lock did,
+      independently of this wait.
+
+      Return="ignore": matches UninstallService's own reasoning - if a file
+      is still locked for some other reason even after the wait (e.g. an
+      antivirus scanner mid-scan) and rd /s /q exits non-zero, that must not
+      leave the product stuck "half removed".
+    -->
+    <CustomAction Id="CleanupInstallFolder"
+                  Directory="TARGETDIR"
+                  ExeCommand="cmd.exe /c ping -n 4 127.0.0.1 >nul &amp; rd /s /q &quot;[INSTALLFOLDER].&quot;"
+                  Execute="deferred"
+                  Impersonate="no"
+                  Return="ignore" />
+
     <InstallExecuteSequence>
       <!--
         NOT Installed: only on a fresh install / major upgrade's install half,
@@ -109,6 +190,14 @@
         real uninstall", not a repair or a feature-level modify.
       -->
       <Custom Action="UninstallService" Before="RemoveFiles">Installed AND (REMOVE="ALL")</Custom>
+      <!--
+        After UninstallService (which still needs watchdog.exe on disk to run
+        its own `uninstall` subcommand) but still before RemoveFiles - by the
+        time RemoveFiles itself runs, INSTALLFOLDER is already gone, so
+        RemoveFiles finds nothing left to do for AgentExe/WatchdogExe, which
+        MSI tolerates without erroring.
+      -->
+      <Custom Action="CleanupInstallFolder" After="UninstallService">Installed AND (REMOVE="ALL")</Custom>
     </InstallExecuteSequence>
   </Product>
 </Wix>
