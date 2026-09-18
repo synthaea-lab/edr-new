@@ -534,7 +534,16 @@ fn try_file_open(ctx: LsmContext) -> Result<i32, i32> {
         // explicit bounds comparison). The actual requirement here is only "never
         // override an earlier LSM's deny with our own allow" — the exact errno
         // doesn't matter to us, so return a fixed, compile-time-constant deny
-        // instead of the arbitrary value. `EPERM` regardless of the original code.
+        // instead of the arbitrary value.
+        //
+        // Review note (Nikolas, PR #239): this is a lossy, generic deny signal,
+        // not a transparent forward — an operator debugging "why was this denied"
+        // sees `EPERM` here regardless of whether the earlier LSM actually
+        // returned `EACCES`, `EPIPE`, or anything else. Acceptable for this
+        // observation-only hook (no policy enforcement reads this value today),
+        // but anyone wiring real inline blocking on top of this hook later
+        // (#131/#133) should not assume `attach_file_open`'s return value is the
+        // original LSM's own errno.
         return Ok(-1);
     }
 
