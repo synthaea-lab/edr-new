@@ -1,0 +1,14 @@
+name: dropper-chain
+platform: linux
+script: dropper-chain.sh
+simulates: >
+  Single-pid exec + network connect + file write within one correlation window
+  (curl-style dropper: download+write+exec collapsed into one process).
+expected_detections:
+  - technique: "T1105/T1059/T1071"
+    rule: rule_spawn_connect_filewrite   # crates/correlator/src/rules.rs — correlation
+                                          # engine, not crates/rules (different Alert type,
+                                          # same technique-string shape)
+    min_count: 1
+    tolerance: 0
+notes: null

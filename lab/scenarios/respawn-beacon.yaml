@@ -1,0 +1,27 @@
+name: respawn-beacon
+platform: linux
+script: respawn-beacon.sh
+simulates: >
+  A listener that respawns (new pid via fork+exec) on every accepted connection,
+  combined with repeated client connections to the same (comm, dest, port) —
+  automatic respawn with beaconing, a persistent C2 pattern.
+expected_detections:
+  - technique: "T1071/T1041"
+    rule: check_beacon           # crates/rules/src/state.rs — client-side connections alone
+                                  # cross BEACON_THRESHOLD regardless of listener pid churn,
+                                  # keyed on (comm, daddr, dport), not pid
+    min_count: 1
+    tolerance: 0
+  - technique: "T1059/T1071"
+    rule: rule_respawn_connect   # crates/correlator/src/rules.rs — correlates by
+                                  # (ppid, comm), not literal pid, precisely because a real
+                                  # respawn gets a new pid every iteration
+    min_count: 1
+    tolerance: 0
+notes: >
+  Originally written (2026-08-25) to test a hypothesis: the old rule counted Execs by
+  literal pid, which a real respawn (new pid each time) could never accumulate past
+  threshold. Confirmed during the edr-new migration and fixed — rule_respawn_connect
+  now correlates on (ppid, comm) — so both alerts above are expected to fire reliably,
+  not just the BEACON one. See rule_respawn_connect's doc comment in
+  crates/correlator/src/rules.rs for the full history.

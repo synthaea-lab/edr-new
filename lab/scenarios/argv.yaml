@@ -1,0 +1,20 @@
+name: argv
+platform: linux
+script: argv.sh
+simulates: >
+  A shell one-liner with a base64 decode in its arguments — the argv/cmdline capture
+  fidelity assertion for issue #152 (/proc/<pid>/cmdline read at drain time, not a
+  frozen mm->arg_start..arg_end offset).
+expected_detections:
+  - technique: "T1059.004"
+    rule: check_base64_decode   # crates/rules/src/stateless.rs — stateless, cmdline substring
+    min_count: 3   # ITERATIONS=3 in the script, one alert per iteration, no windowed dedup
+    tolerance: 0
+notes: >
+  Tests capture fidelity for a cooperative process, not tamper resistance: cmdline is
+  read at drain time, so a process that rewrites its own argv before the read can spoof
+  what this rule sees (known gap of read_proc_cmdline; image_path stays authoritative
+  regardless — out of scope here). The script's `sleep 0.2` inside the `sh -c` payload
+  is deliberate: a bare `echo | base64` pipeline exits in ~1-2ms and can legitimately
+  lose the userspace drain race under load (observed on kernel 6.1 in the Hyper-V lab)
+  — that race is a known, accepted gap, not what this scenario measures.

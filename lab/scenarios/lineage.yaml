@@ -1,0 +1,19 @@
+name: lineage
+platform: linux
+script: lineage.sh
+simulates: >
+  A process named like a web server (comm "nginx") spawns a real shell, which execs
+  a leaf command — the parent-lineage fidelity assertion for issue #53 (eBPF-derived
+  ppid/parent_comm via the PROC_LINEAGE fork-tracking map, not a frozen task_struct
+  offset walk).
+expected_detections:
+  - technique: "T1059"
+    rule: check_web_server_spawns_shell   # crates/rules/src/state.rs — fires only if
+                                           # the child's resolved parent comm is "nginx"
+    min_count: 3   # ITERATIONS=3 in the script, one alert per iteration, no windowed dedup
+    tolerance: 0
+notes: >
+  A silent run (zero alerts) is itself meaningful here: it means lineage resolution is
+  broken on the running kernel (regression of #53), not that nothing happened. Also
+  worth eyeballing the raw exec events: every /tmp/nginx -> /bin/sh pair should show
+  child.ppid == parent.pid and child.parent_comm == "nginx".
