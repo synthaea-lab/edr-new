@@ -316,6 +316,14 @@ fn quarantine_matched_payload(
     let Some(hooks) = guard.as_ref() else {
         return;
     };
+    // A quarantined file is written under `quarantine_dir` — that write is itself a
+    // FileOpen the sensor sees, which would otherwise re-match and re-"quarantine"
+    // the file into itself, overwriting its own `.origin` sidecar with the wrong
+    // "original" path (real behavior observed on the lab VM). Once a payload is
+    // already there, leave it alone.
+    if path.starts_with(&hooks.quarantine_dir) {
+        return;
+    }
     let outcome = response::quarantine_file(path, &hooks.quarantine_dir, &hooks.policy);
     drop(guard);
     let message = match outcome {
