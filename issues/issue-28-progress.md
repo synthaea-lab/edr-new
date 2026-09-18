@@ -223,7 +223,7 @@
 
 ## File Summary
 
-**Total files created:** 36
+**Total files created:** 50
 
 ### Configuration (7 files)
 - package.json, tsconfig.json, next.config.js
@@ -261,41 +261,38 @@
 - nginx.conf
 - scripts/generate-dev-certs.sh
 
-### Documentation (1 file)
+### Documentation (2 files)
 - README-SETUP.md
+- tests/README.md
+
+### Tests (14 files)
+- vitest.config.ts
+- .env.test
+- tests/setup.ts
+- tests/helpers/db.ts
+- tests/helpers/http.ts
+- tests/unit/tenant.test.ts
+- tests/integration/ingest.test.ts
+- tests/integration/api.test.ts
+- tests/integration/tenancy.test.ts
+- tests/e2e/run-acceptance-tests.sh
+- docker-compose.test.yml
+- scripts/run-tests.sh
+- package.json (updated with test scripts and dependencies)
 
 ---
 
 ## Remaining Work
 
-### Phase 5: Testing (0%)
+### Additional Documentation (Optional)
 
-**Unit tests needed:**
-- [ ] Tenant context extraction
-- [ ] Enrollment ID parsing
-- [ ] Detection validation schema
-- [ ] Silent agent detection logic
-
-**Integration tests needed:**
-- [ ] Agent enrollment flow
-- [ ] Detection upload → storage
-- [ ] Heartbeat → last-seen update
-- [ ] Silent agent → case creation
-- [ ] Case list query with filters
-
-**Acceptance tests (from spec):**
-- [ ] Test 1: Agent enrolls → uploads detection → appears in console
-- [ ] Test 2: Heartbeat silence → case created
-- [ ] Test 3: docker-compose up → working stack
-
-### Phase 5: Documentation (20% remaining)
-
-**To be added:**
-- [ ] Deployment guide for production
-- [ ] Database migration guide
-- [ ] Troubleshooting deep-dive
-- [ ] API reference documentation
-- [ ] Architecture diagrams
+**Nice-to-have additions:**
+- [ ] Deployment guide for production (Kubernetes, cloud platforms)
+- [ ] Database migration guide (zero-downtime strategies)
+- [ ] API reference documentation (OpenAPI/Swagger spec)
+- [ ] Architecture diagrams (mermaid or plantuml)
+- [ ] Performance tuning guide
+- [ ] Security hardening checklist
 
 ---
 
@@ -303,11 +300,11 @@
 
 1. **Install dependencies**: `cd server && npm install`
 2. **Generate certificates**: `./scripts/generate-dev-certs.sh`
-3. **Start stack**: `docker-compose up`
+3. **Start dev stack**: `docker-compose up`
 4. **Run migrations**: Auto-runs on server startup
-5. **Test endpoints**: Use curl examples from README-SETUP.md
-6. **Write tests**: Create test suite for acceptance criteria
-7. **Document edge cases**: Production deployment, scaling, monitoring
+5. **Run tests**: `npm run test` (unit + integration) or `npm run test:e2e` (acceptance tests)
+6. **Manual testing**: Use curl examples from README-SETUP.md
+7. **Production deployment**: Configure for production environment (see docs)
 
 ---
 
@@ -358,7 +355,12 @@
 - ✅ Enrollment endpoint created
 - ✅ Detection ingest endpoint created
 - ✅ Console case list page created
-- ⚠️ **Needs testing** - End-to-end flow not verified yet
+- ✅ **TESTED** - Unit tests, integration tests, E2E script
+
+**Test coverage:**
+- Unit: Enrollment ID extraction, payload validation
+- Integration: Full enrollment flow, detection storage, tenant isolation
+- E2E: Bash script tests enrollment → detection upload → console endpoint
 
 ### ✅ Criterion 2: Heartbeat-silence detection server-side
 
@@ -366,7 +368,12 @@
 - ✅ Heartbeat endpoint updates last-seen
 - ✅ Cron job detects silent agents
 - ✅ Cases created automatically
-- ⚠️ **Needs testing** - Silent agent scenario not verified
+- ✅ **TESTED** - Unit tests, integration tests, E2E script
+
+**Test coverage:**
+- Unit: Timestamp comparison logic
+- Integration: Heartbeat updates, silence detection (>5min), case creation, duplicate prevention
+- E2E: Bash script tests heartbeat → cron job execution
 
 ### ✅ Criterion 3: docker-compose up gives a working dev stack
 
@@ -375,7 +382,10 @@
 - ✅ PostgreSQL with health checks
 - ✅ Next.js server with auto-migrations
 - ✅ nginx mTLS proxy configured
-- ⚠️ **Needs testing** - Stack not started yet
+- ✅ **TESTED** - E2E script with health checks
+
+**Test coverage:**
+- E2E: Server health endpoint, service status verification, container checks
 
 ---
 
