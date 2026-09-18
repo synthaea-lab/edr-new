@@ -180,21 +180,12 @@ impl Default for EventLogPolicy {
 /// acceptance criterion, and an EDR that starts acting on the endpoint the moment
 /// it's compiled in, before an operator opts in, is the wrong default for a kill
 /// switch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ResponsePolicy {
     /// Automated process termination on a high-confidence correlated verdict.
     pub kill_enabled: bool,
     /// Automated quarantine of a payload a scan confirms malicious.
     pub quarantine_enabled: bool,
-}
-
-impl Default for ResponsePolicy {
-    fn default() -> Self {
-        Self {
-            kill_enabled: false,
-            quarantine_enabled: false,
-        }
-    }
 }
 
 #[cfg(test)]
