@@ -58,12 +58,13 @@ fn is_ignored(comm: &str) -> bool {
 /// renamed to one of these names from an untrusted path keeps full scoring.
 ///
 /// wget: a bare `wget -T 3 -O /dev/null http://1.1.1.1/` alone produced
-/// log_odds=5.33 (P=100%) — `time_exec_to_connect_ms` (quick connect after
+/// `log_odds`=5.33 (P=100%) — `time_exec_to_connect_ms` (quick connect after
 /// spawn) and `dest_is_external` fire on any CLI network tool, not just
 /// beaconing malware.
 /// chronyd: Alpine's stock NTP daemon — periodic external resync connects hit
-/// the same features on default, zero-user-action system activity (log_odds
-/// up to 2.90, P=95%; the process was never invoked by the tester).
+/// the same features on default, zero-user-action system activity
+/// (`log_odds` up to 2.90, P=95%; the process was never invoked by the
+/// tester).
 const BAYES_NAME_EXCLUSIONS: &[&str] = &["wget", "chronyd"];
 
 fn is_bayes_excluded(comm: &str) -> bool {
