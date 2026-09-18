@@ -248,7 +248,7 @@ fn spawn_agent(agent: &Path, alerts: &Path) -> std::io::Result<Child> {
 /// Without this, a killed watchdog leaves the agent reparented to PID 1 —
 /// unsupervised but still running — because the OS does not kill children when a
 /// parent dies. systemd's `KillMode=control-group` papers over this by sweeping
-/// the unit's whole cgroup on every restart; OpenRC does not do this by default
+/// the unit's whole cgroup on every restart; `OpenRC` does not do this by default
 /// (`rc_cgroup_cleanup="NO"`), so nothing else catches it there.
 #[cfg(target_os = "linux")]
 fn die_with_parent(cmd: &mut std::process::Command) {
