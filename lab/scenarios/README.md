@@ -24,3 +24,31 @@ for the runbook that chains them in the reviewer-facing order.
 
 New scenarios follow the same shape: one script, one documented expectation list,
 runnable against any platform's agent from the VM matrix (`../vagrant`).
+
+## Machine-readable expectations
+
+Each `.sh` scenario above has a YAML sidecar (`<name>.yaml`, decided in issue #44:
+format + expected-detections schema) that makes the table row above machine-parsable
+— a replay engine can validate or list scenarios without executing anything. Shape:
+
+```yaml
+name: <scenario stem>
+platform: linux | windows
+script: <name>.sh
+simulates: >
+  Free-text description of what the scenario simulates.
+expected_detections:
+  - technique: "<exact Alert.technique / CorrelationAlert.technique string>"
+    rule: <crates/rules or crates/correlator fn name>   # doc-only, not asserted at replay time
+    min_count: 1    # >= 1
+    tolerance: 0     # allowed overshoot: pass iff observed_count <= min_count + tolerance
+notes: null
+```
+
+`technique` matches by exact string against `AlertRecord.technique` in `alerts.ndjson`
+(`crates/sinks/src/lib.rs`) — both `Alert` and `CorrelationAlert` converge there, so one
+schema covers rule-engine and correlator-engine detections alike. This binds into the
+model record's `scenario_replays` (ADR-0009, `docs/adr/0009-model-record-scenario-replay-binding.md`):
+`ExpectedDetection`/`ObservedDetection` there use the same field names.
+Scenario/schema decisions live on issue #44; the replay engine itself is separate,
+still-unwritten work.

@@ -1,0 +1,19 @@
+name: beacon
+platform: linux
+script: beacon.sh
+simulates: >
+  Periodic same-destination C2 traffic (>= BEACON_THRESHOLD connections to the
+  same comm/dest/port within BEACON_WINDOW_NS, on a non-standard port).
+expected_detections:
+  - technique: "T1071/T1041"
+    rule: check_beacon       # crates/rules fn name — traceability if the rule moves/renames
+    min_count: 1
+    tolerance: 0
+notes: >
+  Live-tested 2026-09-18 (WSL2, kernel 6.6.114-microsoft-standard-WSL2): the alert above
+  fired exactly once, confirmed. Same run also produced `rule_respawn_connect`
+  (T1059/T1071) and a `T1571` listener-drift alert, neither asserted here — both look
+  like artifacts of a WSL2-specific ppid resolution defect (every process reported
+  ppid=0), not something expected on a real kernel. See the longer writeup in
+  respawn-beacon.yaml's notes — this scenario's listener shares the same
+  respawn-on-accept boilerplate.

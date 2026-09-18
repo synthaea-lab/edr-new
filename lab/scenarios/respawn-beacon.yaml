@@ -1,0 +1,46 @@
+name: respawn-beacon
+platform: linux
+script: respawn-beacon.sh
+simulates: >
+  A listener that respawns (new pid via fork+exec) on every accepted connection,
+  combined with repeated client connections to the same (comm, dest, port) —
+  automatic respawn with beaconing, a persistent C2 pattern.
+expected_detections:
+  - technique: "T1071/T1041"
+    rule: check_beacon           # crates/rules/src/state.rs — client-side connections alone
+                                  # cross BEACON_THRESHOLD regardless of listener pid churn,
+                                  # keyed on (comm, daddr, dport), not pid
+    min_count: 1
+    tolerance: 0
+notes: >
+  Live-tested 2026-09-18 against a real agent (WSL2, kernel 6.6.114-microsoft-standard-WSL2)
+  — the BEACON alert above fired exactly once, confirmed.
+
+  `rule_respawn_connect` (crates/correlator/src/rules.rs, technique T1059/T1071) is
+  deliberately NOT asserted here despite the script's own header comment (and that
+  rule's doc comment) claiming it should fire reliably post-migration. Two reasons to
+  distrust that claim without a real-kernel run:
+
+  1. Only `sys_enter_connect` is probed (see `agent status`); `accept()` is never
+     traced. The listener side of this scenario never calls `connect()`, so its own
+     (ppid, comm) bucket has no `Connect` event of its own to combine with its
+     `Exec` respawns — `rule_respawn_connect` needs both `spawn_count >= 3` AND
+     `has_connect` true in the SAME (ppid, comm) group. Unless some other process
+     sharing that exact (ppid, comm) tuple contributes the `Connect`, the rule
+     should not fire for the listener's respawns as designed.
+  2. This WSL2 test run showed `ppid=0` for every single captured event, including
+     the listener and unrelated processes (confirmed independently against
+     `lineage.yaml`/`argv.yaml` below) — a known WSL2-kernel defect, not a
+     documented row of `lab/MATRIX.md`. With every process artificially grouped
+     under `(ppid=0, comm="nc")`, the listener's respawns and the client's separate
+     `nc -w1` connections got merged into one bucket, which is very likely why
+     `rule_respawn_connect` fired 4 times in this run (`ppid=0 comm=nc: 3/3/5/7
+     spawns...`) — an artifact of the ppid bug, not evidence the scenario works as
+     the doc comment claims.
+
+  Net: `rule_respawn_connect`'s "confirmed" status (crates/correlator/src/rules.rs)
+  rests on a unit-test re-read, not an actual run of this script against a real
+  kernel. Before re-adding it here, run this scenario in the Hyper-V lab (real
+  ppid resolution) and check whether it fires at all — if reasoning 1 above holds,
+  it may never fire for this scenario shape and either the scenario or the rule
+  needs to change. Worth flagging to whoever owns the correlator rules.

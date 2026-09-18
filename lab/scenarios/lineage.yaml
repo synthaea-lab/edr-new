@@ -1,0 +1,29 @@
+name: lineage
+platform: linux
+script: lineage.sh
+simulates: >
+  A process named like a web server (comm "nginx") spawns a real shell, which execs
+  a leaf command — the parent-lineage fidelity assertion for issue #53 (eBPF-derived
+  ppid/parent_comm via the PROC_LINEAGE fork-tracking map, not a frozen task_struct
+  offset walk).
+expected_detections:
+  - technique: "T1059"
+    rule: check_web_server_spawns_shell   # crates/rules/src/state.rs — fires only if
+                                           # the child's resolved parent comm is "nginx"
+    min_count: 3   # ITERATIONS=3 in the script, one alert per iteration, no windowed dedup
+    tolerance: 0
+notes: >
+  A silent run (zero alerts) is itself meaningful here: it means lineage resolution is
+  broken on the running kernel (regression of #53), not that nothing happened. Also
+  worth eyeballing the raw exec events: every /tmp/nginx -> /bin/sh pair should show
+  child.ppid == parent.pid and child.parent_comm == "nginx".
+
+  Confirmed on real hardware 2026-09-09/10 (Hyper-V lab, Ubuntu 22.04/5.15.0-91 and
+  Debian 12/6.1.0-17, PR #155): 3/3 T1059 alerts on both kernels, ppid always correct,
+  never 0. min_count: 3 above matches that result.
+
+  Tried again 2026-09-18 in WSL2 (kernel 6.6.114-microsoft-standard-WSL2): zero alerts.
+  Every single captured event in that run showed ppid=0, including unrelated
+  background processes — a WSL2-specific PROC_LINEAGE defect, not a #53 regression
+  (already ruled out by the real-hardware run above). WSL2 isn't a row in
+  lab/MATRIX.md; don't use it to sanity-check this scenario.
