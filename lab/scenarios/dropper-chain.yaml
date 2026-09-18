@@ -1,0 +1,20 @@
+name: dropper-chain
+platform: linux
+script: dropper-chain.sh
+simulates: >
+  Single-pid exec + network connect + file write within one correlation window
+  (curl-style dropper: download+write+exec collapsed into one process).
+expected_detections:
+  - technique: "T1105/T1059/T1071"
+    rule: rule_spawn_connect_filewrite   # crates/correlator/src/rules.rs — correlation
+                                          # engine, not crates/rules (different Alert type,
+                                          # same technique-string shape)
+    min_count: 1
+    tolerance: 0
+notes: >
+  Live-tested 2026-09-18 (WSL2, kernel 6.6.114-microsoft-standard-WSL2): fired exactly
+  once, confirmed. `rule_connect_filewrite` (crates/correlator/src/rules.rs, technique
+  "T1105" alone — connect+filewrite without the exec leg) also co-fires, harmlessly;
+  not asserted here since it's a strict subset signal of the same event, not something
+  this scenario needs to test on its own. Unlike beacon/respawn-beacon, this rule
+  doesn't depend on ppid resolution, so the result should hold on any kernel.

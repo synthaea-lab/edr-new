@@ -1,0 +1,22 @@
+name: dns-exfil
+platform: windows
+script: dns-exfil.sh
+simulates: >
+  Many DNS queries in one correlation window under a single parent domain, each with
+  a long high-entropy leftmost label — the subdomain-chunking shape produced by
+  iodine/dnscat2/DNSExfiltrator tunnelling data through DNS.
+expected_detections:
+  - technique: "T1048.003/T1071.004"
+    rule: rule_dns_exfil   # crates/correlator/src/rules.rs — source-agnostic, but only
+                           # Windows ETW DNS-Client (EID 3008) feeds it today
+    min_count: 1
+    tolerance: 0
+notes: >
+  No-op on Linux: there is no Linux DNS sensor yet, so this scenario only produces a
+  detection when run with the agent on a Windows lab host (lab/MATRIX.md) — the script
+  itself is POSIX (dig/nslookup/getent) and portable, but the observing agent must be
+  Windows. Tagged platform: windows for that reason, not because the driving script
+  needs it. Will apply unchanged once a Linux DNS sensor exists.
+
+  Confirmed 2026-09-18 (WSL2, kernel 6.6.114-microsoft-standard-WSL2): ran the script
+  against a live agent, zero alerts produced — matches the no-op expectation above.
