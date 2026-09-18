@@ -108,6 +108,42 @@ fn has_bpf_capabilities() -> bool {
     has(CAP_SYS_ADMIN) || (has(CAP_BPF) && has(CAP_PERFMON))
 }
 
+/// Selects sensor: eBPF if available, audit fallback otherwise.
+fn select_sensor() -> Box<dyn schema::sensor::Sensor> {
+    if can_use_ebpf() {
+        log::info!("Using eBPF sensor (primary)");
+        return Box::new(sensor_linux::LinuxSensor::new());
+    }
+
+    log::warn!("eBPF unavailable — using audit fallback (reduced fidelity)");
+    Box::new(sensor_linux_audit::AuditSensor::new())
+}
+
+/// Checks if eBPF sensor can be loaded (privileges, BTF, verifier).
+fn can_use_ebpf() -> bool {
+    // Check 1: Privileges
+    let uid = unsafe { libc::geteuid() };
+    if uid != 0 && !has_bpf_capabilities() {
+        log::debug!("eBPF preflight: no privileges");
+        return false;
+    }
+
+    // Check 2: BTF present
+    if !std::path::Path::new("/sys/kernel/btf/vmlinux").exists() {
+        log::debug!("eBPF preflight: no BTF");
+        return false;
+    }
+
+    // Check 3: Can load eBPF (quick test)
+    match sensor_linux::load_ebpf() {
+        Ok(_) => true,
+        Err(e) => {
+            log::debug!("eBPF preflight: {e}");
+            false
+        }
+    }
+}
+
 /// Linux: eBPF capture + detection via `LinuxSensor` (Ctrl-C handled by the sensor),
 /// plus the netlink poller (issue #92: `sock_diag`/conntrack — listen-port drift and
 /// beacon detection where eBPF cannot run, or as a redundant cross-check alongside
@@ -156,7 +192,7 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
 
     spawn_netlink_poller(sink.clone());
     spawn_journal_tail(sink.clone());
-    let mut sensor = sensor_linux::LinuxSensor::new();
+    let mut sensor = select_sensor();
     sensor
         .run(Box::new(sink))
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
