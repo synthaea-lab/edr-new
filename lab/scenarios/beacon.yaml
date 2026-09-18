@@ -9,11 +9,23 @@ expected_detections:
     rule: check_beacon       # crates/rules fn name — traceability if the rule moves/renames
     min_count: 1
     tolerance: 0
+  - technique: "T1059/T1071"
+    rule: rule_respawn_connect   # crates/correlator/src/rules.rs
+    min_count: 1
+    tolerance: 1   # timing-sensitive count, see notes — not asserting an exact number
 notes: >
-  Live-tested 2026-09-18 (WSL2, kernel 6.6.114-microsoft-standard-WSL2): the alert above
-  fired exactly once, confirmed. Same run also produced `rule_respawn_connect`
-  (T1059/T1071) and a `T1571` listener-drift alert, neither asserted here — both look
-  like artifacts of a WSL2-specific ppid resolution defect (every process reported
-  ppid=0), not something expected on a real kernel. See the longer writeup in
-  respawn-beacon.yaml's notes — this scenario's listener shares the same
-  respawn-on-accept boilerplate.
+  Live-tested 2026-09-18, twice: first in WSL2 (kernel 6.6.114-microsoft-standard-WSL2),
+  then on real hardware (Hyper-V lab, Arch Linux 7.2.4-arch1-2). The BEACON alert fired
+  exactly once in both runs, confirmed.
+
+  Correcting an earlier version of this note: I'd first written off the co-occurring
+  `rule_respawn_connect` firing as a WSL2 ppid=0 artifact and left it unasserted. Real
+  hardware proves that wrong — it fires reliably there too (2/2 in this run), for a
+  genuine, traceable reason: `rule_respawn_connect` groups by (ppid, comm), and this
+  script's client loop (`for i in ...; do echo ... | nc -w1 ...; done`) spawns
+  CONNECTIONS (4) `nc` invocations that all share the *script's own* pid as parent —
+  that alone is >= RESPAWN_THRESHOLD (3) with each spawn also connecting, independent
+  of anything the listener does. See respawn-beacon.yaml's notes for the fuller
+  writeup (same mechanism, traced there pid-by-pid) — including the caveat that this
+  reflects the *scripting* pattern (a shared-parent client loop), not literally "a
+  listener that respawns," despite similar wording in both scripts' headers.
