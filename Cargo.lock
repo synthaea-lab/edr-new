@@ -3361,6 +3361,7 @@ dependencies = [
  "anyhow",
  "clap",
  "libc",
+ "sha2 0.11.0",
  "signal-hook",
  "windows-service",
 ]
