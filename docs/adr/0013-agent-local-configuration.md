@@ -172,12 +172,12 @@ control plane if reachable, or from a `config`-designated on-disk cache
 for offline mode). The two crates never bundle: a change to policy shape
 does not require a config schema change, and vice-versa.
 
-`config` carries the operator-editable extension of ADR-0011's
-`SAFETY_CRITICAL_PATHS`: the parser default is hardcoded, but operators
-can add additional safety-critical paths in the config file (e.g. a
-lab-specific `sensors.custom_lab_sensor.redaction` sub-doc) for their
-own extensions. Any path listed in the config's safety-critical extension
-inherits the parse-time completeness enforcement from ADR-0011 exactly.
+The `SAFETY_CRITICAL_PATHS` list from ADR-0011 stays hardcoded in the
+parser for v1 as ADR-0011's Decision 3 already specifies; local
+configuration does not extend it. Migration from hardcoded to
+config-extensible or schema-declared is what ADR-0011's Deferred section
+already reserves for a dedicated future ADR triggered by real operator
+or integrator pain — this ADR does not preempt that decision.
 
 ## Consequences
 
@@ -197,8 +197,6 @@ inherits the parse-time completeness enforcement from ADR-0011 exactly.
 - **Secrets never travel in the config file itself** — a leaked config
   file is not a credential leak. Operators own the separate secret
   provisioning (envvar / permissioned file).
-- **The `SAFETY_CRITICAL_PATHS` extension mechanism** from ADR-0011 gets
-  its concrete operator interface here without a follow-up ADR.
 
 ## Deferred
 
@@ -224,7 +222,9 @@ inherits the parse-time completeness enforcement from ADR-0011 exactly.
 - ADR-0010 (PR #225 merged 2026-09-18) — policy model, from which this ADR
   reuses the "fail-fast, no silent defaults" discipline.
 - ADR-0011 (PR #231 merged 2026-09-18) — safety-critical override
-  granularity; the `SAFETY_CRITICAL_PATHS` list from that ADR is
-  operator-extensible via this ADR's config file (Decision 9).
+  granularity; its Decision 3 (hardcoded parser-side list) stands
+  unchanged after this ADR (see Decision 9), and its Deferred item on
+  migration to extensible declaration remains reserved for a future
+  dedicated ADR.
 - Discord discussion 2026-09-18 (@old-dov, @Sollykhan) — the TOML vs YAML
   trancher with its public/usage argumentation.
