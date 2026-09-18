@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use schema::sensor::{EventSink as _, Sensor as _};
 use tamper::heartbeat::{SensorHeartbeat, SilenceMonitor};
 
+use crate::protected::ProtectedResourceGuard;
 use crate::silence::{PulsingSink, SilenceHealthSource};
 use crate::sink::DetectionSink;
 
@@ -196,9 +197,15 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
 
     spawn_netlink_poller(sink.clone(), netlink_heartbeat);
     spawn_journal_tail(sink.clone(), journal_heartbeat);
+
+    // Protected-resource monitoring (#71): only the eBPF sensor produces `FileOpen`
+    // events, so only its chain needs the guard — the netlink/journal sinks above
+    // never see one.
+    let protected = crate::protected::protected_paths(alerts, events);
+    let guarded = ProtectedResourceGuard::new(sink.clone(), protected, sink);
     let mut sensor = sensor_linux::LinuxSensor::new();
     sensor
-        .run(Box::new(PulsingSink::new(sink, ebpf_heartbeat)))
+        .run(Box::new(PulsingSink::new(guarded, ebpf_heartbeat)))
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
     // Health beacon thread stops when the process exits (sensor.run() blocks until
     // Ctrl-C). For graceful shutdown, call health_stop.stop() before exiting.
