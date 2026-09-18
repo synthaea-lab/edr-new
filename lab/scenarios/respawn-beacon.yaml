@@ -15,8 +15,10 @@ expected_detections:
   - technique: "T1059/T1071"
     rule: rule_respawn_connect   # crates/correlator/src/rules.rs
     min_count: 1
-    tolerance: 1   # observed 2 alert lines on real hardware (see notes) — timing-sensitive,
-                    # not asserting an exact count
+    tolerance: 20   # unbounded by design, see notes — corrected from an earlier
+                     # tolerance: 1 that was based on a single run's 2 alert lines;
+                     # a second real run measured 7, see beacon.yaml's notes for why
+                     # this rule (unlike check_beacon) has no one-shot-per-window dedup
 notes: >
   Live-tested 2026-09-18 on real hardware (Hyper-V lab, Arch Linux 7.2.4-arch1-2 —
   see lab/vagrant-hyperv/) after an inconclusive WSL2 attempt earlier the same day.
@@ -42,3 +44,9 @@ notes: >
   the scenario (e.g. `setsid`-ing each client connection so it doesn't share the
   script's pid) if testing the listener-respawn case specifically still matters —
   not done here, flagging for whoever owns this scenario next.
+
+  Tolerance correction (2026-09-18, issue #44's replay engine): a fresh real run
+  through `ml.synthaea_ml.evaluation.scenario_replay` measured 7 `rule_respawn_connect`
+  alert lines against this scenario, not the 2 the original `tolerance: 1` was based
+  on. See beacon.yaml's notes for why this rule has no one-shot-per-window dedup and
+  a loose tolerance is the correct fix, not a bug in the count.
