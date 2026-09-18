@@ -17,3 +17,12 @@ notes: >
   broken on the running kernel (regression of #53), not that nothing happened. Also
   worth eyeballing the raw exec events: every /tmp/nginx -> /bin/sh pair should show
   child.ppid == parent.pid and child.parent_comm == "nginx".
+
+  Not validated live: tried 2026-09-18 in WSL2 (kernel 6.6.114-microsoft-standard-WSL2)
+  and got zero alerts, matching the "regressed" case above — but every single captured
+  event in that run showed ppid=0, including unrelated background processes, so this
+  looks like a WSL2-specific PROC_LINEAGE defect rather than a real #53 regression.
+  WSL2 isn't a row in lab/MATRIX.md. min_count above is reasoned from
+  check_web_server_spawns_shell's source (crates/rules/src/state.rs) and
+  ITERATIONS=3, not empirically confirmed — validate on a real kernel (Hyper-V lab)
+  before trusting this scenario's result on WSL2.

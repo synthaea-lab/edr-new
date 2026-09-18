@@ -18,3 +18,14 @@ notes: >
   is deliberate: a bare `echo | base64` pipeline exits in ~1-2ms and can legitimately
   lose the userspace drain race under load (observed on kernel 6.1 in the Hyper-V lab)
   — that race is a known, accepted gap, not what this scenario measures.
+
+  Not validated live: tried 2026-09-18 in WSL2 (kernel 6.6.114-microsoft-standard-WSL2)
+  and got zero alerts. Checked events.jsonl directly: `cmdline`/`argv` were empty
+  ("" / []) for every single exec event in that run, not just this scenario's — the
+  `/proc/<pid>/cmdline` read looks broken across the board on this kernel, matching
+  the "regressed" case #152 warns about, but the same run also showed ppid=0 for
+  every process (see lineage.yaml's notes), so this reads as a broader WSL2-specific
+  capture defect rather than a targeted #152 regression. WSL2 isn't a row in
+  lab/MATRIX.md. min_count above is reasoned from check_base64_decode's source
+  (crates/rules/src/stateless.rs) and ITERATIONS=3, not empirically confirmed —
+  validate on a real kernel (Hyper-V lab) before trusting this scenario on WSL2.

@@ -17,3 +17,6 @@ notes: >
   itself is POSIX (dig/nslookup/getent) and portable, but the observing agent must be
   Windows. Tagged platform: windows for that reason, not because the driving script
   needs it. Will apply unchanged once a Linux DNS sensor exists.
+
+  Confirmed 2026-09-18 (WSL2, kernel 6.6.114-microsoft-standard-WSL2): ran the script
+  against a live agent, zero alerts produced — matches the no-op expectation above.
