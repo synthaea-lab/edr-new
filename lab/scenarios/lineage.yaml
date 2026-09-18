@@ -18,11 +18,12 @@ notes: >
   worth eyeballing the raw exec events: every /tmp/nginx -> /bin/sh pair should show
   child.ppid == parent.pid and child.parent_comm == "nginx".
 
-  Not validated live: tried 2026-09-18 in WSL2 (kernel 6.6.114-microsoft-standard-WSL2)
-  and got zero alerts, matching the "regressed" case above — but every single captured
-  event in that run showed ppid=0, including unrelated background processes, so this
-  looks like a WSL2-specific PROC_LINEAGE defect rather than a real #53 regression.
-  WSL2 isn't a row in lab/MATRIX.md. min_count above is reasoned from
-  check_web_server_spawns_shell's source (crates/rules/src/state.rs) and
-  ITERATIONS=3, not empirically confirmed — validate on a real kernel (Hyper-V lab)
-  before trusting this scenario's result on WSL2.
+  Confirmed on real hardware 2026-09-09/10 (Hyper-V lab, Ubuntu 22.04/5.15.0-91 and
+  Debian 12/6.1.0-17, PR #155): 3/3 T1059 alerts on both kernels, ppid always correct,
+  never 0. min_count: 3 above matches that result.
+
+  Tried again 2026-09-18 in WSL2 (kernel 6.6.114-microsoft-standard-WSL2): zero alerts.
+  Every single captured event in that run showed ppid=0, including unrelated
+  background processes — a WSL2-specific PROC_LINEAGE defect, not a #53 regression
+  (already ruled out by the real-hardware run above). WSL2 isn't a row in
+  lab/MATRIX.md; don't use it to sanity-check this scenario.
