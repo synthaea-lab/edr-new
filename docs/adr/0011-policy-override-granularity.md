@@ -1,4 +1,4 @@
-# ADR-0011: Policy override granularity — map-level sensors and safety-critical sub-objects
+# ADR-0011: Policy override granularity — map-level units and safety-critical sub-objects (amends ADR-0010)
 
 - **Status**: proposed
 - **Date**: 2026-09-18
@@ -32,6 +32,23 @@ two coupled questions about the override layering rule the ADR defined:
 
 These two questions share a resolution: pin down the exact granularity of
 override merge, then apply `safety-critical` at that same granularity.
+
+## Override granularity summary
+
+Three granularities of override apply, depending on how the target field is
+modelled in the payload schema. This table is the dispatch reference — a
+given target is characterised by which rows apply to it, not by belonging to
+exactly one row (`compliance_mode` for instance is both a flat section and
+safety-critical).
+
+| Granularity                                    | Merge rule                                                                        | Example                                                                                     |
+|------------------------------------------------|-----------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------|
+| **Flat section** (non-map)                     | Section as a whole is either from baseline or from override; omitted → keep baseline. | `thresholds`, `compliance_mode`, `experimental`                                             |
+| **Map-typed section** (map key → sub-document) | Merged at the map-key level: per-entry override unit; entries not present in override are kept from baseline. | `sensors.<capteur>`; (later) `rules.<rule_id>`                                              |
+| **Safety-critical sub-object**                 | Must be **complete** when it appears in an override; partial override is rejected at parse time and the policy is not applied. | `compliance_mode` (the whole flat section), `sensors.<capteur>.redaction` (one sub-doc per sensor) |
+
+Anything in the payload that a future ADR-0010 amendment adds is classified
+against this table before it lands, so the intent is not left implicit again.
 
 ## Decision
 
@@ -76,6 +93,19 @@ Safety-critical sub-objects in v1:
 Any override touching one of these must replace the sub-object entirely, not a
 subset of its fields.
 
+### 3. Safety-critical declaration mechanism for v1: hardcoded path list
+
+For v1, safety-critical sub-objects are declared as a **hardcoded list in
+the parser** (`SAFETY_CRITICAL_PATHS = ["compliance_mode",
+"sensors.*.redaction"]`, exact form TBD in the implementation PR). This
+matches the "open-ended payload sections that grow additively" principle
+established by ADR-0010: the schema itself stays declarative, the parser
+carries the safety-critical semantics as code the reviewer can read in one
+place. A schema-level `safety_critical: true` attribute or a runtime registry
+earns its own ADR when a future section actually needs safety-critical
+semantics *and* the hardcoded list becomes a real obstacle (an operator or
+integrator pain, not a speculative one).
+
 ## Consequences
 
 - The "override per sensor" ergonomics ADR-0010 aimed at is preserved — an
@@ -86,35 +116,34 @@ subset of its fields.
   at parse time, not at review time. A reviewer no longer has to reason about
   "did the operator remember every field of `sensors.windows_eventlog.redaction`?"
   — the parser does it.
-- The parser gains one small responsibility: a list of safety-critical
-  sub-object paths (or an equivalent per-field schema attribute), and a
-  completeness check applied when an override contains one of them. The exact
-  mechanism (a `safety_critical: true` schema flag versus a hardcoded
-  `SAFETY_CRITICAL_PATHS = ["compliance_mode", "sensors.*.redaction"]` in the
-  parser) is an implementation detail deferred to the PR that lands the
-  section reader.
+- The parser gains one small responsibility: the hardcoded
+  `SAFETY_CRITICAL_PATHS` list (Decision 3) and a completeness check applied
+  when an override contains one of those paths. Bounded scope, one place to
+  audit.
 - ADR-0010's spec of `Policy = baseline ⊕ overrides` is preserved; this ADR
-  only pins down what ⊕ means at each level, without changing its intent.
+  only pins down what ⊕ means at each level and how safety-critical is
+  declared, without changing ADR-0010's intent.
 
 ## Deferred
 
 - **Which additional sub-objects gain safety-critical status.** Likely
   candidates as their sections land: `response.action_allowlist` (M6 —
   automated response actions), `models` (M11 — model activation), any future
-  `sensors.<sensor>.exfiltration_taps` sub-doc. Added case by case rather than
-  speculatively.
-- **Mechanism** (schema flag vs. hardcoded path list) — implementation choice
-  in the follow-up PR that wires the section reader; the ADR only fixes what
-  the constraint means, not how the parser expresses it.
+  `sensors.<sensor>.exfiltration_taps` sub-doc. Added to the hardcoded list
+  case by case as the sections themselves land, not speculatively.
+- **Migration from hardcoded list to schema-declared attribute.** Left to a
+  future ADR triggered by real operator or integrator pain, not by aesthetics.
 - **Deeper-nested maps** (e.g. a future `rules.<rule_id>` map with per-rule
-  sub-docs) reuse Decision 1 by recursion at their map level; if a
-  qualitatively new schema shape emerges, revisit here.
+  sub-docs, or a per-sensor `rules` submap) reuse Decision 1 by recursion at
+  their map level; if a qualitatively new schema shape emerges, revisit here.
 
 ## References
 
 - ADR-0010 — the ADR this one precises (PR #225, merged 2026-09-18).
 - Discussion on Discord 2026-09-18 (@old-dov, @Sollykhan) — the review that
-  surfaced both questions.
+  surfaced both questions and the request to make the granularity dispatch
+  explicit as a table, and to trancher the declaration mechanism (hardcoded
+  vs. extensible) in the ADR rather than leave it in Deferred.
 - Issue #178 — Hugo's original PII-surface finding, the concrete regression
   vector this ADR closes for `sensors.*.redaction`.
 - Issue #23 — "Build policy: shared policy model" (parent issue of ADR-0010
