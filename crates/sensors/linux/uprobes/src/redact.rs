@@ -72,6 +72,14 @@ pub fn redact_tls_data(mut data: Vec<u8>) -> Vec<u8> {
 /// quoting back, so an unpaired quote match (e.g. matching a stray trailing `'` that
 /// wasn't actually the opening one) has no observable effect beyond this being
 /// best-effort redaction, not a parser.
+///
+/// The `-p` pattern additionally anchors on "not preceded by another `-`"
+/// (`(^|[^-])` consumed into the match and echoed back via `$1`, since this engine
+/// has no lookbehind): `--password` contains the literal substring `-p`
+/// (second dash + "p"), so an unanchored `-p` pattern matches *inside* the
+/// `--password=[REDACTED]` this list's own earlier entry just produced — greedily
+/// consuming through the `=` and brackets — and clobbers it into `--p[REDACTED]`.
+/// Order matters here: this only bites because `--password` runs first.
 const READLINE_PATTERNS: &[(&str, &str)] = &[
     // "export FOO=bar", "export FOO='bar'", "export FOO=\"bar\""
     (
@@ -83,8 +91,11 @@ const READLINE_PATTERNS: &[(&str, &str)] = &[
         r#"(?i)--password[=\s]+(['"]?)([^'"\s]+)(['"]?)"#,
         "--password=[REDACTED]",
     ),
-    // "mysql -pfoo", "mysql -p foo", "mysql -p'foo'"
-    (r#"(?i)-p\s*(['"]?)([^'"\s]+)(['"]?)"#, "-p[REDACTED]"),
+    // "mysql -pfoo", "mysql -p foo", "mysql -p'foo'" — but not "--password"
+    (
+        r#"(?i)(^|[^-])-p\s*(['"]?)([^'"\s]+)(['"]?)"#,
+        "$1-p[REDACTED]",
+    ),
     // "aws_secret_access_key=...", "AWS_SECRET_ACCESS_KEY=..."
     (
         r"(?i)(aws_secret_access_key|aws_session_token)=([^\s]+)",
