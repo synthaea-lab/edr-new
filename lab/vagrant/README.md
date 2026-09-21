@@ -98,3 +98,39 @@ useful once one Windows machine has built and the others just need to run —
 ```powershell
 .\agent-install.ps1 -SourceDir target\release -InstallService
 ```
+
+### Operator notes (real-machine validation, #223)
+
+A few things that only show up running this on an actual Windows box, not on
+static review — found end to end on a vanilla Windows 11 VM:
+
+- **Execution policy.** Windows 11 defaults to `Restricted`, so
+  `windows-toolchain.ps1` refuses to run at all (`UnauthorizedAccess:
+  PSSecurityException`). Either invoke it with the policy bypassed for that
+  one process:
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File windows-toolchain.ps1
+  ```
+  or, in an already-open session:
+  ```powershell
+  Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+  ```
+- **Capturing the output to a log file** — don't pipe through `Tee-Object`
+  (`.\windows-toolchain.ps1 *>&1 | Tee-Object -FilePath log.txt`). The
+  script's `$ErrorActionPreference = 'Stop'` treats `rustup-init`'s routine
+  stderr warning (`installing msvc toolchain without its prerequisites`) as
+  fatal and aborts the run - not a real failure, just how PowerShell handles
+  stderr under redirection. `Start-Transcript` doesn't redirect stderr, so
+  it captures the same output without that side effect:
+  ```powershell
+  Start-Transcript -Path log.txt
+  .\windows-toolchain.ps1
+  Stop-Transcript
+  ```
+- **A second Rust toolchain gets installed on the first build.** This script
+  always installs `stable-msvc`, but the repo pins a specific version at the
+  root via `rust-toolchain.toml`. The first `cargo build` after provisioning
+  makes rustup silently fetch and install that pinned version too (~150MB,
+  ~2 extra minutes) - expected rustup behavior given the two don't
+  necessarily match, not a bug in this script, but worth knowing before it
+  looks like the build is doing something unexpected.
