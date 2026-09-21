@@ -9,13 +9,16 @@
 //! and the output sinks; `heartbeat` the progress-backed liveness signal the
 //! watchdog polls (#102); `silence` per-sensor silence detection via
 //! `tamper::heartbeat`, wired into the health beacon and a real local alert (#71);
-//! `protected` watches the agent's own on-disk footprint for a foreign writer (#71).
+//! `protected` watches the agent's own on-disk footprint for a foreign writer (#71);
+//! `kill_loudness` attributes who sent a catchable termination signal before the
+//! agent actually dies (#71).
 
 mod commands;
 mod enrich_queue;
 mod health;
 #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 mod heartbeat;
+mod kill_loudness;
 mod protected;
 #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
 mod sink;
@@ -45,6 +48,15 @@ enum Command {
         /// consumed by ML calibration and lab assertions).
         #[arg(long, default_value = "events.jsonl")]
         events: std::path::PathBuf,
+        /// Enables automated process termination on a high-confidence correlated
+        /// verdict (issue #25). Off by default: observe-only — logs what would have
+        /// been killed without acting. See `policy::ResponsePolicy`.
+        #[arg(long)]
+        enable_kill: bool,
+        /// Enables automated quarantine of a payload a scan confirms malicious
+        /// (issue #25). Off by default: observe-only. See `policy::ResponsePolicy`.
+        #[arg(long)]
+        enable_quarantine: bool,
     },
     /// Captures a baseline of healthy activity to train the ML models: records the
     /// command lines of exec events that trigger no deterministic rule, as
@@ -68,7 +80,12 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Status => commands::cmd_status(),
-        Command::Run { alerts, events } => commands::cmd_run(&alerts, &events),
+        Command::Run {
+            alerts,
+            events,
+            enable_kill,
+            enable_quarantine,
+        } => commands::cmd_run(&alerts, &events, enable_kill, enable_quarantine),
         Command::CaptureBaseline { output } => commands::cmd_capture_baseline(&output),
         Command::CaptureEvents { output } => commands::cmd_capture_events(&output),
     }
