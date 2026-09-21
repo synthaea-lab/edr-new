@@ -22,7 +22,7 @@ regenerate any more.
 | debian-13 | Debian | 6.12 | newest kernel drift |
 | fedora-41 | RPM | 6.11 | RPM family; replay-only where LLVM too old for eBPF builds |
 | rocky-9 | RPM (RHEL) | 5.14 | enterprise RHEL-clone baseline; replay-only |
-| arch (rolling) | pacman | 6.6 (validated 2026-09-15; moves) | rolling kernel/LLVM drift target for #53 CO-RE (#124) |
+| arch (rolling) | pacman | 7.2 (validated 2026-09-21; moves) | rolling kernel/LLVM drift target for #53 CO-RE (#124) — beacon.sh end-to-end confirmed (T1071/T1041 fired), previously blocked on #199 |
 | alpine-3.24 | musl/BusyBox | 6.18 (virt) | musl libc + BusyBox userland, not glibc (#123); `vagrant/` box (`generic/alpine319`) tracks 3.19/6.6, the newest Vagrant Cloud publishes with a virtualbox/amd64 provider — not kernel-version-sensitive for this row's purpose |
 | windows-11 / windows-10 | Windows client | — | ETW sensor validation |
 | windows-server | Windows server | — | ETW on server SKUs |
