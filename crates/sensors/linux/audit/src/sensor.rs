@@ -38,23 +38,33 @@ impl AuditSensor {
                     let mut guard = guard.map_err(|e| format!("poll: {e}"))?;
                     let socket = guard.get_inner_mut();
 
-                    let n = socket.recv(&mut buf).map_err(|e| format!("recv: {e}"))?;
+                    match socket.recv(&mut buf) {
+                        Ok(n) => {
+                            let record = parse::parse_audit_message(&buf[..n])
+                                .map_err(|e| format!("parse: {e}"))?;
 
-                    let record = parse::parse_audit_message(&buf[..n])
-                        .map_err(|e| format!("parse: {e}"))?;
+                            if let Some(event) = classify::classify(&record) {
+                                let timestamp_ns = audit_ts_to_epoch_ns(
+                                    record.timestamp_sec,
+                                    record.timestamp_ms,
+                                );
 
-                    if let Some(event) = classify::classify(&record) {
-                        let timestamp_ns = audit_ts_to_epoch_ns(
-                            record.timestamp_sec,
-                            record.timestamp_ms,
-                        );
+                                let schema_event = match event {
+                                    crate::AuditEvent::Exec { .. } => normalize::exec_event(&event, timestamp_ns),
+                                    crate::AuditEvent::Connect { .. } => normalize::connect_event(&event, timestamp_ns),
+                                };
 
-                        let schema_event = match event {
-                            crate::AuditEvent::Exec { .. } => normalize::exec_event(&event, timestamp_ns),
-                            crate::AuditEvent::Connect { .. } => normalize::connect_event(&event, timestamp_ns),
-                        };
-
-                        sink.on_event(schema_event);
+                                sink.on_event(schema_event);
+                            }
+                        }
+                        Err(crate::AuditError::Netlink(errno))
+                            if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK =>
+                        {
+                            // Spurious wakeup - no data available. Clear ready and continue.
+                        }
+                        Err(e) => {
+                            return Err(format!("recv: {e}").into());
+                        }
                     }
 
                     guard.clear_ready();

@@ -6,6 +6,7 @@ use std::os::unix::io::{AsRawFd, RawFd};
 
 const AF_NETLINK: i32 = 16;
 const NETLINK_AUDIT: i32 = 9;
+const AUDIT_NLGRP_READLOG: u32 = 1;  // Multicast group for receiving audit logs
 
 #[derive(Debug, thiserror::Error)]
 pub enum AuditError {
@@ -20,7 +21,7 @@ pub struct AuditSocket {
 }
 
 impl AuditSocket {
-    /// Opens `NETLINK_AUDIT` socket, sets filter for `EXECVE`/`SOCKADDR`.
+    /// Opens `NETLINK_AUDIT` socket and subscribes to the READLOG multicast group.
     /// Requires `CAP_AUDIT_READ` (or root).
     ///
     /// # Errors
@@ -48,7 +49,7 @@ impl AuditSocket {
         let mut addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         addr.nl_family = AF_NETLINK as u16;
         addr.nl_pid = 0;  // Let kernel assign
-        addr.nl_groups = 0;  // No multicast groups
+        addr.nl_groups = 1 << (AUDIT_NLGRP_READLOG - 1);  // Subscribe to audit log multicast group
 
         // SAFETY: bind(2) on owned fd, passing pointer to local sockaddr_nl
         // whose size matches addrlen argument.
@@ -71,7 +72,9 @@ impl AuditSocket {
         Ok(Self { fd })
     }
 
-    /// Blocking read of one audit message.
+    /// Non-blocking read of one audit message.
+    ///
+    /// Returns `EAGAIN`/`EWOULDBLOCK` errno when no message is available.
     ///
     /// # Errors
     ///
@@ -79,12 +82,13 @@ impl AuditSocket {
     pub fn recv(&mut self, buf: &mut [u8]) -> Result<usize, AuditError> {
         // SAFETY: recv(2) on owned fd, writing into caller-provided buffer.
         // The kernel writes at most buf.len() bytes.
+        // MSG_DONTWAIT prevents blocking on spurious epoll wakeups (issue #247).
         let n = unsafe {
             libc::recv(
                 self.fd,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
-                0,
+                libc::MSG_DONTWAIT,
             )
         };
 

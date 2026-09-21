@@ -123,19 +123,22 @@ fn has_bpf_capabilities() -> bool {
 }
 
 /// Selects sensor: eBPF if available, audit fallback otherwise.
-fn select_sensor() -> Box<dyn schema::sensor::Sensor> {
+/// Returns (sensor, `sensor_name`) for correct telemetry.
+fn select_sensor() -> (Box<dyn schema::sensor::Sensor>, &'static str) {
     if can_use_ebpf() {
         log::info!("Using eBPF sensor (primary)");
-        return Box::new(sensor_linux::LinuxSensor::new());
+        return (Box::new(sensor_linux::LinuxSensor::new()), "linux-ebpf");
     }
 
     log::warn!("eBPF unavailable — using audit fallback (reduced fidelity)");
-    Box::new(sensor_linux_audit::AuditSensor::new())
+    (Box::new(sensor_linux_audit::AuditSensor::new()), "linux-audit")
 }
 
 /// Checks if eBPF sensor can be loaded (privileges, BTF, verifier).
+/// Tests both object loading and program loading to match `cmd_status()` behavior.
 fn can_use_ebpf() -> bool {
     // Check 1: Privileges
+    // SAFETY: geteuid takes no arguments and cannot fail.
     let uid = unsafe { libc::geteuid() };
     if uid != 0 && !has_bpf_capabilities() {
         log::debug!("eBPF preflight: no privileges");
@@ -148,14 +151,25 @@ fn can_use_ebpf() -> bool {
         return false;
     }
 
-    // Check 3: Can load eBPF (quick test)
-    match sensor_linux::load_ebpf() {
-        Ok(_) => true,
+    // Check 3: Can load eBPF object
+    let mut ebpf = match sensor_linux::load_ebpf() {
+        Ok(ebpf) => ebpf,
         Err(e) => {
-            log::debug!("eBPF preflight: {e}");
-            false
+            log::debug!("eBPF preflight: failed to load object: {e}");
+            return false;
         }
+    };
+
+    // Check 4: Can load programs (verifier acceptance)
+    // Test at least one program to catch verifier rejections (strict lockdown/LSM)
+    if let Some((program_name, _category, _name)) = sensor_linux::TRACEPOINTS.first()
+        && let Err(e) = sensor_linux::load_program(&mut ebpf, program_name)
+    {
+        log::debug!("eBPF preflight: program {program_name} rejected: {e}");
+        return false;
     }
+
+    true
 }
 
 /// Linux: eBPF capture + detection via `LinuxSensor` (Ctrl-C handled by the sensor),
@@ -173,9 +187,13 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
         events.display()
     );
 
+    // Select the primary sensor (eBPF or audit fallback) before creating heartbeats
+    // so telemetry reports the correct sensor type.
+    let (mut sensor, sensor_name) = select_sensor();
+
     // Sensor-silence detection (#71): one heartbeat per sensor, pulsed as each
     // processes events/polls, watched by a dedicated thread — see `silence`'s doc.
-    let ebpf_heartbeat = SensorHeartbeat::new("linux-ebpf");
+    let primary_heartbeat = SensorHeartbeat::new(sensor_name);
     let netlink_heartbeat = SensorHeartbeat::new("linux-netlink");
     let journal_heartbeat = SensorHeartbeat::new("linux-journal");
     let silence_monitor = Arc::new(Mutex::new(SilenceMonitor::new()));
@@ -183,7 +201,7 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
         let now_ns = crate::time::now_ns();
         let mut mon = silence_monitor.lock().unwrap();
         mon.register(
-            ebpf_heartbeat.clone(),
+            primary_heartbeat.clone(),
             NO_CANARY_SILENCE_DEADLINE_NS,
             now_ns,
         );
@@ -239,9 +257,8 @@ pub(crate) fn cmd_run(alerts: &std::path::Path, events: &std::path::Path) -> any
     // never see one.
     let protected = crate::protected::protected_paths(alerts, events);
     let guarded = ProtectedResourceGuard::new(sink.clone(), protected, sink);
-    let mut sensor = select_sensor();
     sensor
-        .run(Box::new(PulsingSink::new(guarded, ebpf_heartbeat)))
+        .run(Box::new(PulsingSink::new(guarded, primary_heartbeat)))
         .map_err(|e| anyhow::anyhow!("sensor failed: {e}"))
     // Health beacon thread stops when the process exits (sensor.run() blocks until
     // Ctrl-C). For graceful shutdown, call health_stop.stop() before exiting.
