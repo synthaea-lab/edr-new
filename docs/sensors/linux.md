@@ -1,7 +1,10 @@
 # Linux Sensor
 
 eBPF probe design (tracepoints/kprobes), ring buffers, userspace loader, kernel version
-support matrix, and GPLv2 licensing boundary.
+support matrix, and GPLv2 licensing boundary. See
+[linux-telemetry-matrix.md](linux-telemetry-matrix.md) for the full source-by-source
+telemetry survey (hook, event, fields, MITRE, overhead, min kernel, privilege, OSS
+comparison) this file's per-issue status notes below feed into.
 
 Container coverage position: containerized workloads (Docker/containerd) share the
 host kernel, so the eBPF sensor already observes their execs/connects/file writes —
