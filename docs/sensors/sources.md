@@ -7,6 +7,10 @@ issue filed), **rejected** (deliberate, reason given).
 
 ## Linux
 
+See [linux-telemetry-matrix.md](linux-telemetry-matrix.md) for the full
+hook/event/fields/MITRE/overhead/kernel/privilege/OSS-comparison detail behind
+each row below.
+
 | Mechanism | Status | Where / why |
 | --- | --- | --- |
 | eBPF tracepoints/kprobes | used | `sensors/linux/ebpf` + `userspace` |
