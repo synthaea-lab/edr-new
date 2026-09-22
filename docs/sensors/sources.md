@@ -38,7 +38,7 @@ pending (the coverage packs #376–#381 — see
 | --- | --- | --- | --- |
 | **Process execution**<br><sub>TA0002 Execution</sub> | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
 | **File activity**<br><sub>TA0040 Impact · TA0005 Evasion</sub> | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
-| **Network — flows & listeners**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · 📋 #358 listen |
+| **Network — flows & listeners**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ libproc listen |
 | **Mounts & volumes**<br><sub>staging · TA0005 Evasion</sub> | 📋 #362 | 📋 #136 raw-volume | ✅ ES |
 | **DNS**<br><sub>TA0011 C2</sub> | 📋 #267 | ✅ ETW | 🔨 NE |
 | **Lateral-movement services**<br><sub>TA0008</sub> | 🟡* SSH-out content | ✅ SMB + WMI · 📋 #284 BITS | 🟡* SSH-out content |
@@ -183,7 +183,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **ES** (`EndpointSecurity`) | one entitled client, NOTIFY-only subscriptions flattened through a C shim compiled against the SDK's own headers | Root + ES entitlement + Full Disk Access. **Live-verified**: amfid SIGKILLs an ad-hoc restricted entitlement at exec (error -424), before TCC — Apple grant or SIP+AMFI-relaxed lab only. Self-muted against feedback; per-family OS-version guards. AUTH (blocking) is M6 |
 | **unified log** | `log stream --style ndjson` under a strict predicate; three volume gates (daemon predicate → exact-message classifier → counted sliding-window shed) | Admin scope. Formats undocumented by Apple — pinned by verbatim live-capture tests, the OS-update tripwire. Live-validated end to end |
 | **NE** (`NetworkExtension`) | Swift system extension (filter-data + DNS-proxy providers) → versioned NDJSON over an app-group socket to the agent | Restricted entitlements + user/MDM approval (`packaging/macos`); wire skew counted, never guessed. Seam + typed scaffold on `main`; activation outstanding (#351) |
-| **libproc/sysctl** | table snapshots | Unprivileged — works before any Apple grant |
+| **libproc** | socket-table snapshots via a C shim against the SDK headers (`sensors/macos/sockets`) | Unprivileged — works before any Apple grant; root widens visibility to all users' processes |
 | **DiskArbitration / IOKit** | disk + device attach/detach notifications | Planned (`device-control`); unprivileged for notifications |
 | **inventory** | scheduled state snapshots | FDA for the TCC.db snapshot |
 
