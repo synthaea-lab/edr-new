@@ -23,7 +23,10 @@ use crate::redact;
 /// wire structs this module maps) changed shape, so the mappings below still hold.
 ///
 /// v7 (#263) added `SocketBindEvent` — not imported here either, same reasoning.
-const _: () = assert!(wire::WIRE_VERSION == 7);
+///
+/// v8 (#262 Phase 2) added `FileChmodEvent`/`FileChownEvent` — not imported here
+/// either, same reasoning.
+const _: () = assert!(wire::WIRE_VERSION == 8);
 
 /// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
 /// sensor property (reported by conformance), not a schema limit.

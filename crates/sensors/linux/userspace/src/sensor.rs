@@ -36,7 +36,9 @@ use crate::{docker::DockerContainerInfo, normalize};
 /// only — `writev`/`pwrite64`/`pwritev` are not yet attached. `sys_enter_unlink`/
 /// `sys_enter_unlinkat` and `sys_enter_rename`/`sys_enter_renameat`/
 /// `sys_enter_renameat2` are each attached in pairs/triples for the same libc-variant
-/// reason as open above.
+/// reason as open above. `sys_enter_chmod`/`sys_enter_fchmodat` and
+/// `sys_enter_chown`/`sys_enter_lchown`/`sys_enter_fchownat` (issue #262 Phase 2)
+/// follow the same pattern — the fd-only variants (`fchmod`/`fchown`) are deferred.
 pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
     ("sched_process_fork", "sched", "sched_process_fork"),
     ("sched_process_exit", "sched", "sched_process_exit"),
@@ -51,6 +53,11 @@ pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
     ("sys_enter_renameat", "syscalls", "sys_enter_renameat"),
     ("sys_enter_renameat2", "syscalls", "sys_enter_renameat2"),
     ("sys_enter_bind", "syscalls", "sys_enter_bind"),
+    ("sys_enter_chmod", "syscalls", "sys_enter_chmod"),
+    ("sys_enter_fchmodat", "syscalls", "sys_enter_fchmodat"),
+    ("sys_enter_chown", "syscalls", "sys_enter_chown"),
+    ("sys_enter_lchown", "syscalls", "sys_enter_lchown"),
+    ("sys_enter_fchownat", "syscalls", "sys_enter_fchownat"),
 ];
 
 /// `sensor_linux_wire::LineageEntry` is `repr(C)` over a `u32` and a `[u8; 16]` — every
@@ -628,9 +635,11 @@ impl LinuxSensor {
         let mut file_delete_ring_buf = ring("FILE_DELETE_EVENTS")?;
         let mut file_rename_ring_buf = ring("FILE_RENAME_EVENTS")?;
         let mut socket_bind_ring_buf = ring("SOCKET_BIND_EVENTS")?;
+        let mut file_chmod_ring_buf = ring("FILE_CHMOD_EVENTS")?;
+        let mut file_chown_ring_buf = ring("FILE_CHOWN_EVENTS")?;
 
         tracing::info!(
-            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind events"
+            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind/chmod/chown events"
         );
 
         let mut container_ids = CgroupIdCache::new();
@@ -684,6 +693,18 @@ impl LinuxSensor {
                     drain!(guard, sensor_linux_wire::SocketBindEvent, sink,
                         |e: &sensor_linux_wire::SocketBindEvent| {
                             normalize::socket_bind(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = file_chmod_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::FileChmodEvent, sink,
+                        |e: &sensor_linux_wire::FileChmodEvent| {
+                            normalize::file_chmod(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = file_chown_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::FileChownEvent, sink,
+                        |e: &sensor_linux_wire::FileChownEvent| {
+                            normalize::file_chown(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
                         });
                 }
             }
