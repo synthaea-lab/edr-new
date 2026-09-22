@@ -36,8 +36,8 @@ evaluated yet) · — not applicable
 | **File activity** | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
 | **Network** | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ ES mount · 📋 #358 listen |
 | **DNS** | 📋 #267 | ✅ ETW | 🔨 NE |
-| **Encrypted traffic** | ✅ uprobes · 📋 JA4 #86 | ⭕ gap | 📋 #360 |
-| **Scripts & shells** | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | ⭕ gap |
+| **Encrypted traffic** | ✅ uprobes · 📋 JA4 #86 | 📋 #373 | 📋 #360 |
+| **Scripts & shells** | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | 📋 #374 (evaluate) |
 | **Memory & injection** | 📋 #265 | 📋 driver #137 | 📋 #355 |
 | **Identity & privilege** | ✅ journald · 📋 #266 | ✅ WEL · 📋 #364 #285 | ✅ ES + log · 📋 #356 |
 | **Persistence & autostart** | ✅ journald + rules | ✅ WEL + ETW | ✅ ES |
@@ -45,7 +45,7 @@ evaluated yet) · — not applicable
 | **Tamper & anti-forensics** | 📋 #264 #362 | 📋 driver #136 | ✅ ES · 📋 #357 |
 | **Download provenance** | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
 | **Devices** | 📋 #84 | 📋 #84 | 📋 device-control |
-| **Containers** | ✅ /proc | — | — |
+| **Containers** | ✅ /proc | 📋 #371 silos | 📋 #372 host-side |
 | **Host state & inventory** | 📋 #87 | ✅ WMI · 📋 #286 | 📋 #359 |
 
 ## Linux
@@ -131,7 +131,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Network** | ETW · SMBClient | SMB connections established (EID 30704; failures dropped) | ✅ used | T1021.002 | #97 |
 | **Network** | driver · WFP | flows + inline block | 📋 planned | response primitive | #138 |
 | **DNS** | ETW · DNS-Client | query + answer + status joined to the process (EID 3008; 3006 dropped as noise) | ✅ used | T1071.004, IOC join | #21 |
-| **Encrypted traffic** | — | no mechanism evaluated yet — schannel has no plaintext-tap analog; JA4-style fingerprinting would ride the driver tier | ⭕ gap | | likely #138/#39 |
+| **Encrypted traffic** | ETW + driver · WFP | TLS handshake metadata (evaluate Schannel providers); JA4 + SNI via #138's callout for cross-platform fingerprint parity — plaintext has no supported analog, stated honestly | 📋 planned | T1071 fingerprints | #373 |
 | **Scripts & runtimes** | ETW · PowerShell | script blocks (EID 4104) **post-decode** — `-EncodedCommand` arrives plain, fragments reassembled | ✅ used | T1059.001, T1027 | #21 |
 | **Scripts & runtimes** | ETW · AMSI | script/VBS/JS content at the scan interface | 📋 planned | T1059, T1027 | #282 |
 | **Scripts & runtimes** | ETW · DotNETRuntime | **dynamic (in-memory) assembly loads only** (EID 154, `flags & 0x2`) — file-backed dropped at the sensor | ✅ used | T1620, T1055 | #97 |
@@ -147,6 +147,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Lateral-movement services** | ETW · BITS-Client | background transfer jobs | 📋 planned | T1197 | #284 |
 | **Tamper & anti-forensics** | driver · minifilter | timestomping (SetInformation), ADS manipulation, raw-volume access | 📋 planned | T1070.006, T1564.004 | #136 |
 | **Download provenance** | ETW · Kernel-File | `Zone.Identifier` ADS (mark-of-the-web) → v21 `FileQuarantine` (`HostUrl`/`ReferrerUrl` read-back); minifilter supersedes | 📋 planned | T1553.005 | #365 |
+| **Containers** | Win32 · silo query | server-silo attribution on process-isolated Windows containers → `EventMeta::container` (Hyper-V/WSL2 = agent-inside, documented) | 📋 planned | container context for rules | #371 |
 | **Devices** | device-control | Windows collectors land with the cross-platform crate | 📋 planned | T1091 | #84 |
 | **Host state** | Win32 · WMI/CIM | point-in-time inventory; Sysmon-channel opt-in is an ADR-first decision | ✅ / 📋 | pre-existing persistence | collectors; #286 |
 
@@ -186,7 +187,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Network** | ES · mount | mount/unmount (DMG delivery, USB staging) → v21 `Mount` | ✅ used | staging, evidence destruction | #96 |
 | **DNS** | NE · DNS-proxy | proxied query/response with process attribution → `DnsQuery` (RCODE in `status`) | 🔨 built | T1071.004, domain↔process join | #33/#351 |
 | **Encrypted traffic** | NE · filter-data | TLS ClientHello peek → SNI + JA4 (Linux #86 parity) | 📋 planned | C2 fingerprints | #360 |
-| **Scripts & shells** | — | no macOS analog taken yet — interactive-shell visibility would be the Linux readline uprobe's sibling | ⭕ gap | | matrix candidate |
+| **Scripts & shells** | evaluation | interactive-shell parity with Linux #90: survey supported mechanisms, decide, record used-or-rejected in this inventory | 📋 planned | T1059 | #374 |
 | **Memory & injection** | ES · widening | task-port acquisition, ptrace, remote thread creation, CS invalidation, suspend/resume, RWX mprotect, pty — the coverage-matrix promise #32/#96 only partially landed | 📋 planned | T1055, T1562 | #355 |
 | **Identity & privilege** | ES · sessions | SSH/console/loginwindow logins → `Auth` (13+) | ✅ used | T1078 | #96 |
 | **Identity & privilege** | unified log · sudo | sudo outcomes → `Auth`; ES-native su/sudo supersedes on 14+ | ✅ / 📋 | T1548.003 | #95; #356 |
@@ -198,6 +199,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Tamper & anti-forensics** | ES · widening | kext loads, sensitive IOKit user-client opens | 📋 planned | T1547.006, keylogger preludes | #357 |
 | **Tamper & anti-forensics** | ES · XPC | XPC connects (14+) — rules match sensitive service names, never per-event | ✅ used | agent-impersonation surface | #96 |
 | **Download provenance** | ES · quarantine | quarantine xattr + `kMDItemWhereFroms` read-back → v21 `FileQuarantine` (agent, origin + referrer URLs) — the network→file link | ✅ used | provenance | #96 |
+| **Containers** | inventory + ES/NE | runtime/VM inventory (Docker Desktop, OrbStack, Apple Containerization) + tagging of VM-manager processes/flows the sensors already see; in-VM Linux workloads = the Linux agent's job, documented | 📋 planned | unmanaged-workload signal | #372 |
 | **Devices** | DiskArbitration/IOKit | disk/volume + device attach/detach | 📋 planned | T1091, T1052 | `device-control` |
 | **Host state** | inventory | pre-existing launch items, kexts/system extensions, profiles, the standing TCC-grant map, browser artifacts | 📋 planned | persistence that predates the agent | #359 |
 
