@@ -129,6 +129,14 @@ lab option, not assumed), and tccd redacts the requesting client identity on
 the parsed records, so `TccDecisionEvent::client` is `None` today. Gatekeeper
 events carry `team_id`/`signing_id` as the join keys toward their exec event.
 
+Gatekeeper coverage nuance (observed live, macOS 26, 2026-09-22): syspolicyd
+only writes `GK evaluateScanResult` for **Mach-O/bundle** scans — assessing a
+quarantined *shell script* (e.g. via `spctl --assess`) logs `GK performScan`
+alone, so script-only assessments produce no verdict event. Executing a
+quarantined Mach-O produced the full verdict, ad-hoc `signing_id` included.
+Widening to `performScan` would add a scan-started signal without a verdict —
+deliberately not done until a rule needs it.
+
 The message formats are undocumented; the crate's unit tests pin verbatim
 live captures and are the tripwire for an OS release changing one.
 
