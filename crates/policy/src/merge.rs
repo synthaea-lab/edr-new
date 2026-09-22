@@ -112,13 +112,40 @@ fn apply_payload(baseline: &PolicyPayload, overrides: &PolicyPayload) -> PolicyP
 /// Per-sensor merge. Each `Option<SpecificSensorPolicy>` field is one
 /// map key at the JSON level; a `Some` in overrides replaces the same
 /// key in baseline, a `None` keeps baseline's value.
+///
+/// `redaction` is the one field inside `windows_eventlog` that does NOT
+/// follow whole-object replace, even though the rest of the sub-document
+/// does. A whole-object replace would let an override that only means to
+/// touch e.g. `service_installs_enabled` silently reset `redaction` to
+/// `None` just by not mentioning it — `redaction: Option<RedactionPolicy>`
+/// is `#[serde(default)]`, so an override JSON that omits the field
+/// entirely parses fine. That is exactly the #178 regression ADR-0011
+/// exists to close ("operator overrides `sensors.windows_eventlog` and
+/// forgets `redaction`, silently turning PII scrub off"): the parse-time
+/// safety-critical check only rejects a *present-but-incomplete*
+/// `redaction`, not an *absent* one, so without this carve-out the
+/// regression survives merge even though it can no longer survive parse.
+/// So: override omits `redaction` → inherit baseline's. Override supplies
+/// a complete `redaction` → it wins (safety-critical completeness is
+/// already guaranteed at parse time). An operator who wants to explicitly
+/// turn redaction off sends `"redaction": {"pii_scrub_enabled": false}` —
+/// a complete object, not an omission — which is unambiguously distinct
+/// from "didn't mention it".
 fn apply_sensors(baseline: &SensorSection, overrides: &SensorSection) -> SensorSection {
-    SensorSection {
-        windows_eventlog: overrides
-            .windows_eventlog
-            .clone()
-            .or_else(|| baseline.windows_eventlog.clone()),
-    }
+    let windows_eventlog = match &overrides.windows_eventlog {
+        None => baseline.windows_eventlog.clone(),
+        Some(ov) => {
+            let mut merged = ov.clone();
+            if merged.redaction.is_none() {
+                merged.redaction = baseline
+                    .windows_eventlog
+                    .as_ref()
+                    .and_then(|base| base.redaction.clone());
+            }
+            Some(merged)
+        }
+    };
+    SensorSection { windows_eventlog }
 }
 
 fn merge_experimental(
@@ -268,6 +295,65 @@ mod tests {
             Some(&serde_json::json!("override_value"))
         );
         assert_eq!(exp.get("only_in_override"), Some(&serde_json::json!(true)));
+    }
+
+    #[test]
+    fn windows_eventlog_override_omitting_redaction_inherits_baseline_redaction() {
+        // The actual #178 regression this ADR exists to close: an operator
+        // overrides windows_eventlog to change an unrelated toggle and
+        // simply doesn't think about redaction. Omitting the field (not
+        // sending a partial object — the parse-time check already rejects
+        // that) must NOT silently turn PII scrub off.
+        let base = baseline(); // redaction: pii_scrub_enabled: false
+        let mut base_with_scrub_on = base.clone();
+        base_with_scrub_on
+            .payload
+            .sensors
+            .windows_eventlog
+            .as_mut()
+            .unwrap()
+            .redaction = Some(RedactionPolicy {
+            pii_scrub_enabled: true,
+        });
+
+        let mut ov = empty_overrides(2);
+        ov.payload.sensors.windows_eventlog = Some(WindowsEventlogSensorPolicy {
+            service_installs_enabled: false, // the only thing this override means to change
+            scheduled_tasks_enabled: true,
+            account_creations_enabled: true,
+            logon_events_enabled: true,
+            redaction: None, // not mentioned — must not reset baseline's
+        });
+
+        let merged = apply_overrides(&base_with_scrub_on, &ov);
+        let we = merged.payload.sensors.windows_eventlog.unwrap();
+        assert!(!we.service_installs_enabled, "the override's own change applies");
+        assert!(
+            we.redaction.unwrap().pii_scrub_enabled,
+            "redaction must be inherited from baseline, not silently reset to None"
+        );
+    }
+
+    #[test]
+    fn windows_eventlog_override_can_still_explicitly_change_redaction() {
+        // The other half: an override that DOES want to change redaction
+        // (by supplying a complete RedactionPolicy) still wins, same as
+        // before this fix.
+        let base = baseline(); // redaction: pii_scrub_enabled: false
+        let mut ov = empty_overrides(2);
+        ov.payload.sensors.windows_eventlog = Some(WindowsEventlogSensorPolicy {
+            service_installs_enabled: true,
+            scheduled_tasks_enabled: true,
+            account_creations_enabled: true,
+            logon_events_enabled: true,
+            redaction: Some(RedactionPolicy {
+                pii_scrub_enabled: true,
+            }),
+        });
+
+        let merged = apply_overrides(&base, &ov);
+        let we = merged.payload.sensors.windows_eventlog.unwrap();
+        assert!(we.redaction.unwrap().pii_scrub_enabled);
     }
 
     #[test]
