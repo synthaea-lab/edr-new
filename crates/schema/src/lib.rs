@@ -81,7 +81,11 @@ pub mod time;
 ///
 /// Bumped 15 → 16 for [`Event::SocketBind`] (#263): one new enum variant for
 /// discrete, real-time `bind(2)` telemetry on Linux. Same reasoning as v13-v15.
-pub const SCHEMA_VERSION: u32 = 16;
+///
+/// Bumped 16 → 17 for [`Event::SocketListen`] (#263 Phase 2): one new enum variant
+/// for discrete, real-time `listen(2)` telemetry on Linux. Same reasoning as
+/// v13-v16.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -400,13 +404,35 @@ pub struct FileRenameEvent {
 /// Distinct from [`ListenPortEvent`], which is a periodic poll snapshot from
 /// `sensor-linux-netlink`: this fires once, at the `bind(2)` call itself, and does
 /// NOT imply `listen(2)` followed — a UDP socket, or a TCP socket bound but never
-/// listened, binds too. `listen(2)`/`accept(2)` are deliberately not captured yet
-/// (see `sensor-linux-wire::SocketBindEvent`'s doc for why).
+/// listened, binds too. See [`SocketListenEvent`] for the `listen(2)` counterpart;
+/// `accept(2)`/`accept4(2)` are still deliberately not captured (see
+/// `sensor-linux-wire::SocketBindEvent`'s doc for why).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SocketBindEvent {
     pub meta: EventMeta,
     pub local_addr: core::net::IpAddr,
     pub local_port: u16,
+}
+
+/// Socket listen (issue #263 Phase 2): `listen(2)` — a discrete, real-time trace of
+/// a process transitioning a bound socket into the listening state
+/// (backdoor/reverse-shell listener detection, same rationale as
+/// [`SocketBindEvent`]).
+///
+/// `listen(2)`'s own arguments carry no address, only `fd`+`backlog` — the sensor
+/// correlates this event's `(pid, fd)` against a prior `bind(2)` it observed.
+/// `local_addr`/`local_port` are `None` when no matching `bind()` was seen (the
+/// probe attached after it happened, or the caller relied on the kernel's implicit
+/// ephemeral-port bind at `listen()` time) rather than reporting a wrong or zeroed
+/// address as if it were real.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketListenEvent {
+    pub meta: EventMeta,
+    pub local_addr: Option<core::net::IpAddr>,
+    pub local_port: Option<u16>,
+    /// The caller's requested backlog — a small value (e.g. 1) on an otherwise
+    /// unremarkable listener can itself be a signal.
+    pub backlog: u32,
 }
 
 /// DNS resolution — the query name and answer, joined to the resolving process.
@@ -857,6 +883,7 @@ pub enum Event {
     FileDelete(FileDeleteEvent),
     FileRename(FileRenameEvent),
     SocketBind(SocketBindEvent),
+    SocketListen(SocketListenEvent),
 }
 
 impl Event {
@@ -888,6 +915,7 @@ impl Event {
             Event::FileDelete(e) => &e.meta,
             Event::FileRename(e) => &e.meta,
             Event::SocketBind(e) => &e.meta,
+            Event::SocketListen(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.

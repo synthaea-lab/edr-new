@@ -7,7 +7,7 @@
 
 use schema::{
     ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileDeleteEvent, FileOpenEvent,
-    FileRenameEvent, FileWriteEvent, SocketBindEvent, User,
+    FileRenameEvent, FileWriteEvent, SocketBindEvent, SocketListenEvent, User,
 };
 use sensor_linux_wire as wire;
 
@@ -24,7 +24,12 @@ use sensor_linux_wire as wire;
 ///
 /// v7 (#263) added `SocketBindEvent` — new `socket_bind` mapping function below,
 /// same address-family logic as `connect`; no existing mapping changed shape.
-const _: () = assert!(wire::WIRE_VERSION == 7);
+///
+/// v8 (#263 Phase 2) added `SocketListenEvent` — new `socket_listen` mapping
+/// function below, converting the wire struct's `addr_resolved` bool + zeroed
+/// fields into `Option<IpAddr>`/`Option<u16>` on the schema side; no existing
+/// mapping changed shape.
+const _: () = assert!(wire::WIRE_VERSION == 8);
 
 /// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
 /// sensor property (reported by conformance), not a schema limit.
@@ -190,6 +195,30 @@ pub fn socket_bind(
         meta: meta(&event.meta, boot_epoch_offset_ns, container),
         local_addr: laddr,
         local_port: event.lport,
+    })
+}
+
+#[must_use]
+pub fn socket_listen(
+    event: &wire::SocketListenEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let (local_addr, local_port) = if event.addr_resolved {
+        let addr = if event.is_ipv6 {
+            std::net::IpAddr::V6(event.laddr_v6.into())
+        } else {
+            std::net::IpAddr::V4(event.laddr_v4.into())
+        };
+        (Some(addr), Some(event.lport))
+    } else {
+        (None, None)
+    };
+    Event::SocketListen(SocketListenEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        local_addr,
+        local_port,
+        backlog: event.backlog,
     })
 }
 
@@ -476,5 +505,45 @@ mod tests {
             panic!("wrong variant")
         };
         assert_eq!(e.local_addr.to_string(), "::1");
+    }
+
+    #[test]
+    fn socket_listen_resolved_carries_correlated_address() {
+        let event = wire::SocketListenEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [0, 0, 0, 0],
+            laddr_v6: [0; 16],
+            lport: 4444,
+            is_ipv6: false,
+            addr_resolved: true,
+            backlog: 1,
+        };
+        let Event::SocketListen(e) = socket_listen(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr.unwrap().to_string(), "0.0.0.0");
+        assert_eq!(e.local_port, Some(4444));
+        assert_eq!(e.backlog, 1);
+    }
+
+    #[test]
+    fn socket_listen_unresolved_carries_no_address() {
+        // Probe attached after bind(), or the kernel implicit-bound at listen()
+        // time — this sensor never saw a matching bind() for this (pid, fd).
+        let event = wire::SocketListenEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [9, 9, 9, 9], // garbage: must be ignored when unresolved
+            laddr_v6: [0; 16],
+            lport: 9999,
+            is_ipv6: false,
+            addr_resolved: false,
+            backlog: 128,
+        };
+        let Event::SocketListen(e) = socket_listen(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr, None);
+        assert_eq!(e.local_port, None);
+        assert_eq!(e.backlog, 128);
     }
 }

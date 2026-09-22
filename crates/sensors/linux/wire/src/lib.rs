@@ -44,7 +44,15 @@
 ///   `listen(2)` (no address, just `fd`+`backlog`) and `accept(2)`/`accept4(2)`
 ///   (needs a `sys_exit` probe to read the kernel-filled peer address — a new
 ///   probe shape this crate doesn't have yet) are deliberately deferred.
-pub const WIRE_VERSION: u32 = 7;
+/// - v8: `SocketListenEvent` added (issue #263 Phase 2) — `listen(2)`. `listen(2)`'s
+///   own args are just `fd`+`backlog`, no address, so the probe correlates against
+///   an in-kernel `(pid, fd) -> address` map populated by `sys_enter_bind` (internal
+///   to the ebpf crate, not part of this wire ABI). No matching `bind()` observed —
+///   probe attached after it happened, or the kernel's implicit ephemeral-port bind
+///   at `listen()` time — leaves `addr_resolved: false` and the address fields
+///   zeroed, rather than silently dropping the event. `accept(2)`/`accept4(2)`
+///   remain deferred (still need the `sys_exit` probe shape).
+pub const WIRE_VERSION: u32 = 8;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -187,6 +195,30 @@ pub struct SocketBindEvent {
     pub laddr_v6: [u8; 16],
     pub lport: u16,
     pub is_ipv6: bool,
+}
+
+/// Socket listen (`syscalls:sys_enter_listen`, issue #263 Phase 2) — a discrete,
+/// real-time trace of a process transitioning a bound socket into the listening
+/// state (backdoor/reverse-shell listener detection, same rationale as
+/// `SocketBindEvent`). See this file's `WIRE_VERSION` v8 changelog for the
+/// bind-correlation and `addr_resolved` semantics.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SocketListenEvent {
+    pub meta: EventMeta,
+    pub laddr_v4: [u8; 4],
+    pub laddr_v6: [u8; 16],
+    pub lport: u16,
+    pub is_ipv6: bool,
+    /// Whether `laddr_v4`/`laddr_v6`/`lport`/`is_ipv6` came from a real correlated
+    /// `bind(2)` observation. `false` means this sensor never saw a matching
+    /// `bind()` for this `(pid, fd)` — the address fields above are zeroed, not
+    /// meaningful.
+    pub addr_resolved: bool,
+    /// The caller's requested backlog (`listen(2)`'s second argument) — a small
+    /// value (e.g. 1) on an otherwise-unremarkable listener can itself be a signal
+    /// (a quick one-shot reverse-shell listener rarely needs a real accept queue).
+    pub backlog: u32,
 }
 
 /// TLS plaintext capture (uprobes on `SSL_read`/`SSL_write`, issue #90).
