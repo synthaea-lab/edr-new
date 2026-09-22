@@ -18,13 +18,14 @@ Expected input format: a list of JSON-Lines events, one object per event, as pro
 `unique_dport_count` sets as `connect` — see `extract_features` below. `connect_count` stays
 `connect`-only.
 
-`flags` is logged raw; the filtering on write intent (`O_WRONLY|O_RDWR|O_CREAT`) happens
-here, exactly mirroring `synthaea_correlator::TimedEvent::is_file_write` on the Rust side
-(`ml/behavior_features.py` applies the same test).
+`flags` is logged raw; the filtering on write intent (access mode `O_WRONLY`/`O_RDWR`,
+or `O_CREAT`) happens here, exactly mirroring `schema::has_write_intent` on the Rust side
+(`features/behavior.py` applies the same test).
 """
 
 # ── Rust mirror constants (POSIX flags) ───────────────────────────────────────
 
+O_ACCMODE = 0o3
 O_WRONLY = 0o1
 O_RDWR = 0o2
 O_CREAT = 0o100
@@ -42,12 +43,16 @@ FEATURE_NAMES = [
 
 
 def _is_file_write(event: dict) -> bool:
-    """Mirror of `TimedEvent::is_file_write` (Rust): a `fileopen` with at least one of the
-    `O_WRONLY` / `O_RDWR` / `O_CREAT` bits. Deliberately a bitmask test (identical to the Rust
-    and to `behavior_features.py`), not a strict `access_mode == O_WRONLY`."""
-    return event.get("type") == "fileopen" and bool(
-        int(event.get("flags", 0)) & (O_WRONLY | O_RDWR | O_CREAT)
-    )
+    """Mirror of `schema::has_write_intent` (Rust, the ONE definition): a `fileopen`
+    whose access mode is `O_WRONLY`/`O_RDWR`, or that carries `O_CREAT`. The access
+    mode is a 2-bit *field* (`O_ACCMODE`), not independent bits — the invalid `0o3`
+    combination is refused by the kernel (`EINVAL`), so it does not count as a write
+    (this replaced a drifted bitmask test that disagreed with the Rust rules engine)."""
+    if event.get("type") != "fileopen":
+        return False
+    flags = int(event.get("flags", 0))
+    access_mode = flags & O_ACCMODE
+    return access_mode in (O_WRONLY, O_RDWR) or bool(flags & O_CREAT)
 
 
 def extract_features(events: list[dict], pid: int) -> list[float]:
