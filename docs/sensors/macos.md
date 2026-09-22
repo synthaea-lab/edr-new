@@ -39,12 +39,18 @@ within the deadline; the subscription set is one array away.
 | `NOTIFY_UNLINK` | `Event::FileDelete` | |
 | `NOTIFY_MMAP` | `Event::FileOpen` (`O_RDWR`) | forwarded **only** for `PROT_WRITE` + `MAP_SHARED` (mutates the file); dyld's read-only/private mapping torrent is dropped in the shim |
 | `NOTIFY_BTM_LAUNCH_ITEM_ADD` | `Event::FileOpen` + `FLAG_PERSISTENCE_BTM_ARTIFACT` | macOS 13+; registration-time launch-item fact, the macOS sibling of Windows 7045 — see `rules::check_btm_launch_item_persistence` |
+| `NOTIFY_OPENSSH_LOGIN` / `LOGIN_LOGIN` / `LW_SESSION_LOGIN` | `Event::Auth` (ADR-0005 shared shape) | #96, macOS 13+; SSH carries the source address when it is a literal |
+| `NOTIFY_SETEXTATTR` | `Event::FileQuarantine` | #96; forwarded **only** for `com.apple.quarantine`, with the quarantine string and `kMDItemWhereFroms` URLs read back via `getxattr` at event time (best-effort: a raced read leaves them `None`, the mark itself still reports) |
+| `NOTIFY_MOUNT`/`UNMOUNT` | `Event::Mount` | #96; DMG delivery / USB staging / evidence-destroying unmounts |
+| `NOTIFY_SIGNAL` | `Event::Signal` | #96; forwarded **only** when the target is an ES client (the agent, other security tools) — the tamper subset; meta is the sender |
+| `NOTIFY_XPC_CONNECT` | `Event::XpcConnect` | #96, macOS 14+; high-volume — rules match sensitive service names, never per-event |
 
 The agent's own process is muted (`es_mute_process` on the self audit token) so
 spool/alert writes don't feed back into the pipeline.
 
-The wider ES catalog (login/LW-session/OpenSSH sessions, quarantine xattrs,
-mount, signal, XPC connect) is issue #96.
+Download provenance is the network→file link: a `FileQuarantine` event's
+`origin_url` joins the later exec of the same path on a case — the macOS
+mark-of-the-web (`docs/sensors/sources.md`, cross-platform note).
 
 ## Persistence coverage
 
