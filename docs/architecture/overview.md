@@ -115,6 +115,29 @@ supervises. Its per-platform install arms share one hardening gate
 8. **The watchdog stays dependency-free.** Sharing convenience code with the
    agent trades away the isolation that justifies its existence.
 
+## How it is verified
+
+Every layer above has a matching enforcement mechanism — the style doc's rule
+("if a rule matters and nothing enforces it, the fix is to add enforcement")
+applied to the architecture itself:
+
+- **The whole matrix in one command**: `tools/gauntlet.sh` (fmt, dependency
+  direction, clippy on host + Linux target + the Windows sensor crates, all
+  tests, cargo-deny, the strict docs build). While CI is billing-blocked
+  (#318) this is the gate, with an opt-in pre-push hook.
+- **Contracts**: golden fixtures pin every `Event` variant per
+  `SCHEMA_VERSION`; `v1_compat` pins backward reads; the ML feature vectors are
+  parity-tested Rust↔Python against shared fixtures (ADR-0002).
+- **Hostile input**: the byte parsers carry never-panic robustness suites, and
+  the kernel-socket decoders coverage-guided fuzz targets (`fuzz/`).
+- **Content**: shipped Sigma/YARA must parse *and fire* on crafted samples —
+  unfireable content fails the suite.
+- **Reality**: the lab (`lab/`, Vagrant/Hyper-V) validates what unit tests
+  cannot honestly claim — real eBPF verifiers, SELinux, Windows event
+  channels, service installs.
+
+See [testing.md](../development/testing.md) for the full map.
+
 ## Where decisions live
 
 Cross-cutting choices get an ADR (`docs/adr/`) at the time they're made:
