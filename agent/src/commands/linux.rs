@@ -200,16 +200,17 @@ fn can_use_ebpf() -> bool {
 /// it). Both feed the same `DetectionSink`, shared via `Arc` (`schema::sensor`'s
 /// blanket `EventSink for Arc<T>`) since `LinuxSensor::run` needs to own its sink
 /// for `Sensor`'s lifetime but the poller thread outlives no particular caller.
-pub(crate) fn cmd_run(
-    alerts: &std::path::Path,
-    events: &std::path::Path,
-    state_dir: &std::path::Path,
-    enable_kill: bool,
-    enable_quarantine: bool,
-    enable_tls_capture: bool,
-    enable_readline_capture: bool,
-    server: Option<&str>,
-) -> anyhow::Result<()> {
+pub(crate) fn cmd_run(opts: super::RunOptions) -> anyhow::Result<()> {
+    let super::RunOptions {
+        alerts,
+        events,
+        state_dir,
+        enable_kill,
+        enable_quarantine,
+        enable_tls_capture,
+        enable_readline_capture,
+        server,
+    } = opts;
     // Kill-loudness (#71): must run before any other thread exists — the signal mask
     // set here is inherited by every thread spawned below, including `DetectionSink`'s
     // own worker threads.

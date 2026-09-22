@@ -162,16 +162,16 @@ fn main() -> anyhow::Result<()> {
             enable_tls_capture,
             enable_readline_capture,
             server,
-        } => commands::cmd_run(
-            &alerts,
-            &events,
-            &cfg.storage.state_dir,
+        } => commands::cmd_run(commands::RunOptions {
+            alerts: &alerts,
+            events: &events,
+            state_dir: &cfg.storage.state_dir,
             enable_kill,
             enable_quarantine,
             enable_tls_capture,
             enable_readline_capture,
-            server.as_deref(),
-        ),
+            server: server.as_deref(),
+        }),
         Command::CaptureBaseline { output } => commands::cmd_capture_baseline(&output),
         Command::CaptureEvents { output } => commands::cmd_capture_events(&output),
     }
