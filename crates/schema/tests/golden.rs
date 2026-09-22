@@ -9,6 +9,7 @@
 use std::net::IpAddr;
 
 use schema::{
+    MemfdCreateEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent,
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, ConnectEvent, DnsQueryEvent,
     Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
     FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
@@ -1070,6 +1071,96 @@ fn bpf_operation_golden() {
             cmd: 5, // BPF_PROG_LOAD
         }),
         "bpf_operation",
+    );
+}
+
+#[test]
+fn ptrace_golden() {
+    // v25 (#265): PTRACE_ATTACH against a foreign process — the classic
+    // debugger-based injection/credential-dumping pattern.
+    assert_golden(
+        &Event::Ptrace(PtraceEvent {
+            meta: EventMeta {
+                pid: 9001,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_019_000_000_000,
+                comm: "gdb".into(),
+                container: None,
+            },
+            request: 16, // PTRACE_ATTACH
+            target_pid: 4242,
+            addr: 0,
+            data: 0,
+        }),
+        "ptrace",
+    );
+}
+
+#[test]
+fn process_vm_read_golden() {
+    // v25 (#265): reading another process's memory directly — the
+    // credential-dumping/memory-scraping primitive on Linux.
+    assert_golden(
+        &Event::ProcessVmRead(ProcessVmReadEvent {
+            meta: EventMeta {
+                pid: 9002,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_020_000_000_000,
+                comm: "scraper".into(),
+                container: None,
+            },
+            target_pid: 4242,
+            local_iov_count: 1,
+            remote_iov_count: 1,
+            remote_iov_len: 4096,
+        }),
+        "process_vm_read",
+    );
+}
+
+#[test]
+fn process_vm_write_golden() {
+    // v25 (#265): writing into another process's memory — shellcode injection
+    // without ptrace's word-at-a-time POKEDATA interface.
+    assert_golden(
+        &Event::ProcessVmWrite(ProcessVmWriteEvent {
+            meta: EventMeta {
+                pid: 9003,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_021_000_000_000,
+                comm: "injector".into(),
+                container: None,
+            },
+            target_pid: 4242,
+            local_iov_count: 1,
+            remote_iov_count: 1,
+            remote_iov_len: 256,
+        }),
+        "process_vm_write",
+    );
+}
+
+#[test]
+fn memfd_create_golden() {
+    // v25 (#265): anonymous in-memory file — the fileless-execution primitive
+    // (memfd_create + write + execveat(fd, "", AT_EMPTY_PATH)).
+    assert_golden(
+        &Event::MemfdCreate(MemfdCreateEvent {
+            meta: EventMeta {
+                pid: 9004,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_022_000_000_000,
+                comm: "dropper".into(),
+                container: None,
+            },
+            name: "payload".into(),
+            flags: 1, // MFD_CLOEXEC
+        }),
+        "memfd_create",
     );
 }
 
