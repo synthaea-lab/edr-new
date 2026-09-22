@@ -132,6 +132,23 @@ events carry `team_id`/`signing_id` as the join keys toward their exec event.
 The message formats are undocumented; the crate's unit tests pin verbatim
 live captures and are the tripwire for an OS release changing one.
 
+## NetworkExtension sensor (`sensor-macos-network-extension`, issue #33)
+
+The network/DNS visibility ES does not carry. Apple only runs
+`NEFilterDataProvider`/`NEDNSProxyProvider` inside a Swift system extension,
+so the sensor is a **seam**: the extension (`extension/` in the crate,
+type-checked by `swiftc` against the SDK) extracts pid/path from each flow's
+audit token and writes versioned NDJSON over a Unix socket in the shared
+app-group container; the Rust crate listens, and normalizes into **existing**
+schema shapes — `Connect` (what the BEACON rule keys on), `NetworkFlow`
+(byte counts at flow close), `DnsQuery` (domain↔process join, RCODE in
+`status`). No schema change. Records from a mismatched extension version are
+skipped and counted, never guessed at.
+
+Packaging, entitlements (both restricted, same Apple request as ES), and the
+user/MDM approval flow: `packaging/macos/README.md`. The beacon-scenario lab
+validation rides the packaged extension.
+
 ## Fork/exit and process-tree state
 
 `NOTIFY_FORK`/`NOTIFY_EXIT` are not subscribed: `schema` has no fork/exit
