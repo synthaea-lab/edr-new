@@ -34,6 +34,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **netlink** | `sock_diag`, conntrack, proc connector, `NETLINK_AUDIT` multicast | Low (10s polls). `sock_diag` confirmed **unprivileged** empirically; proc connector root-only (`EPERM`); audit needs `CAP_AUDIT_READ`. Audit is the designated eBPF fallback — degraded, honest (`parent_lineage: false`) |
 | **journald** | `journalctl -f -o json` subprocess tail, allowlist-first | Medium (subprocess + JSON per line). Root in practice — journald's per-unit read ACL blocks unprivileged auth reads (empirical) |
 | **/proc, /sys** | event-triggered reads + startup seeding — never a /proc-wide poll loop | Low; mostly unprivileged |
+| **device-control** | udev/uevent netlink device notifications | Planned (#84); root for the uevent socket |
 | **inventory** | scheduled state snapshots, diffed | Snapshot cadence, not events |
 
 ### Signal coverage
@@ -86,6 +87,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **WEL** (Windows Event Log) | channel polling via `wevtutil` (2s) | Administrator for the Security channel. Lab-earned (ADR-0004): 7045's classic provider defeats TDH schema resolution, and the Security channel never delivered to an ad-hoc raw-ETW subscriber — `EvtSubscribe` is the evaluated successor. Per-channel allowlist + volume counters (ADR-0006) |
 | **driver tier** | kernel callbacks, minifilter, WFP, Threat-Intelligence ETW | Signed driver, its own distribution tier; TI-ETW additionally needs PPL. All planned (#39) |
 | **Win32 APIs** | table snapshots (`GetExtendedTcpTable`), WMI/CIM queries | Unprivileged; snapshot cadence |
+| **device-control** | PnP/device-interface notifications | Planned (#84, cross-platform crate) |
 
 ### Signal coverage
 
@@ -128,6 +130,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | Raw packet capture (WinPcap/npcap-style) | ETW network + WFP (#138) carry the signal without the driver and volume cost |
 | Keystroke / screen capture | privacy line, same reasoning as clipboard |
 | Execution-history artifacts (Prefetch, Amcache, Shimcache) | rejected (deferred) — point-in-time forensics, not streaming telemetry; DFIR workbench territory (M10), pulled on demand |
+| WMI event watchers as a telemetry source (`Win32_ProcessStartTrace` & co.) | the pre-ETW era's mechanism — polling latency and provider gaps; ETW supersedes it wholesale (watching *attackers'* WMI subscriptions stays in scope via #21/inventory) |
 
 ## macOS
 
@@ -139,6 +142,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **unified log** | `log stream --style ndjson` under a strict predicate; three volume gates (daemon predicate → exact-message classifier → counted sliding-window shed) | Admin scope. Formats undocumented by Apple — pinned by verbatim live-capture tests, the OS-update tripwire. Live-validated end to end |
 | **NE** (`NetworkExtension`) | Swift system extension (filter-data + DNS-proxy providers) → versioned NDJSON over an app-group socket to the agent | Restricted entitlements + user/MDM approval (`packaging/macos`); wire skew counted, never guessed. Seam + typed scaffold on `main`; activation outstanding (#351) |
 | **libproc/sysctl** | table snapshots | Unprivileged — works before any Apple grant |
+| **DiskArbitration / IOKit** | disk + device attach/detach notifications | Planned (`device-control`); unprivileged for notifications |
 | **inventory** | scheduled state snapshots | FDA for the TCC.db snapshot |
 
 ### Signal coverage
@@ -177,6 +181,8 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | kexts / kauth | deprecated and disallowed by Apple |
 | openbsm audit trail | deprecated; ES supersedes |
 | FSEvents | coarser than ES file events; no attribution |
+| DTrace | requires SIP disabled — a dev-machine tool by construction, not deployable telemetry |
+| ASL / legacy syslog | superseded by the unified log (#95 reads the successor) |
 
 Cross-platform note: download provenance is one shape on all three platforms —
 Windows mark-of-the-web (#365), the macOS quarantine xattr (shipped, #96), and
