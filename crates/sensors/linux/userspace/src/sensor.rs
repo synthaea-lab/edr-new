@@ -37,6 +37,11 @@ use crate::{docker::DockerContainerInfo, normalize};
 /// `sys_enter_unlinkat` and `sys_enter_rename`/`sys_enter_renameat`/
 /// `sys_enter_renameat2` are each attached in pairs/triples for the same libc-variant
 /// reason as open above.
+///
+/// `sys_enter_accept{,4}`/`sys_exit_accept{,4}` (issue #263 Phase 2) are this
+/// sensor's first `sys_exit_*` attachments — `accept`/`accept4`'s peer address is
+/// only populated once the kernel-side call returns, so the enter and exit halves
+/// are attached as a pair (`ebpf/src/main.rs`'s `ACCEPT_ARGS` map correlates them).
 pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
     ("sched_process_fork", "sched", "sched_process_fork"),
     ("sched_process_exit", "sched", "sched_process_exit"),
@@ -51,6 +56,10 @@ pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
     ("sys_enter_renameat", "syscalls", "sys_enter_renameat"),
     ("sys_enter_renameat2", "syscalls", "sys_enter_renameat2"),
     ("sys_enter_bind", "syscalls", "sys_enter_bind"),
+    ("sys_enter_accept", "syscalls", "sys_enter_accept"),
+    ("sys_enter_accept4", "syscalls", "sys_enter_accept4"),
+    ("sys_exit_accept", "syscalls", "sys_exit_accept"),
+    ("sys_exit_accept4", "syscalls", "sys_exit_accept4"),
 ];
 
 /// `sensor_linux_wire::LineageEntry` is `repr(C)` over a `u32` and a `[u8; 16]` — every
@@ -628,9 +637,10 @@ impl LinuxSensor {
         let mut file_delete_ring_buf = ring("FILE_DELETE_EVENTS")?;
         let mut file_rename_ring_buf = ring("FILE_RENAME_EVENTS")?;
         let mut socket_bind_ring_buf = ring("SOCKET_BIND_EVENTS")?;
+        let mut socket_accept_ring_buf = ring("SOCKET_ACCEPT_EVENTS")?;
 
         tracing::info!(
-            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind events"
+            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind/accept events"
         );
 
         let mut container_ids = CgroupIdCache::new();
@@ -684,6 +694,12 @@ impl LinuxSensor {
                     drain!(guard, sensor_linux_wire::SocketBindEvent, sink,
                         |e: &sensor_linux_wire::SocketBindEvent| {
                             normalize::socket_bind(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = socket_accept_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::SocketAcceptEvent, sink,
+                        |e: &sensor_linux_wire::SocketAcceptEvent| {
+                            normalize::socket_accept(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
                         });
                 }
             }

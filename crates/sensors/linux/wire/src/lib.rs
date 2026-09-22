@@ -44,7 +44,16 @@
 ///   `listen(2)` (no address, just `fd`+`backlog`) and `accept(2)`/`accept4(2)`
 ///   (needs a `sys_exit` probe to read the kernel-filled peer address — a new
 ///   probe shape this crate doesn't have yet) are deliberately deferred.
-pub const WIRE_VERSION: u32 = 7;
+/// - v8: `SocketAcceptEvent` added (issue #263 Phase 2) — `accept(2)`/`accept4(2)`.
+///   First use of the paired `sys_enter_*`/`sys_exit_*` probe shape in this crate:
+///   the peer address is only populated by the kernel once the syscall returns, so
+///   `sys_enter_accept{,4}` stashes the caller's `(fd, addr_ptr)` in an in-kernel
+///   map keyed by `pid_tgid` (internal to the ebpf crate, not part of this wire
+///   ABI — same pattern as `sensor-linux-uprobes`' `SSL_READ_ARGS`), and
+///   `sys_exit_accept{,4}` reads the return value (the new fd, or a negative errno)
+///   and, on success, the now-populated sockaddr from the stashed pointer. Only
+///   emitted on success — a failed `accept()` has no peer to report.
+pub const WIRE_VERSION: u32 = 8;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -186,6 +195,25 @@ pub struct SocketBindEvent {
     pub laddr_v4: [u8; 4],
     pub laddr_v6: [u8; 16],
     pub lport: u16,
+    pub is_ipv6: bool,
+}
+
+/// Socket accept (`syscalls:sys_enter_accept`/`sys_enter_accept4` +
+/// `sys_exit_accept`/`sys_exit_accept4`, issue #263 Phase 2) — a listening socket
+/// accepting a new connection, carrying the PEER's address (the connecting
+/// client), not the local one. See this file's `WIRE_VERSION` v8 changelog for the
+/// `sys_enter`/`sys_exit` correlation mechanism. Only emitted on success.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SocketAcceptEvent {
+    pub meta: EventMeta,
+    /// The listening socket's fd (`accept`/`accept4`'s first argument).
+    pub listen_fd: u32,
+    /// The newly accepted connection's fd (`accept`/`accept4`'s return value).
+    pub accepted_fd: u32,
+    pub peer_addr_v4: [u8; 4],
+    pub peer_addr_v6: [u8; 16],
+    pub peer_port: u16,
     pub is_ipv6: bool,
 }
 
