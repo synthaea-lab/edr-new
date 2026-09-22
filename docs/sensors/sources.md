@@ -49,7 +49,7 @@ each row below.
 | ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | planned | #96 |
 | NetworkExtension: filter-data + DNS-proxy | planned | `sensors/macos/network-extension` |
 | NetworkExtension: packet-tunnel provider | rejected (revisit) | full-packet capture is cost without need given filter-data + DNS |
-| Unified log (OSLog predicates) | planned | `sensors/macos/unifiedlog` |
+| Unified log (OSLog predicates: sudo auth, TCC decisions, Gatekeeper verdicts) | used | `sensors/macos/unifiedlog` (#95) |
 | DiskArbitration / IOKit device notifications | planned | `device-control` |
 | kexts / kauth | **rejected** | deprecated and disallowed by Apple |
 | openbsm audit trail | **rejected** | deprecated; ES supersedes |

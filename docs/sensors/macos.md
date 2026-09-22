@@ -104,6 +104,28 @@ relaxed instead of waiting for Apple —
 A macOS VM (UTM/Tart) is the recommended lab shape — same posture as the
 Windows ETW validation VM.
 
+## Unified-log tail (`sensor-macos-unifiedlog`, issue #95)
+
+The supplementary source for what ES does not carry, tailing
+`log stream --style ndjson` under a strict OR-of-three predicate (the daemon
+filters before anything reaches the agent), with an exact-message classifier
+and a counted sliding-window shed behind it:
+
+| Source | Normalized as | Live-validated |
+| --- | --- | --- |
+| `sudo` outcome lines | `Event::Auth` (same mapping semantics as `sensor-linux-journal`) | ✔ failed attempt → `Auth`/failure (this repo's dev Mac, 2026-09-22) |
+| tccd `AUTHREQ_CTX` + `AUTHREQ_RESULT` (joined on tccd's msgID by a bounded, counted joiner) | `Event::TccDecision` | ✔ FDA preflight denial → joined `TccDecision`/denied |
+| syspolicyd `GK evaluateScanResult` | `Event::GatekeeperVerdict` | format pinned from live capture; verdict-code raw/uninterpreted |
+
+Two documented redactions in the public log stream: syspolicyd hash-redacts
+file paths (installing Apple's private-data logging profile reveals them — a
+lab option, not assumed), and tccd redacts the requesting client identity on
+the parsed records, so `TccDecisionEvent::client` is `None` today. Gatekeeper
+events carry `team_id`/`signing_id` as the join keys toward their exec event.
+
+The message formats are undocumented; the crate's unit tests pin verbatim
+live captures and are the tripwire for an OS release changing one.
+
 ## Fork/exit and process-tree state
 
 `NOTIFY_FORK`/`NOTIFY_EXIT` are not subscribed: `schema` has no fork/exit
