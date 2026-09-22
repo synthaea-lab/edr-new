@@ -154,10 +154,10 @@ impl Layout {
         let tmp = self.base_dir.join(format!(".{CURRENT_LINK}.tmp"));
         // A leftover from a crash mid-swap, before the rename below ever ran —
         // symlink() below would otherwise fail with AlreadyExists.
-        if let Err(source) = fs::remove_file(&tmp) {
-            if source.kind() != io::ErrorKind::NotFound {
-                return Err(UpdaterError::Io { path: tmp, source });
-            }
+        if let Err(source) = fs::remove_file(&tmp)
+            && source.kind() != io::ErrorKind::NotFound
+        {
+            return Err(UpdaterError::Io { path: tmp, source });
         }
         symlink(target, &tmp).map_err(|source| UpdaterError::Io {
             path: tmp.clone(),

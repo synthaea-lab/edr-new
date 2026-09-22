@@ -48,6 +48,10 @@ impl BannedVersions {
     /// # Errors
     ///
     /// [`UpdaterError::Io`] if `path` cannot be written.
+    ///
+    /// # Panics
+    ///
+    /// Never — `Vec<u64>` has no content `serde_json` could fail to serialize.
     pub fn save(&self, path: &Path) -> Result<(), UpdaterError> {
         let versions: Vec<u64> = self.0.iter().copied().collect();
         let text = serde_json::to_string_pretty(&versions)
