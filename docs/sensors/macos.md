@@ -84,12 +84,18 @@ team and takes weeks). The signed agent then runs on any Mac with the user's
 one-time TCC approval. This is a packaging concern (`packaging/macos`, M7), not
 a code one.
 
-**Development, on a lab machine you control**: SIP's entitlement check can be
+**Development, on a lab machine you control**: the entitlement check can be
 relaxed instead of waiting for Apple —
 
 1. Boot into recovery (hold power on Apple Silicon), open Terminal, and run
-   `csrutil disable` (or `csrutil enable --without debug` on Intel). Lab
-   machines/VMs only — never a daily driver.
+   `csrutil disable`, **and** set the AMFI boot-arg:
+   `nvram boot-args="amfi_get_out_of_my_way=1"`. Both are required: with SIP
+   off, `amfid` still rejects ad-hoc restricted entitlements — verified live
+   on a SIP-enabled dev Mac (2026-09-22), where the kill is amfid's
+   `"The file is adhoc signed but contains restricted entitlements"`
+   (AppleMobileFileIntegrity error -424, SIGKILL at exec, **before** TCC —
+   no Privacy & Security toggle can approve it). Lab machines/VMs only —
+   never a daily driver.
 2. Ad-hoc sign the agent with the entitlement:
 
    ```sh
@@ -129,8 +135,33 @@ lab option, not assumed), and tccd redacts the requesting client identity on
 the parsed records, so `TccDecisionEvent::client` is `None` today. Gatekeeper
 events carry `team_id`/`signing_id` as the join keys toward their exec event.
 
+Gatekeeper coverage nuance (observed live, macOS 26, 2026-09-22): syspolicyd
+only writes `GK evaluateScanResult` for **Mach-O/bundle** scans — assessing a
+quarantined *shell script* (e.g. via `spctl --assess`) logs `GK performScan`
+alone, so script-only assessments produce no verdict event. Executing a
+quarantined Mach-O produced the full verdict, ad-hoc `signing_id` included.
+Widening to `performScan` would add a scan-started signal without a verdict —
+deliberately not done until a rule needs it.
+
 The message formats are undocumented; the crate's unit tests pin verbatim
 live captures and are the tripwire for an OS release changing one.
+
+## NetworkExtension sensor (`sensor-macos-network-extension`, issue #33)
+
+The network/DNS visibility ES does not carry. Apple only runs
+`NEFilterDataProvider`/`NEDNSProxyProvider` inside a Swift system extension,
+so the sensor is a **seam**: the extension (`extension/` in the crate,
+type-checked by `swiftc` against the SDK) extracts pid/path from each flow's
+audit token and writes versioned NDJSON over a Unix socket in the shared
+app-group container; the Rust crate listens, and normalizes into **existing**
+schema shapes — `Connect` (what the BEACON rule keys on), `NetworkFlow`
+(byte counts at flow close), `DnsQuery` (domain↔process join, RCODE in
+`status`). No schema change. Records from a mismatched extension version are
+skipped and counted, never guessed at.
+
+Packaging, entitlements (both restricted, same Apple request as ES), and the
+user/MDM approval flow: `packaging/macos/README.md`. The beacon-scenario lab
+validation rides the packaged extension.
 
 ## Fork/exit and process-tree state
 
