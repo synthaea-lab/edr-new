@@ -30,21 +30,31 @@ per-platform tables below carry the detail behind every cell.
 
 **Legend:** ✅ used · 🔨 built (runtime prerequisite outstanding) ·
 📋 planned (issue filed) · 🔍 evaluated (matrix) · ⭕ gap (no mechanism
-evaluated yet) · — not applicable
+evaluated yet) · — not applicable · 🟡\* telemetry lands, detection content
+pending (the coverage packs #376–#381 — see
+[attack-coverage.md](../detection/attack-coverage.md))
 
 | Focus | Linux | Windows | macOS |
 | --- | --- | --- | --- |
 | **Process execution**<br><sub>TA0002 Execution</sub> | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
 | **File activity**<br><sub>TA0040 Impact · TA0005 Evasion</sub> | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
-| **Network**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ ES mount · 📋 #358 listen |
+| **Network — flows & listeners**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · 📋 #358 listen |
+| **Mounts & volumes**<br><sub>staging · TA0005 Evasion</sub> | 📋 #362 | 📋 #136 raw-volume | ✅ ES |
 | **DNS**<br><sub>TA0011 C2</sub> | 📋 #267 | ✅ ETW | 🔨 NE |
+| **Lateral-movement services**<br><sub>TA0008</sub> | 🟡* SSH-out content | ✅ SMB + WMI · 📋 #284 BITS | 🟡* SSH-out content |
 | **Encrypted traffic**<br><sub>TA0011 C2 · TA0010 Exfil</sub> | ✅ uprobes · 📋 JA4 #86 | 📋 #373 | 📋 #360 |
 | **Scripts & shells**<br><sub>TA0002 Execution</sub> | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | 📋 #374 (evaluate) |
 | **Memory & injection**<br><sub>TA0005 Evasion · TA0004 Priv-Esc</sub> | 📋 #265 | 📋 driver #137 | 📋 #355 |
-| **Identity & privilege**<br><sub>TA0006 Cred Access · TA0004 Priv-Esc</sub> | ✅ journald · 📋 #266 | ✅ WEL · 📋 #364 #285 | ✅ ES + log · 📋 #356 |
-| **Persistence & autostart**<br><sub>TA0003 Persistence</sub> | ✅ journald + rules | ✅ WEL + ETW | ✅ ES |
+| **Logons & sessions**<br><sub>TA0001 Valid Accounts · TA0008</sub> | ✅ journald | ✅ WEL · 📋 #285 RDP | ✅ ES + log |
+| **Privilege elevation**<br><sub>TA0004 Priv-Esc</sub> | 🟡* sudo via journald · 📋 #266 setuid | 🟡* UAC content | ✅ sudo · 📋 #356 native |
+| **Credential-attack shadow**<br><sub>TA0006 Cred Access</sub> | 🟡* shadow-file reads | 📋 #364 Kerberos/NTLM/LDAP | 🟡* keychain reads |
+| **Account management**<br><sub>TA0003 T1136</sub> | 🟡* useradd content | ✅ WEL 4720 | 📋 #356 OD events |
+| **Services & autostart**<br><sub>TA0003 T1543/T1547</sub> | ✅ journald + rules | ✅ WEL 7045 + ETW registry | ✅ ES BTM |
+| **Scheduled execution**<br><sub>TA0002/TA0003 T1053</sub> | ✅ cron/systemd paths | ✅ WEL 4698 | ✅ cron/launchd paths |
 | **OS security verdicts**<br><sub>TA0005 Evasion context</sub> | 🔍 SELinux AVC | 📋 #283 | ✅ log · 📋 #356 |
-| **Tamper & anti-forensics**<br><sub>TA0005 Evasion</sub> | 📋 #264 #362 | 📋 driver #136 | ✅ ES · 📋 #357 |
+| **Kernel modules & drivers**<br><sub>TA0003/TA0005 rootkits</sub> | 📋 #264 module+bpf | 🟡* image loads · 📋 #39 | 📋 #357 kexts |
+| **Tamper on security tooling**<br><sub>TA0005 T1562</sub> | 📋 #362 kill-trace | 📋 #39 driver vantage | ✅ ES signals |
+| **Anti-forensics**<br><sub>TA0005 T1070</sub> | 🟡* deletions · LSM timestomp row | 📋 #136 timestomp/ADS | ✅ deletions · 📋 #357 strip/stomp |
 | **Download provenance**<br><sub>TA0001 Initial Access</sub> | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
 | **Devices**<br><sub>TA0001 Initial Access · TA0010 Exfil</sub> | 📋 #84 | 📋 #84 | 📋 device-control |
 | **Containers**<br><sub>TA0004 Escape context</sub> | ✅ /proc | 📋 #371 silos | 📋 #372 host-side |
