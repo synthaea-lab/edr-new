@@ -47,9 +47,16 @@ each row below.
 | --- | --- | --- |
 | EndpointSecurity (core events: exec, file, BTM launch items) | used | `sensors/macos/endpoint-security` (#32) |
 | ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | used | `sensors/macos/endpoint-security` (#96) |
-| NetworkExtension: filter-data + DNS-proxy | built (#33 — agent seam + typed extension scaffold; packaged-extension lab validation pending, see `packaging/macos`) | `sensors/macos/network-extension` |
+| ES injection/tamper proc events (task ports, ptrace, remote threads, CS invalidation, mprotect, pty) | planned | #355 — the coverage-matrix promise #32/#96 only partially landed |
+| ES security-subsystem events (XProtect verdicts, Gatekeeper override, TCC modify, OD accounts, profiles, native su/sudo, screen sharing) | planned | #356 |
+| ES anti-forensics & file-op completeness (quarantine strip, timestomp, hidden flags, clone/exchangedata, kext/IOKit open, remount, unix sockets) | planned | #357 |
+| ES read-side metadata events (stat, lookup, getattrlist, readdir, access, fsgetpath, dup, fcntl, chdir, ...) | **rejected** | pure volume without mutation — nothing a detection keys on that the write-side events don't already carry |
+| NetworkExtension: filter-data + DNS-proxy | built (#33 — agent seam + typed extension scaffold; extension build/activation + beacon lab validation is #351, see `packaging/macos`) | `sensors/macos/network-extension` |
+| NetworkExtension: TLS SNI / JA4 via filter payload peek | planned | #360 — macOS sibling of Linux #86; packet capture stays rejected |
 | NetworkExtension: packet-tunnel provider | rejected (revisit) | full-packet capture is cost without need given filter-data + DNS |
-| Unified log (OSLog predicates: sudo auth, TCC decisions, Gatekeeper verdicts) | used | `sensors/macos/unifiedlog` (#95) |
+| Socket-table snapshots (libproc / sysctl pcblist) | planned | #358 — sibling of `sensors/linux/netlink` (#92); the one source needing no entitlement |
+| Unified log (OSLog predicates: sudo auth, TCC decisions, Gatekeeper verdicts) | used | `sensors/macos/unifiedlog` (#95); requesting-client attribution is #354 |
+| Inventory collectors (launch items, kexts, profiles, TCC grants, browser artifacts) | planned | `inventory` (#359) |
 | DiskArbitration / IOKit device notifications | planned | `device-control` |
 | kexts / kauth | **rejected** | deprecated and disallowed by Apple |
 | openbsm audit trail | **rejected** | deprecated; ES supersedes |
