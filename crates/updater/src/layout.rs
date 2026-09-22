@@ -141,6 +141,12 @@ impl Layout {
     ///
     /// [`UpdaterError::Io`] if the version directory does not exist or the write
     /// fails.
+    ///
+    /// # Panics
+    ///
+    /// Never in practice: [`ReleaseManifest`] contains no type `serde_json` cannot
+    /// serialize (same invariant `ReleaseManifest`'s own `canonical_bytes` relies
+    /// on).
     pub fn persist_manifest(&self, manifest: &ReleaseManifest) -> Result<(), UpdaterError> {
         let path = self
             .version_dir(manifest.release_version)
