@@ -81,7 +81,11 @@ pub mod time;
 ///
 /// Bumped 15 → 16 for [`Event::SocketBind`] (#263): one new enum variant for
 /// discrete, real-time `bind(2)` telemetry on Linux. Same reasoning as v13-v15.
-pub const SCHEMA_VERSION: u32 = 16;
+///
+/// Bumped 16 → 17 for [`Event::FileChmod`] and [`Event::FileChown`] (#262 Phase 2):
+/// two new enum variants for Linux permission/ownership-change telemetry. Same
+/// reasoning as v13-v16.
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -291,6 +295,46 @@ pub enum Signature {
     Unsupported,
 }
 
+// Standard POSIX open(2) flag values, stable across the Linux architectures this
+// project supports (x86_64, aarch64). Defined here rather than via `libc`:
+// `FileOpenEvent::flags` is platform-native and these are the Linux values; a
+// `libc` dependency would drag platform quirks (no `O_ACCMODE` on Windows) into
+// the boundary crate that must compile everywhere.
+/// `open(2)` access-mode mask (`flags & O_ACCMODE` is one of `O_RDONLY`=0,
+/// [`O_WRONLY`], [`O_RDWR`] — a 2-bit field, not independent bits).
+pub const O_ACCMODE: u32 = 0o3;
+/// `open(2)` write-only access mode.
+pub const O_WRONLY: u32 = 0o1;
+/// `open(2)` read-write access mode.
+pub const O_RDWR: u32 = 0o2;
+/// `open(2)` create-if-absent flag.
+pub const O_CREAT: u32 = 0o100;
+
+/// Write intent on [`FileOpenEvent::flags`]: a write access mode, or creation
+/// (`O_CREAT` — creating a file is write intent even with `O_RDONLY`).
+///
+/// The ONE definition of this predicate. It used to exist five times (rules,
+/// correlator, `crates/ml`, and two Python mirrors) with two different
+/// semantics — an access-mode comparison vs. a bitmask-any — which classified
+/// `flags = 0o3` differently, so the rule engine and the correlator could
+/// disagree about the same event. The access-mode comparison is canonical
+/// because it is what the kernel does: the access mode is a 2-bit *field*
+/// (`O_ACCMODE`), not independent bits, and the `0o3` combination is invalid —
+/// `open(2)` refuses it with `EINVAL`, so no write can result and counting it
+/// would let crafted always-failing opens inflate behavioral write counts.
+/// The Python mirrors (`synthaea_ml.features.correlation._is_file_write`,
+/// `behavior._is_write`) must match this exactly — parity-tested against
+/// shared fixtures.
+///
+/// Lives in `schema` deliberately: a pure helper on a field this crate
+/// defines, additive to the semi-frozen surface (no serialization impact),
+/// and the only crate every consumer of `flags` may depend on.
+#[must_use]
+pub fn has_write_intent(flags: u32) -> bool {
+    let access_mode = flags & O_ACCMODE;
+    access_mode == O_WRONLY || access_mode == O_RDWR || (flags & O_CREAT) != 0
+}
+
 /// File open/create.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileOpenEvent {
@@ -391,6 +435,32 @@ pub struct FileRenameEvent {
     pub meta: EventMeta,
     pub old_path: String,
     pub new_path: String,
+}
+
+/// File permission change (issue #262 Phase 2): `chmod(2)`/`fchmodat(2)`. `fchmod(2)`
+/// (fd-only, no path) is deferred — see `sensor-linux-wire::FileChmodEvent`'s doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChmodEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    /// Requested mode bits (permission bits plus setuid/setgid/sticky). A `chmod
+    /// +s` (mode & 0o4000/0o2000) on a world-writable or unexpected binary is a
+    /// classic privilege-escalation signal (T1222.002).
+    pub mode: u32,
+}
+
+/// File ownership change (issue #262 Phase 2): `chown(2)`/`lchown(2)`/
+/// `fchownat(2)`. `fchown(2)` (fd-only, no path) is deferred — see
+/// `sensor-linux-wire::FileChownEvent`'s doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChownEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    /// New owner uid, or `u32::MAX` (`(uid_t)-1`) meaning "leave unchanged" per
+    /// `chown(2)`'s own semantics — passed through as-is, not specially interpreted.
+    pub uid: u32,
+    /// New owner gid, same "leave unchanged" sentinel as `uid`.
+    pub gid: u32,
 }
 
 /// Socket bind (issue #263): `bind(2)`, `AF_INET`/`AF_INET6` only — a discrete,
@@ -857,6 +927,8 @@ pub enum Event {
     FileDelete(FileDeleteEvent),
     FileRename(FileRenameEvent),
     SocketBind(SocketBindEvent),
+    FileChmod(FileChmodEvent),
+    FileChown(FileChownEvent),
 }
 
 impl Event {
@@ -888,9 +960,52 @@ impl Event {
             Event::FileDelete(e) => &e.meta,
             Event::FileRename(e) => &e.meta,
             Event::SocketBind(e) => &e.meta,
+            Event::FileChmod(e) => &e.meta,
+            Event::FileChown(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.
         }
+    }
+}
+
+#[cfg(test)]
+mod write_intent_tests {
+    use super::has_write_intent;
+
+    #[test]
+    fn write_access_modes_are_write_intent() {
+        assert!(has_write_intent(super::O_WRONLY));
+        assert!(has_write_intent(super::O_RDWR));
+        assert!(has_write_intent(
+            super::O_WRONLY | 0o2000 /* O_APPEND */
+        ));
+    }
+
+    #[test]
+    fn creat_is_write_intent_even_with_rdonly() {
+        // Creating a file mutates the filesystem regardless of the access mode.
+        assert!(has_write_intent(super::O_CREAT));
+    }
+
+    #[test]
+    fn rdonly_is_not_write_intent() {
+        assert!(!has_write_intent(0));
+        assert!(!has_write_intent(
+            0o2000 /* O_APPEND alone — no write mode */
+        ));
+    }
+
+    #[test]
+    fn invalid_accmode_combo_is_not_write_intent() {
+        // The divergence that motivated unifying the five copies: 0o3 sets both
+        // access-mode bits, which open(2) refuses with EINVAL — no write can
+        // result, so the bitmask-any copies that counted it were wrong. Pinned
+        // so the semantics never fork again.
+        assert!(!has_write_intent(0o3));
+        assert!(
+            has_write_intent(0o3 | super::O_CREAT),
+            "creation still counts"
+        );
     }
 }

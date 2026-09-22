@@ -13,6 +13,11 @@
 //! `ExecEvent` is built in a `PerCpuArray` because `image` alone already exceeds the
 //! stack budget.
 
+// The "user" feature (userspace loader + uprobes sensor) brings std in for the
+// shared decode helpers at the bottom; the eBPF build stays pure no_std.
+#[cfg(feature = "user")]
+extern crate std;
+
 /// Bumped on every layout-affecting change to the structs below. Not a wire header
 /// (ring-buffer items carry none) — a build-time tripwire: the userspace loader
 /// `const _`-asserts the value it was compiled against, so an ebpf/userspace version
@@ -44,7 +49,12 @@
 ///   `listen(2)` (no address, just `fd`+`backlog`) and `accept(2)`/`accept4(2)`
 ///   (needs a `sys_exit` probe to read the kernel-filled peer address — a new
 ///   probe shape this crate doesn't have yet) are deliberately deferred.
-/// - v8: `UdpSendEvent` added (issue #263 Phase 2) — `sendto(2)` only, same
+/// - v8: `FileChmodEvent`/`FileChownEvent` added (issue #262 Phase 2) —
+///   `chmod(2)`/`fchmodat(2)` and `chown(2)`/`lchown(2)`/`fchownat(2)`. All five
+///   read a real path argument, unlike `FileWriteEvent`. `fchmod(2)`/`fchown(2)`
+///   (fd-only, no path) are deferred the same way `write(2)`'s fd-only shape was
+///   handled: a future addition, not a silent gap.
+/// - v9: `UdpSendEvent` added (issue #263 Phase 2) — `sendto(2)` only, same
 ///   family-filtered sockaddr read as `ConnectEvent`/`SocketBindEvent`, plus the
 ///   caller's requested payload size. `recvfrom(2)` is deliberately NOT captured:
 ///   its source-address output parameter is only populated by the kernel after the
@@ -52,7 +62,7 @@
 ///   this crate doesn't have yet. `send(2)` (no destination arg) is also not
 ///   captured — glibc issues it as `sendto(fd, buf, len, flags, NULL, 0)`, which
 ///   this probe's null-address check already skips, same as `connect`/`bind`.
-pub const WIRE_VERSION: u32 = 8;
+pub const WIRE_VERSION: u32 = 9;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -166,6 +176,37 @@ pub struct FileRenameEvent {
     pub new_path_len: u16,
 }
 
+/// File permission change (`syscalls:sys_enter_chmod`/`sys_enter_fchmodat`, issue #262
+/// Phase 2). `path` is the raw path passed by the caller, not resolved against `dfd` —
+/// same known limitation as `FileOpenEvent::path`. `fchmod(2)` (fd-only) is deferred.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileChmodEvent {
+    pub meta: EventMeta,
+    pub path: [u8; MAX_PATH_LEN],
+    pub path_len: u16,
+    /// The requested mode bits (`umode_t`), truncated to 32 bits — the tracepoint
+    /// promotes it to 8 bytes on the wire but only the low 16 bits are ever
+    /// meaningful (permission bits plus setuid/setgid/sticky).
+    pub mode: u32,
+}
+
+/// File ownership change (`syscalls:sys_enter_chown`/`sys_enter_lchown`/
+/// `sys_enter_fchownat`, issue #262 Phase 2). `path` is the raw path passed by the
+/// caller, not resolved against `dfd` — same known limitation as
+/// `FileOpenEvent::path`. `fchown(2)` (fd-only) is deferred. `uid`/`gid` of
+/// `(uid_t)-1`/`(gid_t)-1` (i.e. `u32::MAX`) mean "leave unchanged" per `chown(2)`'s
+/// own semantics — passed through as-is, not specially interpreted here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileChownEvent {
+    pub meta: EventMeta,
+    pub path: [u8; MAX_PATH_LEN],
+    pub path_len: u16,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Outbound network connection (`syscalls:sys_enter_connect`, `AF_INET/AF_INET6` only).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -245,4 +286,72 @@ pub struct ReadlineInputEvent {
     pub input_len: u32,
     /// Full command line input. Budget: 512 bytes.
     pub input: [u8; MAX_READLINE_INPUT],
+}
+
+/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
+/// sensor property (reported by conformance), not a schema limit. Shared by the
+/// eBPF loader and the uprobes sensor, which carried identical copies before.
+#[cfg(feature = "user")]
+#[must_use]
+pub fn comm_str(comm: &[u8; TASK_COMM_LEN]) -> std::string::String {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    std::string::String::from_utf8_lossy(&comm[..end]).into_owned()
+}
+
+/// Difference between the epoch clock and `CLOCK_MONOTONIC` (which the probes
+/// stamp events with, `bpf_ktime_get_ns`), computed once at sensor startup so
+/// normalization can turn probe timestamps into epoch nanoseconds. `0` (plus a
+/// warning) if the monotonic clock cannot be read — timestamps then stay
+/// monotonic-based rather than the sensor failing.
+///
+/// Lives here because the two sensor crates each carried a copy and the copies
+/// drifted once already (unchecked vs. saturating arithmetic).
+#[cfg(all(feature = "user", target_os = "linux"))]
+#[must_use]
+pub fn boot_epoch_offset_ns() -> u64 {
+    let epoch_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain FFI call writing into a valid stack-owned timespec.
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ret != 0 {
+        tracing::warn!("clock_gettime(CLOCK_MONOTONIC) failed — timestamps stay monotonic");
+        return 0;
+    }
+    let monotonic_ns = (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64);
+    epoch_ns.saturating_sub(monotonic_ns)
+}
+
+#[cfg(all(test, feature = "user"))]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn comm_str_stops_at_the_nul_terminator() {
+        let mut buf = [0u8; TASK_COMM_LEN];
+        buf[..4].copy_from_slice(b"bash");
+        assert_eq!(comm_str(&buf), "bash");
+    }
+
+    #[test]
+    fn comm_str_handles_a_full_unterminated_buffer() {
+        let buf = [b'x'; TASK_COMM_LEN];
+        assert_eq!(comm_str(&buf), "x".repeat(TASK_COMM_LEN));
+    }
+
+    #[test]
+    fn comm_str_replaces_non_utf8_instead_of_failing() {
+        // A process can prctl(PR_SET_NAME) itself to arbitrary bytes.
+        let mut buf = [0u8; TASK_COMM_LEN];
+        buf[0] = 0xFF;
+        buf[1] = b'a';
+        assert_eq!(comm_str(&buf), "\u{FFFD}a");
+    }
 }
