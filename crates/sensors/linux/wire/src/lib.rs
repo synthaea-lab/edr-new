@@ -44,7 +44,15 @@
 ///   `listen(2)` (no address, just `fd`+`backlog`) and `accept(2)`/`accept4(2)`
 ///   (needs a `sys_exit` probe to read the kernel-filled peer address — a new
 ///   probe shape this crate doesn't have yet) are deliberately deferred.
-pub const WIRE_VERSION: u32 = 7;
+/// - v8: `UdpSendEvent` added (issue #263 Phase 2) — `sendto(2)` only, same
+///   family-filtered sockaddr read as `ConnectEvent`/`SocketBindEvent`, plus the
+///   caller's requested payload size. `recvfrom(2)` is deliberately NOT captured:
+///   its source-address output parameter is only populated by the kernel after the
+///   syscall returns, the same `sys_exit_*` probe shape `accept`/`accept4` need and
+///   this crate doesn't have yet. `send(2)` (no destination arg) is also not
+///   captured — glibc issues it as `sendto(fd, buf, len, flags, NULL, 0)`, which
+///   this probe's null-address check already skips, same as `connect`/`bind`.
+pub const WIRE_VERSION: u32 = 8;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -187,6 +195,23 @@ pub struct SocketBindEvent {
     pub laddr_v6: [u8; 16],
     pub lport: u16,
     pub is_ipv6: bool,
+}
+
+/// Outbound UDP datagram (`syscalls:sys_enter_sendto`, `AF_INET`/`AF_INET6` only,
+/// issue #263 Phase 2). Same family-filtered sockaddr read as `ConnectEvent`, plus
+/// the caller's requested payload size (`len`, read at syscall entry — not the
+/// syscall's return value, so a short send still reports the requested size, same
+/// convention as `FileWriteEvent::bytes_requested`). `recvfrom(2)` is deliberately
+/// not captured — see this file's `WIRE_VERSION` v8 changelog.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UdpSendEvent {
+    pub meta: EventMeta,
+    pub daddr_v4: [u8; 4],
+    pub daddr_v6: [u8; 16],
+    pub dport: u16,
+    pub is_ipv6: bool,
+    pub size: u32,
 }
 
 /// TLS plaintext capture (uprobes on `SSL_read`/`SSL_write`, issue #90).
