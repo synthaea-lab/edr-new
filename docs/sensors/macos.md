@@ -1,4 +1,113 @@
 # macOS Sensor
 
-EndpointSecurity client design, AUTH vs NOTIFY events, entitlement requirements, and
-inline prevention capabilities.
+`EndpointSecurity` client design, AUTH vs NOTIFY events, entitlement requirements, and
+inline prevention capabilities. Implementation: `crates/sensors/macos/endpoint-security`
+(`sensor-macos`, issue #32).
+
+## Client design
+
+`libEndpointSecurity` hands events to an Objective-C block as `es_message_t` — a
+version-gated union of ~100 event structs whose layout shifts per SDK release.
+The sensor therefore never touches that layout from Rust: a small C shim
+(`shim/es_shim.c`, compiled by the crate's `build.rs` against the host SDK's own
+headers) subscribes, flattens each handled message into a stable plain-C struct,
+and calls back into Rust. Field access is checked by the C compiler against
+Apple's headers at build time — ABI drift becomes a compile error on the next
+SDK, not silent corruption.
+
+From there the path is the same shape as the Windows ETW sensor: an owned raw
+model (`raw.rs`) and a pure normalization layer (`normalize.rs`), both
+cross-platform and unit-tested on any host; only the FFI + client lifecycle are
+macOS-gated.
+
+## AUTH vs NOTIFY
+
+The sensor subscribes **NOTIFY-only**. AUTH events (inline allow/deny with a
+deadline) are the platform's blocking mechanism — that belongs to the response
+milestone (M6) and needs the verdict model first, same sequencing as Linux LSM
+blocking (#91). Nothing in the shim's design changes for AUTH beyond responding
+within the deadline; the subscription set is one array away.
+
+## Subscription set and volume discipline
+
+| ES event | Normalized as | Note |
+| --- | --- | --- |
+| `NOTIFY_EXEC` | `Event::Exec` | argv via `es_exec_arg`, parent lineage from the pre-exec image, kernel code-signing state (`CS_VALID`, signing/team id, platform-binary bit) mapped to `signature` at the source |
+| `NOTIFY_OPEN` | `Event::FileOpen` | kernel `fflag` (`FREAD`/`FWRITE`) translated to POSIX `O_*` so `schema::has_write_intent` works unchanged |
+| `NOTIFY_CREATE` | `Event::FileOpen` (`O_CREAT\|O_WRONLY`) | |
+| `NOTIFY_RENAME` | `Event::FileRename` | ransomware rename signal |
+| `NOTIFY_UNLINK` | `Event::FileDelete` | |
+| `NOTIFY_MMAP` | `Event::FileOpen` (`O_RDWR`) | forwarded **only** for `PROT_WRITE` + `MAP_SHARED` (mutates the file); dyld's read-only/private mapping torrent is dropped in the shim |
+| `NOTIFY_BTM_LAUNCH_ITEM_ADD` | `Event::FileOpen` + `FLAG_PERSISTENCE_BTM_ARTIFACT` | macOS 13+; registration-time launch-item fact, the macOS sibling of Windows 7045 — see `rules::check_btm_launch_item_persistence` |
+
+The agent's own process is muted (`es_mute_process` on the self audit token) so
+spool/alert writes don't feed back into the pipeline.
+
+The wider ES catalog (login/LW-session/OpenSSH sessions, quarantine xattrs,
+mount, signal, XPC connect) is issue #96.
+
+## Persistence coverage
+
+Two deliberately distinct signals:
+
+1. **Path writes** — a plist dropped into `LaunchAgents`/`LaunchDaemons`,
+   `/etc/periodic/`, `/var/at/tabs/`, or a shell rc file is an ordinary
+   write-intent `FileOpen` caught by `rules::check_persistence_write`'s path
+   patterns (no flag involved).
+2. **BTM registration** — Background Task Management emits
+   `BTM_LAUNCH_ITEM_ADD` when an item is *registered*, whatever the path taken
+   (plist drop, `SMAppService`, MDM), with the instigating process and the
+   resolved payload executable. This is the deterministic signal; it also
+   catches registrations that never touch a watched directory.
+
+## Entitlement requirements (and the dev-signing path)
+
+An ES client only starts when all three hold, and `es_new_client` reports which
+one failed — `sensor-macos` maps each to its fix:
+
+| `es_new_client` result | Fix |
+| --- | --- |
+| `ERR_NOT_PRIVILEGED` | run as root |
+| `ERR_NOT_PERMITTED` | grant the binary Full Disk Access (System Settings → Privacy & Security → Full Disk Access) — TCC gates ES clients behind it |
+| `ERR_NOT_ENTITLED` | the binary must be signed with `com.apple.developer.endpoint-security.client` |
+
+**Production**: the entitlement is restricted — it requires an Apple Developer
+ID with the Endpoint Security entitlement granted by Apple
+(<https://developer.apple.com/system-extensions/>, request form; approval is per
+team and takes weeks). The signed agent then runs on any Mac with the user's
+one-time TCC approval. This is a packaging concern (`packaging/macos`, M7), not
+a code one.
+
+**Development, on a lab machine you control**: SIP's entitlement check can be
+relaxed instead of waiting for Apple —
+
+1. Boot into recovery (hold power on Apple Silicon), open Terminal, and run
+   `csrutil disable` (or `csrutil enable --without debug` on Intel). Lab
+   machines/VMs only — never a daily driver.
+2. Ad-hoc sign the agent with the entitlement:
+
+   ```sh
+   cat > es.entitlements <<'EOF'
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+       <key>com.apple.developer.endpoint-security.client</key><true/>
+   </dict></plist>
+   EOF
+   codesign --force --options runtime \
+       --entitlements es.entitlements \
+       --sign - target/debug/agent
+   ```
+
+3. Grant the binary Full Disk Access, then `sudo target/debug/agent run`.
+
+A macOS VM (UTM/Tart) is the recommended lab shape — same posture as the
+Windows ETW validation VM.
+
+## Fork/exit and process-tree state
+
+`NOTIFY_FORK`/`NOTIFY_EXIT` are not subscribed: `schema` has no fork/exit
+variants (the Linux sensor doesn't emit them either), and nothing in the
+current detection set consumes them. They become interesting for pid-lifetime
+state (pid-reuse hygiene in the correlator); subscribe them when that consumer
+exists.
