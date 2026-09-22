@@ -69,12 +69,19 @@ self-update are named and deferred, not designed here.
      reasoning as ADR-0010's `policy_version`).
    - `entries: BTreeMap<PathBuf, String>` — path (relative to the version
      directory) → expected sha256 hex, same field this ADR's payload borrows
-     from `tamper::integrity::Manifest`.
+     from `tamper::integrity::Manifest`. Serialized as forward-slash strings
+     (the scope is Linux-only, so paths are POSIX-native already — no
+     separator translation needed, unlike a cross-platform manifest would).
    - `signature` — Ed25519 over the canonical JSON serialization (indent=2,
-     sorted keys, `signature` field replaced with a fixed placeholder before
-     signing) — identical canonicalization rule to ADR-0010/ADR-0009, so
-     there is exactly one canonicalizer in the workspace, not a second one
-     for updater manifests.
+     sorted keys, `signature` field set to `""` before signing — the empty
+     string, not omitted or null, so the field's presence in the schema is
+     fixed and only its content varies) — identical canonicalization rule to
+     ADR-0010/ADR-0009, so there is exactly one canonicalizer in the
+     workspace, not a second one for updater manifests. ADR-0010 specifies
+     the same "fixed placeholder" mechanism without pinning its exact value;
+     this ADR's `""` is the first concrete instance and the value ADR-0010's
+     own implementation should match when it lands, for one convention
+     instead of two.
 
 3. **Signature verification via `ring`**, not `ed25519-dalek`. Same algorithm
    ADR-0010 named; different crate, because `ring` is already a transitive
@@ -82,12 +89,21 @@ self-update are named and deferred, not designed here.
    capability. This is an implementation substitution, not a scheme change —
    ADR-0010's choice of *Ed25519* stands.
 
-4. **Key material**: ships with a **test-only keypair** and an explicit
+4. **Key material**: the Ed25519 **public** key is a compile-time constant
+   baked into the `updater` crate (`const UPDATER_PUBLIC_KEY: [u8; 32]`),
+   the same "no round-trip to a KMS in-band" reasoning ADR-0010 already
+   applied to policy verification. This means rotating the key requires
+   shipping a new binary — acceptable because the updater's own binary is
+   itself subject to this ADR's update mechanism, so key rotation is just
+   another signed release (see Deferred for the one bootstrap case this
+   doesn't cover: rotating *away from* a compromised key).
+   Ships with a **test-only keypair** and an explicit
    `SYNTHAEA_UPDATER_TEST_KEY` (or equivalent) marker distinguishing it from a
    production key, mirroring ADR-0010's `SYNTHAEA_STRICT_PROVENANCE`-style
-   dev/prod split. Real key generation, storage, and rotation are deferred
-   (see Deferred) — this ADR fixes the verification mechanism, not key
-   custody.
+   dev/prod split. Real key *generation* and *custody* (where the private key
+   lives, who can invoke a signing) are deferred (see Deferred) — this ADR
+   fixes the verification mechanism and where the public half lives, not
+   private-key custody.
 
 5. **Layout and atomic swap**: extends the existing Linux packaging
    convention (`packaging/linux/README.md`) rather than inventing a new one.
@@ -105,12 +121,61 @@ self-update are named and deferred, not designed here.
 
 6. **Rollback**: the previous `versions/` directory is kept (not deleted) until
    the new release passes a health check. Health check reuses
-   `tamper::heartbeat::SilenceMonitor` machinery already in the agent: if the
-   newly started process's heartbeat doesn't advance within a bounded window,
-   the updater flips `current` back to the previous version directory and
-   marks the failed `release_version` as banned — a banned version is refused
-   even if offered again (closes the exact gap ADR-0010 flagged: "a way to
-   prevent the same broken version from being reapplied").
+   `tamper::heartbeat::SilenceMonitor` machinery already in the agent: the
+   updater registers the freshly restarted process's primary heartbeat the
+   same way `agent/src/commands/linux.rs` already registers every other
+   no-canary sensor — one `register()` call at process start, bound by the
+   existing `NO_CANARY_SILENCE_DEADLINE_NS` (120s), not a new number invented
+   for this ADR. `register()`'s own semantics ("a sensor that never pulses is
+   caught one deadline after registration, not never") already answer the
+   "what if it's slow, not dead" question: the clock starts at registration
+   (process start), so a slow-but-alive process has the same 120s every other
+   sensor gets before being called silent, no new race to reason about. If
+   the heartbeat doesn't advance within that window, the updater flips
+   `current` back to the previous version directory and marks the failed
+   `release_version` as banned — a banned version is refused even if offered
+   again (closes the exact gap ADR-0010 flagged: "a way to prevent the same
+   broken version from being reapplied"). The ban list is a small local file,
+   `/var/lib/synthaea/banned_versions.json` (a bare `[release_version, ...]`
+   array — no signature needed, since it only ever narrows what this specific
+   install will accept, the same trust boundary as the install itself), read
+   at `updater` startup and appended to on each rollback. No admin override in
+   this slice — un-banning means deleting the entry by hand, same operational
+   tier as any other file under `/var/lib/synthaea` today.
+
+7. **Bootstrap — the first trusted state**: this ADR's signature chain covers
+   the *update* path (`bootstrap` → `versions/vX`) only; it does not need to
+   verify the package-installed `bootstrap/` binaries themselves. Day-0 trust
+   is the OS package manager's job (`.deb`/`.rpm` — package signing is
+   already tracked as future work on issue #36), not the updater's — `current`
+   starts pointed at `bootstrap` (per the existing packaging layout) and the
+   updater's manifest signature only has to prove itself from the first
+   *update* onward. No chicken-and-egg: the updater never has to bless its
+   own starting point.
+
+8. **Disk space**: exactly two release trees coexist under `versions/` —
+   `current`'s target and the one it would roll back to. Once a new release
+   passes its health check (Decision 6), the updater deletes the
+   now-superseded older version, keeping the count at two steady-state. A
+   release that's mid-rollback-window keeps both until the outcome is known.
+   No preflight free-space check in this slice (that needs real disk-usage
+   probing, a separate concern from signing/rollback) — a staging download
+   that fails partway for lack of space fails the same way any other
+   incomplete download does (manifest verification rejects a short/corrupt
+   stage before anything is swapped in), so the failure mode is safe, just
+   not preemptively diagnosed. Preflight space checks are deferred, not
+   silently skipped.
+
+9. **Failure recovery — corrupted `current`**: `current` is only ever changed
+   by a `rename(2)` symlink swap (Decision 5), so a torn write is not
+   possible — the symlink either still points at the pre-swap target or the
+   post-swap one. The one failure this doesn't cover is external corruption
+   (`current` deleted or pointed somewhere outside `versions/`/`bootstrap`
+   entirely, e.g. manual tampering or a bug elsewhere). On startup, if
+   `readlink(current)` fails or resolves outside the expected set, the
+   watchdog falls back to `bootstrap/` — the one path guaranteed to exist,
+   package-owned and never touched by the updater — rather than refusing to
+   start.
 
 ## Consequences
 
@@ -122,6 +187,14 @@ self-update are named and deferred, not designed here.
 
 - First real cryptographic-signing dependency in the workspace (`ring`'s
   `signature` module). No new top-level crate added.
+
+- Two new on-disk artifacts under `/var/lib/synthaea/`, alongside the
+  existing `bootstrap`/`current`/`versions` layout: `updater`'s embedded
+  public key (compiled into the binary, not a file) and
+  `banned_versions.json` (Decision 6). `packaging/linux/README.md`'s
+  directory listing should gain `banned_versions.json` when this ADR is
+  implemented — not done here, since the file doesn't exist until the code
+  does.
 
 - `updater` becomes the one process authorized to write `versions/` and flip
   `current` — `docs/architecture/threat-model.md`'s "only `updater` may
@@ -149,6 +222,15 @@ self-update are named and deferred, not designed here.
 - **Production key generation, storage, and rotation** — ships test-only for
   this slice, same posture ADR-0010 took for policy signing. Needs its own
   decision once there's a real control-plane release process to sign against.
+  Routine rotation is covered by Decision 4 (the key is just another signed
+  release), but rotating *away from a compromised key* is not: a compromised
+  key can sign a "rotate to this new key" release too, so that case needs an
+  out-of-band revocation path (e.g. a second, offline-held key, or a hardcoded
+  ban list shipped via the package rather than the updater channel) — real
+  design work, not a gap this slice can close.
+- **Preflight disk-space checks before staging a download** — Decision 8
+  leaves this unimplemented; failure is safe (rejected at manifest
+  verification) but not diagnosed ahead of time.
 - **Canary-ring content distribution mechanics** (rule/model updates,
   per-ring telemetry, auto-halt on regression) — issues #73/#49, a separate
   ADR when that work starts.
