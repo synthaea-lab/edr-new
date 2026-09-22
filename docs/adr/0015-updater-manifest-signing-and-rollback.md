@@ -1,6 +1,6 @@
 # ADR-0015: Updater — staged self-update, manifest signing, and rollback (Linux-first slice)
 
-- **Status**: proposed
+- **Status**: accepted
 - **Date**: 2026-09-21
 
 ## Context
