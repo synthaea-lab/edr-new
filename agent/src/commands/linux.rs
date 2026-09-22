@@ -203,6 +203,7 @@ fn can_use_ebpf() -> bool {
 pub(crate) fn cmd_run(
     alerts: &std::path::Path,
     events: &std::path::Path,
+    state_dir: &std::path::Path,
     enable_kill: bool,
     enable_quarantine: bool,
     enable_tls_capture: bool,
@@ -281,6 +282,13 @@ pub(crate) fn cmd_run(
         }
     }
     crate::silence::spawn_monitor(silence_monitor.clone(), sink.clone());
+
+    // Self-integrity verification (#71/#30): periodic re-check of the installed
+    // binaries against the signed release manifest `updater` persisted at promote
+    // time — the real root of trust the heartbeat above cannot provide (silence
+    // proves a sensor stopped producing, not that the binary producing it is the
+    // one that was actually shipped).
+    crate::integrity::spawn_monitor(state_dir.to_path_buf(), sink.clone());
 
     // Spawn health beacon thread — emits periodic self-diagnostics to the control
     // plane (issue #134). Sensor health is now the real silence-monitor snapshot

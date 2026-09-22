@@ -34,6 +34,7 @@ pub(crate) fn cmd_status() -> anyhow::Result<()> {
 pub(crate) fn cmd_run(
     _alerts: &std::path::Path,
     _events: &std::path::Path,
+    _state_dir: &std::path::Path,
     _enable_kill: bool,
     _enable_quarantine: bool,
     _enable_tls_capture: bool,

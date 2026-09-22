@@ -138,6 +138,7 @@ pub(crate) fn cmd_status() -> anyhow::Result<()> {
 pub(crate) fn cmd_run(
     alerts: &std::path::Path,
     events: &std::path::Path,
+    _state_dir: &std::path::Path,
     _enable_kill: bool,
     _enable_quarantine: bool,
     // uprobes are a Linux mechanism — the capture flags are accepted for CLI
