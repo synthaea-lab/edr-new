@@ -46,7 +46,7 @@ each row below.
 | Mechanism | Status | Where / why |
 | --- | --- | --- |
 | EndpointSecurity (core events: exec, file, BTM launch items) | used | `sensors/macos/endpoint-security` (#32) |
-| ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | planned | #96 |
+| ES catalog widening (login/lw_session/OpenSSH, xattr/quarantine, mount, signal, XPC) | used | `sensors/macos/endpoint-security` (#96) |
 | NetworkExtension: filter-data + DNS-proxy | planned | `sensors/macos/network-extension` |
 | NetworkExtension: packet-tunnel provider | rejected (revisit) | full-packet capture is cost without need given filter-data + DNS |
 | Unified log (OSLog predicates: sudo auth, TCC decisions, Gatekeeper verdicts) | used | `sensors/macos/unifiedlog` (#95) |
