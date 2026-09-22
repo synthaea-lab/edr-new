@@ -6,9 +6,15 @@ what, and the degraded modes. The system-level view and the invariants live in
 
 ## Composition
 
-`main.rs` parses the CLI and dispatches to `commands/` — the only module tree
-with `cfg(target_os)`. Composition is plain constructor injection, checked at
-compile time; there is no registry or DI framework.
+`main.rs` loads the install configuration **first** (`agent.toml` via
+`config::load`, ADR-0013 — fail-fast on missing/invalid, discovery order in
+`crates/config`; it sets the log level, `RUST_LOG` still overrides), then
+parses the CLI and dispatches to `commands/` — the only module tree with
+`cfg(target_os)`. Composition is plain constructor injection, checked at
+compile time; there is no registry or DI framework. (The config file also
+carries the control-plane URL and storage/ipc/resource sections; today's
+upload path is still driven by the `--server` flag — aligning the two is part
+of #314.)
 
 - `commands/common.rs` — the platform-independent spine of `run`:
   optional transport (spool + upload thread, `--server`), the `DetectionSink`
@@ -17,8 +23,10 @@ compile time; there is no registry or DI framework.
   once, not per platform.
 - `commands/linux.rs` / `commands/windows.rs` — sensor selection (eBPF with
   audit fallback; ETW + eventlog), and platform-only wiring: response hooks
-  (#25, Linux-first), silence monitors (#71), netlink/journal pollers,
-  protected-resource guard, kill-loudness.
+  (#25, Linux-first), silence monitors (#71), netlink/journal pollers, the
+  opt-in uprobes sensor (`--enable-tls-capture` / `--enable-readline-capture`,
+  #90 — inert on Windows like the response flags), protected-resource guard,
+  kill-loudness.
 
 Sink composition is decorator-style, matching the trait design
 (`EventSink::on_event(&self)`): `PulsingSink(ProtectedResourceGuard(DetectionSink))`
@@ -32,6 +40,7 @@ thread exists to serve it:
 | Thread | Owns | Blocking I/O allowed |
 | --- | --- | --- |
 | sensor drain (per sensor) | in-memory engines: rules, sigma, correlator dispatch | **no** |
+| uprobes drain (opt-in) | TLS/readline capture: budget + allowlist + redaction, then the same sink | **no** |
 | `enrich` worker | SHA-256 + signature (budgeted), `events.jsonl` append, spool append | yes |
 | `yara-scan` worker | budgeted content scans, quarantine (#25) | yes |
 | `transport-upload` | spool drain → batched POST, backoff | yes |
