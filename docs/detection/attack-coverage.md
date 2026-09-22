@@ -26,9 +26,9 @@ dedicated content · 📋 waits on a filed issue (telemetry or content) ·
 **W**indows / **M**acos where coverage differs.
 
 Engine tags as of this assessment (from `rules`/`correlator` source):
-T1021.002, T1037.004, T1041, T1048.003, T1053.003/.005, T1055, T1059
-(+.001/.004), T1071 (+.004), T1105, T1127, T1136.001, T1204, T1218, T1543.001/
-.002/.003, T1547.015, T1571, T1611, T1620. Sigma-imported content carries its
+T1021.002, T1036.005, T1037.004, T1041, T1048.003, T1053.003/.005, T1055,
+T1059 (+.001/.004), T1070.002, T1071 (+.004), T1105, T1110, T1127, T1136.001,
+T1204, T1218, T1490, T1543.001/.002/.003, T1547.015, T1571, T1611, T1620. Sigma-imported content carries its
 own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 
 ## Initial Access (TA0001)
@@ -73,10 +73,10 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 
 | Technique | L | W | M | Status |
 | --- | --- | --- | --- | --- |
-| T1070 Indicator Removal (logs, timestomp, .004 file deletion) | 🟡 | 📋 | 📋 | Deletions visible everywhere; log-path content work; timestomp: LSM hook row (L), minifilter #136 (W), #357 (M) |
+| T1070 Indicator Removal (.002 log clearing shipped; timestomp pending) | 🟢 | 🟢/📋 | 🟢 | `check_log_clear_exec` (wevtutil/`log erase`/journal-vacuum, all platforms) + `check_log_file_delete` (L/M FileDelete streams; W file half waits on #136). Timestomp stays: LSM row (L), #136 (W), #357 (M) |
 | T1562 Impair Defenses | 📋 | 📋 | 🟢 | Signal-to-ES-clients shipped (M); kill-tracing #362 (L); driver tamper telemetry #39 (W); service-stop content everywhere |
 | T1055 Process Injection | 📋 | 🟢/📋 | 📋 | Remote-thread tag exists (W partial; full via TI-ETW #137); ptrace/process_vm #265 (L); task-port set #355 (M) |
-| T1036 Masquerading | 🟡 | 🟡 | 🟡 | comm/path/signature mismatch content — cheap wins on existing exec events; pack below |
+| T1036 Masquerading | 🟢 | 🟢 | 🟢 | `check_masquerading` — system-binary names outside their legitimate locations (wave 1, #379) |
 | T1027 Obfuscation | 🟢 | 🟢 | 🟡 | Encoded-command coverage; broader entropy scoring is the ML layer |
 | T1553 Subvert Trust Controls | — | 📋 | 🟢/📋 | Gatekeeper override #356, quarantine-strip #357 (M); MotW-strip via #365/#136 (W) |
 | T1218 System Binary Proxy Execution | — | 🟢 | — | LOLBIN rule (W); L/M lolbin lists are content work |
@@ -87,7 +87,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 | Technique | L | W | M | Status |
 | --- | --- | --- | --- | --- |
 | T1003 OS Credential Dumping | 🟡 | 📋 | 🟡 | /etc/shadow reads visible (L), keychain-file reads visible (M) — content work; LSASS handle access needs ObCallbacks #137 (W) |
-| T1110 Brute Force | 🟡 | 🟡 | 🟡 | Auth failures land on all three; burst content is the pack below |
+| T1110 Brute Force | 🟢 | 🟢 | 🟢 | AUTH-BURST sliding counter per (target, source) over the shared `Auth` stream (wave 1, #377) |
 | T1555 Credentials from Password Stores | 🟡 | 🟡 | 🟡 | Browser-store/keychain file paths visible; content work |
 | T1552 Unsecured Credentials (files) | 🟡 | 🟡 | 🟡 | File-open events + path/content heuristics; content work |
 | T1558 Steal/Forge Kerberos Tickets | — | 📋 | — | Endpoint-side shadow via #364; DC-side is plane scope |
@@ -144,7 +144,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 | Technique | L | W | M | Status |
 | --- | --- | --- | --- | --- |
 | T1486 Data Encrypted (ransomware) | 🟢 | 🟡 | 🟡 | Burst write/rename tags (L); full pack is #82 (tripwires + reflex response) |
-| T1490 Inhibit System Recovery | 🟡 | 🟡 | 🟡 | vssadmin/tmutil/wbadmin cmdlines visible — cheap content wins (pack) |
+| T1490 Inhibit System Recovery | 🟢 | 🟢 | 🟢 | `check_recovery_inhibit` — vssadmin/wmic-shadowcopy/wbadmin/bcdedit/tmutil multi-token matches (wave 1, #381) |
 | T1489 Service Stop | 🟡 | 🟡 | 🟡 | Unit/service lifecycle visible; content work |
 | T1529 System Shutdown | 🟡 | 🟡 | 🟡 | Exec-visible; low value alone |
 
