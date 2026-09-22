@@ -23,8 +23,10 @@ actually tagged in `crates/rules`/`correlator`, not aspirational mappings.
 ## Coverage at a glance
 
 One cell per platform and signal domain: the status glyph plus the master
-source that delivers (or will deliver) it. The per-platform tables below
-carry the detail behind every cell.
+source that delivers (or will deliver) it. Each focus names the ATT&CK
+tactics it chiefly feeds — the technique-level view lives in
+[docs/detection/attack-coverage.md](../detection/attack-coverage.md). The
+per-platform tables below carry the detail behind every cell.
 
 **Legend:** ✅ used · 🔨 built (runtime prerequisite outstanding) ·
 📋 planned (issue filed) · 🔍 evaluated (matrix) · ⭕ gap (no mechanism
@@ -32,21 +34,21 @@ evaluated yet) · — not applicable
 
 | Focus | Linux | Windows | macOS |
 | --- | --- | --- | --- |
-| **Process execution** | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
-| **File activity** | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
-| **Network** | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ ES mount · 📋 #358 listen |
-| **DNS** | 📋 #267 | ✅ ETW | 🔨 NE |
-| **Encrypted traffic** | ✅ uprobes · 📋 JA4 #86 | 📋 #373 | 📋 #360 |
-| **Scripts & shells** | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | 📋 #374 (evaluate) |
-| **Memory & injection** | 📋 #265 | 📋 driver #137 | 📋 #355 |
-| **Identity & privilege** | ✅ journald · 📋 #266 | ✅ WEL · 📋 #364 #285 | ✅ ES + log · 📋 #356 |
-| **Persistence & autostart** | ✅ journald + rules | ✅ WEL + ETW | ✅ ES |
-| **OS security verdicts** | 🔍 SELinux AVC | 📋 #283 | ✅ log · 📋 #356 |
-| **Tamper & anti-forensics** | 📋 #264 #362 | 📋 driver #136 | ✅ ES · 📋 #357 |
-| **Download provenance** | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
-| **Devices** | 📋 #84 | 📋 #84 | 📋 device-control |
-| **Containers** | ✅ /proc | 📋 #371 silos | 📋 #372 host-side |
-| **Host state & inventory** | 📋 #87 | ✅ WMI · 📋 #286 | 📋 #359 |
+| **Process execution**<br><sub>TA0002 Execution</sub> | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
+| **File activity**<br><sub>TA0040 Impact · TA0005 Evasion</sub> | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
+| **Network**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ ES mount · 📋 #358 listen |
+| **DNS**<br><sub>TA0011 C2</sub> | 📋 #267 | ✅ ETW | 🔨 NE |
+| **Encrypted traffic**<br><sub>TA0011 C2 · TA0010 Exfil</sub> | ✅ uprobes · 📋 JA4 #86 | 📋 #373 | 📋 #360 |
+| **Scripts & shells**<br><sub>TA0002 Execution</sub> | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | 📋 #374 (evaluate) |
+| **Memory & injection**<br><sub>TA0005 Evasion · TA0004 Priv-Esc</sub> | 📋 #265 | 📋 driver #137 | 📋 #355 |
+| **Identity & privilege**<br><sub>TA0006 Cred Access · TA0004 Priv-Esc</sub> | ✅ journald · 📋 #266 | ✅ WEL · 📋 #364 #285 | ✅ ES + log · 📋 #356 |
+| **Persistence & autostart**<br><sub>TA0003 Persistence</sub> | ✅ journald + rules | ✅ WEL + ETW | ✅ ES |
+| **OS security verdicts**<br><sub>TA0005 Evasion context</sub> | 🔍 SELinux AVC | 📋 #283 | ✅ log · 📋 #356 |
+| **Tamper & anti-forensics**<br><sub>TA0005 Evasion</sub> | 📋 #264 #362 | 📋 driver #136 | ✅ ES · 📋 #357 |
+| **Download provenance**<br><sub>TA0001 Initial Access</sub> | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
+| **Devices**<br><sub>TA0001 Initial Access · TA0010 Exfil</sub> | 📋 #84 | 📋 #84 | 📋 device-control |
+| **Containers**<br><sub>TA0004 Escape context</sub> | ✅ /proc | 📋 #371 silos | 📋 #372 host-side |
+| **Host state & inventory**<br><sub>TA0003 pre-existing persistence</sub> | 📋 #87 | ✅ WMI · 📋 #286 | 📋 #359 |
 
 ## Linux
 
