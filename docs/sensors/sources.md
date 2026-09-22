@@ -20,9 +20,14 @@ each row below.
 | netlink: sock_diag / conntrack / proc connector | planned | `sensors/linux/netlink` |
 | journald (auth, service lifecycle) | planned | `sensors/linux/journal` |
 | /proc, /sys polling | used | seeding + fallbacks only |
+| mount/umount + tamper-signal syscalls | planned | #362 — Linux feed for the platform-neutral v21 `Mount`/`Signal` events; SIGKILL sender attribution kill_loudness can't see |
+| exec environment (LD_PRELOAD family, allowlist) | planned | #363 — loader-level injection; #265 covers the syscall-level primitives |
 | custom kernel module | **rejected** | eBPF-only stance: verifier safety, no third-party kernel code |
 | ptrace interception | **rejected** | invasive, single-tracer conflicts, evasion tarpit |
 | perf hardware counters | rejected (revisit) | niche side-channel detections; cost/benefit unproven |
+| AF_PACKET / libpcap full capture | **rejected** | volume without need — conntrack flows (#92) + JA4/SNI (#86) carry the network signal |
+| inotify | **rejected** | coarser than the eBPF file events and fanotify (#34); no attribution |
+| utmp/wtmp/btmp parsing | **rejected** | journald (#93) carries the same logins with provenance |
 
 ## Windows
 
@@ -37,9 +42,15 @@ each row below.
 | Minifilter (file deletes/renames/pipes, timestomping via SetInformation, Alternate Data Streams, raw volume access) | planned | #136 (on driver #39) |
 | WFP (network filtering + inline block) | planned | #138 (on driver #39) |
 | Threat-Intelligence ETW (injection; needs PPL) | planned | #137 (on driver #39) |
+| Kerberos / NTLM / LDAP-Client telemetry (endpoint side) | planned | #364 — credential-attack + AD-recon shadow visible from the endpoint; DC-side events stay server-milestone scope |
+| Zone.Identifier ADS (mark-of-the-web) | planned | #365 — Windows feed for the platform-neutral v21 `FileQuarantine`; #136's minifilter supersedes the userland read-back |
+| Socket-table snapshots (GetExtendedTcpTable) | planned | #366 — sibling of `sensors/linux/netlink` (#92) and macOS #358; the missing LISTENER-DRIFT source |
 | WMI/CIM queries | used (inventory) | `inventory` collectors |
 | Userland API hooking / detours | **rejected** | stability, AV conflicts, trivially unhookable — ETW + kernel callbacks only |
 | Clipboard capture | **rejected** | privacy/noise cost exceeds detection value; commercial norm agrees |
+| Raw packet capture (WinPcap/npcap-style) | **rejected** | ETW network + WFP (#138) carry the signal without the driver and volume cost |
+| Keystroke / screen capture | **rejected** | privacy line, same reasoning as clipboard |
+| Execution-history artifacts (Prefetch, Amcache, Shimcache) | rejected (deferred) | point-in-time forensics, not streaming telemetry — DFIR workbench territory (M10), pulled on demand, not shipped continuously |
 
 ## macOS
 
