@@ -12,7 +12,7 @@ Each event is a dict with at minimum the "type" key:
     fileopen: {"type": "fileopen", "ts_ns": int, "flags": int}
 
 Fileopen flags (POSIX):
-    O_WRONLY = 0o1, O_RDWR = 0o2, O_CREAT = 0o100
+    O_ACCMODE = 0o3, O_WRONLY = 0o1, O_RDWR = 0o2, O_CREAT = 0o100
 
 This extraction is in 1-to-1 correspondence with the
 `CorrelationEngine::behavior_vector_for_pid` method of crates/synthaea-correlator/src/lib.rs.
@@ -26,6 +26,7 @@ from __future__ import annotations
 
 # ── Rust mirror constants ──────────────────────────────────────────────────────
 
+O_ACCMODE: int = 0o3
 O_WRONLY: int = 0o1
 O_RDWR: int = 0o2
 O_CREAT: int = 0o100
@@ -57,8 +58,11 @@ def _is_private_ipv4(addr: list[int]) -> bool:
 
 
 def _is_write(flags: int) -> bool:
-    """Returns True if the flags indicate a write intent."""
-    return bool(flags & (O_WRONLY | O_RDWR | O_CREAT))
+    """Write intent — mirror of `schema::has_write_intent` (Rust): access mode
+    `O_WRONLY`/`O_RDWR` (a 2-bit field, so the invalid `0o3` combination is NOT a
+    write — the kernel refuses it), or `O_CREAT`."""
+    access_mode = flags & O_ACCMODE
+    return access_mode in (O_WRONLY, O_RDWR) or bool(flags & O_CREAT)
 
 
 # ── Main extraction ────────────────────────────────────────────────────────────
