@@ -17,8 +17,10 @@
 pub mod correlation;
 
 use ort::{session::Session, value::Tensor};
+use serde::Deserialize;
 
 use crate::{
+    bounds::FeatureBounds,
     features::cmdline::{self, FEATURE_NAMES},
     forest::{Forest, ParseError},
 };
@@ -40,6 +42,19 @@ pub enum ScorerError {
     /// The `scores` output was missing or empty.
     #[error("model produced no score")]
     NoScore,
+    /// Input feature outside training bounds (OOD detection, issue #46).
+    ///
+    /// The model was trained on features within specific ranges; this input falls
+    /// outside those ranges and the score would be unreliable. Treat as "no score
+    /// available" rather than "benign" — the absence of an ML score does not mean
+    /// the input is safe, just that the model cannot confidently score it.
+    #[error("feature {feature} value {value:.3} outside bounds [{min:.3}, {max:.3}]")]
+    FeatureOutOfBounds {
+        feature: String,
+        value: f32,
+        min: f32,
+        max: f32,
+    },
 }
 
 /// A cmdline score plus the explanation of how it was reached.
@@ -54,18 +69,71 @@ pub struct Score {
     pub attributions: Vec<schema::detection::ScoreAttribution>,
 }
 
+/// Model metadata sidecar (issue #46).
+///
+/// Loaded from `model_metadata.json` alongside the ONNX model. Optional: legacy
+/// models without metadata still work (no OOD validation, threshold defaults to 0).
+#[derive(Debug, Deserialize)]
+pub(crate) struct ModelMetadata {
+    threshold: Option<f32>,
+    feature_bounds: Option<FeatureBounds>,
+}
+
 /// Scores command lines against one Isolation Forest model.
 pub struct CmdlineScorer {
     session: Session,
     forest: Forest,
+    bounds: Option<FeatureBounds>,
+    #[allow(dead_code)] // TODO: use threshold in future phase when correlator integration lands
+    threshold: Option<f32>,
 }
 
 impl CmdlineScorer {
-    /// Loads a model from ONNX bytes (as delivered by the update channel).
+    /// Loads a model from ONNX bytes with optional metadata (issue #46).
     ///
-    /// Parses the tree structure up front so attribution needs no per-score reparse,
-    /// and checks the model's feature arity against the cmdline extractor so a
-    /// mismatched model fails loudly at load, not silently at score time.
+    /// Metadata format: JSON sidecar (`model_metadata.json`) with optional
+    /// `threshold` (conformal calibration) and `feature_bounds` (OOD detection).
+    /// If `metadata` is `None`, the scorer works in legacy mode (no OOD validation).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScorerError`] when the ONNX session cannot be built, the tree
+    /// structure cannot be parsed, the model's feature arity does not match
+    /// the cmdline extractor, or the metadata JSON is malformed.
+    pub fn from_onnx_bytes_with_metadata(
+        model: &[u8],
+        metadata: Option<&[u8]>,
+    ) -> Result<Self, ScorerError> {
+        let session = Session::builder()?.commit_from_memory(model)?;
+        let forest = Forest::from_onnx_bytes(model)?;
+
+        if forest.n_features() != FEATURE_NAMES.len() {
+            return Err(ScorerError::FeatureArity {
+                model: forest.n_features(),
+                extractor: FEATURE_NAMES.len(),
+            });
+        }
+
+        let (bounds, threshold) = if let Some(meta_bytes) = metadata {
+            let parsed: ModelMetadata = serde_json::from_slice(meta_bytes)
+                .map_err(|_| ParseError::Malformed("invalid metadata JSON"))?;
+            (parsed.feature_bounds, parsed.threshold)
+        } else {
+            (None, None)
+        };
+
+        Ok(Self {
+            session,
+            forest,
+            bounds,
+            threshold,
+        })
+    }
+
+    /// Loads a model from ONNX bytes (legacy: no metadata).
+    ///
+    /// Equivalent to `from_onnx_bytes_with_metadata(model, None)`. Provided for
+    /// backward compatibility with existing callers.
     ///
     /// # Errors
     ///
@@ -73,15 +141,7 @@ impl CmdlineScorer {
     /// structure cannot be parsed, or the model's feature arity does not match
     /// the cmdline extractor.
     pub fn from_onnx_bytes(model: &[u8]) -> Result<Self, ScorerError> {
-        let session = Session::builder()?.commit_from_memory(model)?;
-        let forest = Forest::from_onnx_bytes(model)?;
-        if forest.n_features() != FEATURE_NAMES.len() {
-            return Err(ScorerError::FeatureArity {
-                model: forest.n_features(),
-                extractor: FEATURE_NAMES.len(),
-            });
-        }
-        Ok(Self { session, forest })
+        Self::from_onnx_bytes_with_metadata(model, None)
     }
 
     fn run(&mut self, features: &[f32; 9]) -> Result<f32, ScorerError> {
@@ -96,9 +156,18 @@ impl CmdlineScorer {
     ///
     /// # Errors
     ///
-    /// Returns [`ScorerError`] when ONNX inference fails or produces no score.
+    /// Returns [`ScorerError::FeatureOutOfBounds`] if the feature vector falls
+    /// outside training bounds (OOD detection, issue #46). Returns other
+    /// [`ScorerError`] variants when ONNX inference fails or produces no score.
     pub fn score(&mut self, cmdline: &str) -> Result<f32, ScorerError> {
-        self.run(&cmdline::extract_features(cmdline))
+        let features = cmdline::extract_features(cmdline);
+
+        // OOD validation (if bounds available)
+        if let Some(ref bounds) = self.bounds {
+            bounds.validate(&features)?;
+        }
+
+        self.run(&features)
     }
 
     /// The anomaly score plus its top-`k` feature attributions — for an event that
@@ -106,10 +175,18 @@ impl CmdlineScorer {
     ///
     /// # Errors
     ///
-    /// Returns [`ScorerError`] when inference fails, produces no score, or the
+    /// Returns [`ScorerError::FeatureOutOfBounds`] if the feature vector falls
+    /// outside training bounds (OOD detection, issue #46). Returns other
+    /// [`ScorerError`] variants when inference fails, produces no score, or the
     /// attribution walk finds the model inconsistent with its parsed structure.
     pub fn score_explained(&mut self, cmdline: &str, k: usize) -> Result<Score, ScorerError> {
         let features = cmdline::extract_features(cmdline);
+
+        // OOD validation
+        if let Some(ref bounds) = self.bounds {
+            bounds.validate(&features)?;
+        }
+
         let value = self.run(&features)?;
         let attribution = self.forest.attribute(&features)?;
         let names: Vec<&str> = FEATURE_NAMES.to_vec();

@@ -120,6 +120,29 @@ fn log_likelihood_ratio(idx: usize, value: f32) -> f32 {
 
 /// Updates an entity's belief with the current `BehaviorVector`.
 /// First applies the exponential decay toward the prior, then the Bayesian update.
+///
+/// # Phase 3 Integration (Issue #46, blocked by #13/#14/#47)
+///
+/// When the ML scorer is integrated, this function will accept an optional
+/// `ml_llr: Option<f32>` parameter (the output of `ml::correlation::score_to_llr`).
+///
+/// Proposed signature:
+/// ```ignore
+/// pub(crate) fn update_belief(
+///     state: &mut BeliefState,
+///     v: &BehaviorVector,
+///     ml_llr: Option<f32>,  // NEW: ML contribution (None = no score)
+///     now_ns: u64,
+/// )
+/// ```
+///
+/// Semantics:
+/// - `ml_llr = Some(llr)` → add `llr` to `log_odds` after hand-calibrated LLRs
+/// - `ml_llr = None` → skip ML contribution (no evidence, not "benign")
+/// - OOD rejection (`ScorerError::FeatureOutOfBounds`) → `ml_llr = None`
+///
+/// The caller (agent sink, #47) will handle the ML scorer invocation and error
+/// handling before passing the LLR here.
 pub(crate) fn update_belief(state: &mut BeliefState, v: &BehaviorVector, now_ns: u64) {
     // Exponential decay toward the prior when inactive
     let dt_s = (now_ns.saturating_sub(state.last_update_ns)) as f32 / 1e9;
@@ -130,6 +153,11 @@ pub(crate) fn update_belief(state: &mut BeliefState, v: &BehaviorVector, now_ns:
     for (i, &value) in v.to_vec().iter().enumerate() {
         state.log_odds += log_likelihood_ratio(i, value);
     }
+
+    // TODO(#46 Phase 3): Add optional ML LLR parameter and contribution here
+    // if let Some(llr) = ml_llr {
+    //     state.log_odds += llr;
+    // }
 
     state.last_update_ns = now_ns;
 }
