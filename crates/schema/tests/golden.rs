@@ -10,10 +10,11 @@ use std::net::IpAddr;
 
 use schema::{
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, Event,
-    EventMeta, ExecEvent, FileDeleteEvent, FileOpenEvent, FileRenameEvent, FileWriteEvent,
-    ImageLoadEvent, ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent, RegistrySetEvent,
-    ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
-    TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
+    EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
+    FileRenameEvent, FileWriteEvent, ImageLoadEvent, ListenPortEvent, NetworkFlowEvent,
+    ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent, ShellType, SmbConnectEvent,
+    SocketAcceptEvent, SocketBindEvent, SocketListenEvent, TlsCaptureEvent, TlsDirection,
+    TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
@@ -710,8 +711,96 @@ fn socket_bind_golden() {
 }
 
 #[test]
+fn file_chmod_golden() {
+    // v17 (#262 Phase 2): chmod +s on a world-writable binary — T1222.002.
+    assert_golden(
+        &Event::FileChmod(FileChmodEvent {
+            meta: EventMeta {
+                pid: 9001,
+                ppid: 9000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_014_000_000_000,
+                comm: "chmod".into(),
+                container: None,
+            },
+            path: "/tmp/backdoor".into(),
+            mode: 0o4755,
+        }),
+        "file_chmod",
+    );
+}
+
+#[test]
+fn file_chown_golden() {
+    // v17 (#262 Phase 2): ownership handed to root — privilege-escalation shape.
+    assert_golden(
+        &Event::FileChown(FileChownEvent {
+            meta: EventMeta {
+                pid: 9002,
+                ppid: 9000,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_015_000_000_000,
+                comm: "chown".into(),
+                container: None,
+            },
+            path: "/tmp/backdoor".into(),
+            uid: 0,
+            gid: 0,
+        }),
+        "file_chown",
+    );
+}
+
+#[test]
+fn socket_listen_golden() {
+    // v18 (#263 Phase 2): listen(2) with a correlated bind() address — the common
+    // case (backdoor bind-then-listen), addr_resolved: true on the wire side.
+    assert_golden(
+        &Event::SocketListen(SocketListenEvent {
+            meta: EventMeta {
+                pid: 8002,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_016_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            local_addr: Some("0.0.0.0".parse().unwrap()),
+            local_port: Some(4444),
+            backlog: 1,
+        }),
+        "socket_listen",
+    );
+}
+
+#[test]
+fn socket_listen_unresolved_golden() {
+    // v18 (#263 Phase 2): listen() with no correlated bind() — probe attached
+    // after bind(), or the kernel implicit-bound at listen() time.
+    assert_golden(
+        &Event::SocketListen(SocketListenEvent {
+            meta: EventMeta {
+                pid: 8003,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_017_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            local_addr: None,
+            local_port: None,
+            backlog: 128,
+        }),
+        "socket_listen_unresolved",
+    );
+}
+
+#[test]
 fn socket_accept_golden() {
-    // v17 (#263 Phase 2): peer address of a newly accepted connection — an
+    // v19 (#263 Phase 2): peer address of a newly accepted connection — an
     // attacker's IP connecting to a listening backdoor.
     assert_golden(
         &Event::SocketAccept(SocketAcceptEvent {
@@ -942,6 +1031,23 @@ fn meta_accessor_covers_all_variants() {
             meta: meta.clone(),
             local_addr: "0.0.0.0".parse::<IpAddr>().unwrap(),
             local_port: 0,
+        }),
+        Event::FileChmod(FileChmodEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            mode: 0,
+        }),
+        Event::FileChown(FileChownEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            uid: 0,
+            gid: 0,
+        }),
+        Event::SocketListen(SocketListenEvent {
+            meta: meta.clone(),
+            local_addr: None,
+            local_port: None,
+            backlog: 0,
         }),
         Event::SocketAccept(SocketAcceptEvent {
             meta: meta.clone(),

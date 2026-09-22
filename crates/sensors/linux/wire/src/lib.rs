@@ -13,6 +13,11 @@
 //! `ExecEvent` is built in a `PerCpuArray` because `image` alone already exceeds the
 //! stack budget.
 
+// The "user" feature (userspace loader + uprobes sensor) brings std in for the
+// shared decode helpers at the bottom; the eBPF build stays pure no_std.
+#[cfg(feature = "user")]
+extern crate std;
+
 /// Bumped on every layout-affecting change to the structs below. Not a wire header
 /// (ring-buffer items carry none) — a build-time tripwire: the userspace loader
 /// `const _`-asserts the value it was compiled against, so an ebpf/userspace version
@@ -44,7 +49,28 @@
 ///   `listen(2)` (no address, just `fd`+`backlog`) and `accept(2)`/`accept4(2)`
 ///   (needs a `sys_exit` probe to read the kernel-filled peer address — a new
 ///   probe shape this crate doesn't have yet) are deliberately deferred.
-/// - v8: `SocketAcceptEvent` added (issue #263 Phase 2) — `accept(2)`/`accept4(2)`.
+/// - v8: `FileChmodEvent`/`FileChownEvent` added (issue #262 Phase 2) —
+///   `chmod(2)`/`fchmodat(2)` and `chown(2)`/`lchown(2)`/`fchownat(2)`. All five
+///   read a real path argument, unlike `FileWriteEvent`. `fchmod(2)`/`fchown(2)`
+///   (fd-only, no path) are deferred the same way `write(2)`'s fd-only shape was
+///   handled: a future addition, not a silent gap.
+/// - v9: `UdpSendEvent` added (issue #263 Phase 2) — `sendto(2)` only, same
+///   family-filtered sockaddr read as `ConnectEvent`/`SocketBindEvent`, plus the
+///   caller's requested payload size. `recvfrom(2)` is deliberately NOT captured:
+///   its source-address output parameter is only populated by the kernel after the
+///   syscall returns, the same `sys_exit_*` probe shape `accept`/`accept4` need and
+///   this crate doesn't have yet. `send(2)` (no destination arg) is also not
+///   captured — glibc issues it as `sendto(fd, buf, len, flags, NULL, 0)`, which
+///   this probe's null-address check already skips, same as `connect`/`bind`.
+/// - v10: `SocketListenEvent` added (issue #263 Phase 2) — `listen(2)`. `listen(2)`'s
+///   own args are just `fd`+`backlog`, no address, so the probe correlates against
+///   an in-kernel `(pid, fd) -> address` map populated by `sys_enter_bind` (internal
+///   to the ebpf crate, not part of this wire ABI). No matching `bind()` observed —
+///   probe attached after it happened, or the kernel's implicit ephemeral-port bind
+///   at `listen()` time — leaves `addr_resolved: false` and the address fields
+///   zeroed, rather than silently dropping the event. `accept(2)`/`accept4(2)`
+///   remain deferred (still need the `sys_exit` probe shape).
+/// - v11: `SocketAcceptEvent` added (issue #263 Phase 2) — `accept(2)`/`accept4(2)`.
 ///   First use of the paired `sys_enter_*`/`sys_exit_*` probe shape in this crate:
 ///   the peer address is only populated by the kernel once the syscall returns, so
 ///   `sys_enter_accept{,4}` stashes the caller's `(fd, addr_ptr)` in an in-kernel
@@ -53,7 +79,7 @@
 ///   `sys_exit_accept{,4}` reads the return value (the new fd, or a negative errno)
 ///   and, on success, the now-populated sockaddr from the stashed pointer. Only
 ///   emitted on success — a failed `accept()` has no peer to report.
-pub const WIRE_VERSION: u32 = 8;
+pub const WIRE_VERSION: u32 = 11;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -167,6 +193,37 @@ pub struct FileRenameEvent {
     pub new_path_len: u16,
 }
 
+/// File permission change (`syscalls:sys_enter_chmod`/`sys_enter_fchmodat`, issue #262
+/// Phase 2). `path` is the raw path passed by the caller, not resolved against `dfd` —
+/// same known limitation as `FileOpenEvent::path`. `fchmod(2)` (fd-only) is deferred.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileChmodEvent {
+    pub meta: EventMeta,
+    pub path: [u8; MAX_PATH_LEN],
+    pub path_len: u16,
+    /// The requested mode bits (`umode_t`), truncated to 32 bits — the tracepoint
+    /// promotes it to 8 bytes on the wire but only the low 16 bits are ever
+    /// meaningful (permission bits plus setuid/setgid/sticky).
+    pub mode: u32,
+}
+
+/// File ownership change (`syscalls:sys_enter_chown`/`sys_enter_lchown`/
+/// `sys_enter_fchownat`, issue #262 Phase 2). `path` is the raw path passed by the
+/// caller, not resolved against `dfd` — same known limitation as
+/// `FileOpenEvent::path`. `fchown(2)` (fd-only) is deferred. `uid`/`gid` of
+/// `(uid_t)-1`/`(gid_t)-1` (i.e. `u32::MAX`) mean "leave unchanged" per `chown(2)`'s
+/// own semantics — passed through as-is, not specially interpreted here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct FileChownEvent {
+    pub meta: EventMeta,
+    pub path: [u8; MAX_PATH_LEN],
+    pub path_len: u16,
+    pub uid: u32,
+    pub gid: u32,
+}
+
 /// Outbound network connection (`syscalls:sys_enter_connect`, `AF_INET/AF_INET6` only).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -198,10 +255,51 @@ pub struct SocketBindEvent {
     pub is_ipv6: bool,
 }
 
+/// Outbound UDP datagram (`syscalls:sys_enter_sendto`, `AF_INET`/`AF_INET6` only,
+/// issue #263 Phase 2). Same family-filtered sockaddr read as `ConnectEvent`, plus
+/// the caller's requested payload size (`len`, read at syscall entry — not the
+/// syscall's return value, so a short send still reports the requested size, same
+/// convention as `FileWriteEvent::bytes_requested`). `recvfrom(2)` is deliberately
+/// not captured — see this file's `WIRE_VERSION` v9 changelog.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct UdpSendEvent {
+    pub meta: EventMeta,
+    pub daddr_v4: [u8; 4],
+    pub daddr_v6: [u8; 16],
+    pub dport: u16,
+    pub is_ipv6: bool,
+    pub size: u32,
+}
+
+/// Socket listen (`syscalls:sys_enter_listen`, issue #263 Phase 2) — a discrete,
+/// real-time trace of a process transitioning a bound socket into the listening
+/// state (backdoor/reverse-shell listener detection, same rationale as
+/// `SocketBindEvent`). See this file's `WIRE_VERSION` v10 changelog for the
+/// bind-correlation and `addr_resolved` semantics.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SocketListenEvent {
+    pub meta: EventMeta,
+    pub laddr_v4: [u8; 4],
+    pub laddr_v6: [u8; 16],
+    pub lport: u16,
+    pub is_ipv6: bool,
+    /// Whether `laddr_v4`/`laddr_v6`/`lport`/`is_ipv6` came from a real correlated
+    /// `bind(2)` observation. `false` means this sensor never saw a matching
+    /// `bind()` for this `(pid, fd)` — the address fields above are zeroed, not
+    /// meaningful.
+    pub addr_resolved: bool,
+    /// The caller's requested backlog (`listen(2)`'s second argument) — a small
+    /// value (e.g. 1) on an otherwise-unremarkable listener can itself be a signal
+    /// (a quick one-shot reverse-shell listener rarely needs a real accept queue).
+    pub backlog: u32,
+}
+
 /// Socket accept (`syscalls:sys_enter_accept`/`sys_enter_accept4` +
 /// `sys_exit_accept`/`sys_exit_accept4`, issue #263 Phase 2) — a listening socket
 /// accepting a new connection, carrying the PEER's address (the connecting
-/// client), not the local one. See this file's `WIRE_VERSION` v8 changelog for the
+/// client), not the local one. See this file's `WIRE_VERSION` v11 changelog for the
 /// `sys_enter`/`sys_exit` correlation mechanism. Only emitted on success.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -248,4 +346,72 @@ pub struct ReadlineInputEvent {
     pub input_len: u32,
     /// Full command line input. Budget: 512 bytes.
     pub input: [u8; MAX_READLINE_INPUT],
+}
+
+/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
+/// sensor property (reported by conformance), not a schema limit. Shared by the
+/// eBPF loader and the uprobes sensor, which carried identical copies before.
+#[cfg(feature = "user")]
+#[must_use]
+pub fn comm_str(comm: &[u8; TASK_COMM_LEN]) -> std::string::String {
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
+    std::string::String::from_utf8_lossy(&comm[..end]).into_owned()
+}
+
+/// Difference between the epoch clock and `CLOCK_MONOTONIC` (which the probes
+/// stamp events with, `bpf_ktime_get_ns`), computed once at sensor startup so
+/// normalization can turn probe timestamps into epoch nanoseconds. `0` (plus a
+/// warning) if the monotonic clock cannot be read — timestamps then stay
+/// monotonic-based rather than the sensor failing.
+///
+/// Lives here because the two sensor crates each carried a copy and the copies
+/// drifted once already (unchecked vs. saturating arithmetic).
+#[cfg(all(feature = "user", target_os = "linux"))]
+#[must_use]
+pub fn boot_epoch_offset_ns() -> u64 {
+    let epoch_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: plain FFI call writing into a valid stack-owned timespec.
+    let ret = unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+    if ret != 0 {
+        tracing::warn!("clock_gettime(CLOCK_MONOTONIC) failed — timestamps stay monotonic");
+        return 0;
+    }
+    let monotonic_ns = (ts.tv_sec as u64)
+        .saturating_mul(1_000_000_000)
+        .saturating_add(ts.tv_nsec as u64);
+    epoch_ns.saturating_sub(monotonic_ns)
+}
+
+#[cfg(all(test, feature = "user"))]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn comm_str_stops_at_the_nul_terminator() {
+        let mut buf = [0u8; TASK_COMM_LEN];
+        buf[..4].copy_from_slice(b"bash");
+        assert_eq!(comm_str(&buf), "bash");
+    }
+
+    #[test]
+    fn comm_str_handles_a_full_unterminated_buffer() {
+        let buf = [b'x'; TASK_COMM_LEN];
+        assert_eq!(comm_str(&buf), "x".repeat(TASK_COMM_LEN));
+    }
+
+    #[test]
+    fn comm_str_replaces_non_utf8_instead_of_failing() {
+        // A process can prctl(PR_SET_NAME) itself to arbitrary bytes.
+        let mut buf = [0u8; TASK_COMM_LEN];
+        buf[0] = 0xFF;
+        buf[1] = b'a';
+        assert_eq!(comm_str(&buf), "\u{FFFD}a");
+    }
 }

@@ -29,10 +29,11 @@ use core::net::{IpAddr, Ipv4Addr};
 
 use crate::{
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, EventMeta,
-    ExecEvent, FileDeleteEvent, FileOpenEvent, FileRenameEvent, FileWriteEvent, ImageLoadEvent,
-    ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent,
-    ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent, TlsCaptureEvent, TlsDirection,
-    TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
+    ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent, FileRenameEvent,
+    FileWriteEvent, ImageLoadEvent, ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent,
+    RegistrySetEvent, ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent,
+    SocketBindEvent, SocketListenEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
+    UdpSendEvent, User, WmiActivityEvent,
 };
 
 /// The TEST-NET-1 address every address-carrying fixture defaults to.
@@ -270,6 +271,39 @@ pub fn socket_bind() -> SocketBindEvent {
         meta: meta(),
         local_addr: TEST_ADDR,
         local_port: 0,
+    }
+}
+
+/// Neutral [`FileChmodEvent`].
+#[must_use]
+pub fn file_chmod() -> FileChmodEvent {
+    FileChmodEvent {
+        meta: meta(),
+        path: String::new(),
+        mode: 0,
+    }
+}
+
+/// Neutral [`FileChownEvent`].
+#[must_use]
+pub fn file_chown() -> FileChownEvent {
+    FileChownEvent {
+        meta: meta(),
+        path: String::new(),
+        uid: 0,
+        gid: 0,
+    }
+}
+
+/// Neutral [`SocketListenEvent`], address unresolved (the common neutral case —
+/// bind-correlation is the exception this type has to account for, not the norm).
+#[must_use]
+pub fn socket_listen() -> SocketListenEvent {
+    SocketListenEvent {
+        meta: meta(),
+        local_addr: None,
+        local_port: None,
+        backlog: 0,
     }
 }
 

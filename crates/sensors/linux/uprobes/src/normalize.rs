@@ -24,16 +24,17 @@ use crate::redact;
 ///
 /// v7 (#263) added `SocketBindEvent` — not imported here either, same reasoning.
 ///
-/// v8 (#263 Phase 2) added `SocketAcceptEvent` — not imported here either, same
+/// v8 (#262 Phase 2) added `FileChmodEvent`/`FileChownEvent` — not imported here
+/// either, same reasoning.
+///
+/// v9 (#263 Phase 2) added `UdpSendEvent` — not imported here either, same reasoning.
+///
+/// v10 (#263 Phase 2) added `SocketListenEvent` — not imported here either, same
 /// reasoning.
-const _: () = assert!(wire::WIRE_VERSION == 8);
-
-/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
-/// sensor property (reported by conformance), not a schema limit.
-fn comm_str(comm: &[u8; wire::TASK_COMM_LEN]) -> String {
-    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
-    String::from_utf8_lossy(&comm[..end]).into_owned()
-}
+///
+/// v11 (#263 Phase 2) added `SocketAcceptEvent` — not imported here either, same
+/// reasoning.
+const _: () = assert!(wire::WIRE_VERSION == 11);
 
 /// `container_id` is resolved by the caller from `/proc/<pid>/cgroup` at drain time
 /// (issue #80) — attribution only for now, `image`/`name` await a follow-up
@@ -51,7 +52,7 @@ fn meta(
             gid: meta.gid,
         },
         timestamp_ns: meta.timestamp_ns.saturating_add(boot_epoch_offset_ns),
-        comm: comm_str(&meta.comm),
+        comm: wire::comm_str(&meta.comm),
         container: container_id.map(|id| ContainerContext {
             id,
             image: None,
