@@ -34,7 +34,10 @@ use crate::redact;
 ///
 /// v11 (#263 Phase 2) added `SocketAcceptEvent` — not imported here either, same
 /// reasoning.
-const _: () = assert!(wire::WIRE_VERSION == 11);
+///
+/// v12 (#262 Phase 3) added `FileSetxattrEvent`/`FileRemovexattrEvent` — not
+/// imported here either, same reasoning.
+const _: () = assert!(wire::WIRE_VERSION == 12);
 
 /// `container_id` is resolved by the caller from `/proc/<pid>/cgroup` at drain time
 /// (issue #80) — attribution only for now, `image`/`name` await a follow-up

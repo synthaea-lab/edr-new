@@ -93,7 +93,11 @@ pub mod time;
 /// Bumped 18 → 19 for [`Event::SocketAccept`] (#263 Phase 2): one new enum variant
 /// for `accept(2)`/`accept4(2)` telemetry (the peer address of a newly accepted
 /// connection) on Linux. Same reasoning as v13-v18.
-pub const SCHEMA_VERSION: u32 = 19;
+///
+/// Bumped 19 → 20 for [`Event::FileSetxattr`] and [`Event::FileRemovexattr`] (#262
+/// Phase 3): two new enum variants for Linux extended-attribute telemetry
+/// (`setxattr(2)`/`removexattr(2)`). Same reasoning as v13-v19.
+pub const SCHEMA_VERSION: u32 = 20;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -469,6 +473,30 @@ pub struct FileChownEvent {
     pub uid: u32,
     /// New owner gid, same "leave unchanged" sentinel as `uid`.
     pub gid: u32,
+}
+
+/// Extended attribute set (issue #262 Phase 3): `setxattr(2)`. `lsetxattr(2)`/
+/// `fsetxattr(2)` (symlink/fd-only variants) are deferred — same posture as
+/// `chmod`/`chown`'s fd-only siblings. `name` only, not the attribute's `value` —
+/// see `sensor-linux-wire::FileSetxattrEvent`'s doc. `name == "security.capability"`
+/// is the Linux file-capability grant `setcap` writes — functionally the
+/// extended-attribute equivalent of `chmod +s` (T1222.002).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileSetxattrEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    pub name: String,
+}
+
+/// Extended attribute removal (issue #262 Phase 3): `removexattr(2)`. Same
+/// deferred symlink/fd-variant posture as [`FileSetxattrEvent`]. Removing
+/// `security.selinux` or `security.capability` from a binary is an anti-forensics/
+/// evasion signal in its own right, independent of what `setxattr` ever wrote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRemovexattrEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    pub name: String,
 }
 
 /// Socket bind (issue #263): `bind(2)`, `AF_INET`/`AF_INET6` only — a discrete,
@@ -979,6 +1007,8 @@ pub enum Event {
     FileChown(FileChownEvent),
     SocketListen(SocketListenEvent),
     SocketAccept(SocketAcceptEvent),
+    FileSetxattr(FileSetxattrEvent),
+    FileRemovexattr(FileRemovexattrEvent),
 }
 
 impl Event {
@@ -1014,6 +1044,8 @@ impl Event {
             Event::FileChown(e) => &e.meta,
             Event::SocketListen(e) => &e.meta,
             Event::SocketAccept(e) => &e.meta,
+            Event::FileSetxattr(e) => &e.meta,
+            Event::FileRemovexattr(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.
