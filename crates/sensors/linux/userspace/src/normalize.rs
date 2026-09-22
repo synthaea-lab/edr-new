@@ -30,13 +30,6 @@ use sensor_linux_wire as wire;
 /// no existing mapping changed shape.
 const _: () = assert!(wire::WIRE_VERSION == 8);
 
-/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
-/// sensor property (reported by conformance), not a schema limit.
-fn comm_str(comm: &[u8; wire::TASK_COMM_LEN]) -> String {
-    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
-    String::from_utf8_lossy(&comm[..end]).into_owned()
-}
-
 /// Same, but an empty buffer means "not captured" rather than the empty string —
 /// the probe leaves `pcomm` zeroed when the fork-lineage map had no entry.
 fn comm_opt(comm: &[u8; wire::TASK_COMM_LEN]) -> Option<String> {
@@ -62,7 +55,7 @@ fn meta(
             gid: meta.gid,
         },
         timestamp_ns: meta.timestamp_ns.saturating_add(boot_epoch_offset_ns),
-        comm: comm_str(&meta.comm),
+        comm: wire::comm_str(&meta.comm),
         container,
     }
 }
@@ -151,9 +144,15 @@ pub fn file_rename(
     container: Option<ContainerContext>,
 ) -> Event {
     let old_raw = &event.old_path[..(event.old_path_len as usize).min(wire::MAX_PATH_LEN)];
-    let old_end = old_raw.iter().position(|&b| b == 0).unwrap_or(old_raw.len());
+    let old_end = old_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(old_raw.len());
     let new_raw = &event.new_path[..(event.new_path_len as usize).min(wire::MAX_PATH_LEN)];
-    let new_end = new_raw.iter().position(|&b| b == 0).unwrap_or(new_raw.len());
+    let new_end = new_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(new_raw.len());
     Event::FileRename(FileRenameEvent {
         meta: meta(&event.meta, boot_epoch_offset_ns, container),
         old_path: String::from_utf8_lossy(&old_raw[..old_end]).into_owned(),

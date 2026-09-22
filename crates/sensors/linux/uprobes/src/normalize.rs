@@ -28,13 +28,6 @@ use crate::redact;
 /// either, same reasoning.
 const _: () = assert!(wire::WIRE_VERSION == 8);
 
-/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
-/// sensor property (reported by conformance), not a schema limit.
-fn comm_str(comm: &[u8; wire::TASK_COMM_LEN]) -> String {
-    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
-    String::from_utf8_lossy(&comm[..end]).into_owned()
-}
-
 /// `container_id` is resolved by the caller from `/proc/<pid>/cgroup` at drain time
 /// (issue #80) — attribution only for now, `image`/`name` await a follow-up
 /// Docker/containerd socket lookup.
@@ -51,7 +44,7 @@ fn meta(
             gid: meta.gid,
         },
         timestamp_ns: meta.timestamp_ns.saturating_add(boot_epoch_offset_ns),
-        comm: comm_str(&meta.comm),
+        comm: wire::comm_str(&meta.comm),
         container: container_id.map(|id| ContainerContext {
             id,
             image: None,
