@@ -11,10 +11,12 @@ use std::net::IpAddr;
 use schema::{
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, Event,
     EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent, ImageLoadEvent,
-    ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent,
-    ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent,
+    FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
+    GatekeeperVerdictEvent, ImageLoadEvent, ListenPortEvent, MountEvent, NetworkFlowEvent,
+    ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent, ShellType, SignalEvent,
+    SmbConnectEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent, TccDecisionEvent,
     TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
+    XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
@@ -841,6 +843,141 @@ fn socket_listen_unresolved_golden() {
 }
 
 #[test]
+fn tcc_decision_golden() {
+    // v20 (#95): a TCC grant as joined from tccd's AUTHREQ_CTX + AUTHREQ_RESULT
+    // unified-log pair — screen capture granted to an unsigned payload.
+    assert_golden(
+        &Event::TccDecision(TccDecisionEvent {
+            meta: EventMeta {
+                pid: 427,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "tccd".into(),
+                container: None,
+            },
+            service: "kTCCServiceScreenCapture".into(),
+            allowed: true,
+            auth_value: 2,
+            auth_reason: Some(11),
+            client: Some("/Users/mal/.hidden/payload".into()),
+        }),
+        "tcc_decision",
+    );
+}
+
+#[test]
+fn gatekeeper_verdict_golden() {
+    // v20 (#95): a syspolicyd `GK evaluateScanResult` record. `result_code` is
+    // deliberately raw/uninterpreted — see the type's doc.
+    assert_golden(
+        &Event::GatekeeperVerdict(GatekeeperVerdictEvent {
+            meta: EventMeta {
+                pid: 672,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "syspolicyd".into(),
+                container: None,
+            },
+            target: "com.evil.dropper".into(),
+            team_id: Some("ABCDE12345".into()),
+            signing_id: Some("com.evil.dropper".into()),
+            result_code: 2,
+        }),
+        "gatekeeper_verdict",
+    );
+}
+
+#[test]
+fn file_quarantine_golden() {
+    // v21 (#96): the quarantine xattr landed on a download, with the origin
+    // URLs read back from kMDItemWhereFroms — the network→file link.
+    assert_golden(
+        &Event::FileQuarantine(FileQuarantineEvent {
+            meta: EventMeta {
+                pid: 812,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "Safari".into(),
+                container: None,
+            },
+            path: "/Users/mal/Downloads/invoice.app.zip".into(),
+            agent: Some("Safari".into()),
+            origin_url: Some("https://example.test/invoice.app.zip".into()),
+            referrer_url: Some("https://example.test/downloads".into()),
+        }),
+        "file_quarantine",
+    );
+}
+
+#[test]
+fn mount_golden() {
+    // v21 (#96): a read-only disk-image mount — the classic DMG delivery step.
+    assert_golden(
+        &Event::Mount(MountEvent {
+            meta: EventMeta {
+                pid: 941,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "diskimagesiod".into(),
+                container: None,
+            },
+            mount_point: "/Volumes/Installer".into(),
+            source: Some("/dev/disk4s1".into()),
+            fs_type: Some("hfs".into()),
+            readonly: true,
+            mounted: true,
+        }),
+        "mount",
+    );
+}
+
+#[test]
+fn signal_golden() {
+    // v21 (#96): SIGKILL aimed at an ES-client process — the tamper subset the
+    // sensor forwards; meta is the sender.
+    assert_golden(
+        &Event::Signal(SignalEvent {
+            meta: EventMeta {
+                pid: 6001,
+                ppid: 6000,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "bash".into(),
+                container: None,
+            },
+            signal: 9,
+            target_pid: 400,
+            target_image_path: Some("/usr/local/bin/synthaea-agent".into()),
+        }),
+        "signal",
+    );
+}
+
+#[test]
+fn xpc_connect_golden() {
+    // v21 (#96): a process connecting to tccd's XPC service by name.
+    assert_golden(
+        &Event::XpcConnect(XpcConnectEvent {
+            meta: EventMeta {
+                pid: 7001,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "payload".into(),
+                container: None,
+            },
+            service_name: "com.apple.tccd".into(),
+            domain_type: 1,
+        }),
+        "xpc_connect",
+    );
+}
+
+#[test]
 fn socket_accept_golden() {
     // v19 (#263 Phase 2): peer address of a newly accepted connection — an
     // attacker's IP connecting to a listening backdoor.
@@ -1090,6 +1227,47 @@ fn meta_accessor_covers_all_variants() {
             local_addr: None,
             local_port: None,
             backlog: 0,
+        }),
+        Event::TccDecision(TccDecisionEvent {
+            meta: meta.clone(),
+            service: String::new(),
+            allowed: false,
+            auth_value: 0,
+            auth_reason: None,
+            client: None,
+        }),
+        Event::GatekeeperVerdict(GatekeeperVerdictEvent {
+            meta: meta.clone(),
+            target: String::new(),
+            team_id: None,
+            signing_id: None,
+            result_code: 0,
+        }),
+        Event::FileQuarantine(FileQuarantineEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            agent: None,
+            origin_url: None,
+            referrer_url: None,
+        }),
+        Event::Mount(MountEvent {
+            meta: meta.clone(),
+            mount_point: String::new(),
+            source: None,
+            fs_type: None,
+            readonly: false,
+            mounted: true,
+        }),
+        Event::Signal(SignalEvent {
+            meta: meta.clone(),
+            signal: 0,
+            target_pid: 0,
+            target_image_path: None,
+        }),
+        Event::XpcConnect(XpcConnectEvent {
+            meta: meta.clone(),
+            service_name: String::new(),
+            domain_type: 0,
         }),
         Event::SocketAccept(SocketAcceptEvent {
             meta: meta.clone(),

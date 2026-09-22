@@ -38,6 +38,9 @@ dependencies = [
  "sensor-linux-lsm",
  "sensor-linux-netlink",
  "sensor-linux-uprobes",
+ "sensor-macos",
+ "sensor-macos-network-extension",
+ "sensor-macos-unifiedlog",
  "sensor-windows",
  "sensor-windows-eventlog",
  "serde",
@@ -1864,6 +1867,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "plist"
+version = "1.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2896bade328c13f7042a297ea5ac5b0951f6cf989dea5f32c2fd98da398195cb"
+dependencies = [
+ "base64",
+ "indexmap",
+ "quick-xml",
+ "serde",
+ "time",
+]
+
+[[package]]
 name = "policy"
 version = "0.1.0"
 
@@ -1965,6 +1981,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.42.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]
@@ -2341,14 +2366,35 @@ dependencies = [
 [[package]]
 name = "sensor-macos"
 version = "0.1.0"
+dependencies = [
+ "cc",
+ "plist",
+ "schema",
+ "thiserror 2.0.20",
+ "tracing",
+]
 
 [[package]]
 name = "sensor-macos-network-extension"
 version = "0.1.0"
+dependencies = [
+ "schema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
 
 [[package]]
 name = "sensor-macos-unifiedlog"
 version = "0.1.0"
+dependencies = [
+ "schema",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tracing",
+]
 
 [[package]]
 name = "sensor-windows"
@@ -2944,6 +2990,14 @@ checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 [[package]]
 name = "updater"
 version = "0.1.0"
+dependencies = [
+ "ring",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.20",
+]
 
 [[package]]
 name = "ureq"

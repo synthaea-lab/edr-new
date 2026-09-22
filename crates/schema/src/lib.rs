@@ -94,10 +94,32 @@ pub mod time;
 /// for `accept(2)`/`accept4(2)` telemetry (the peer address of a newly accepted
 /// connection) on Linux. Same reasoning as v13-v18.
 ///
-/// Bumped 19 → 20 for [`Event::FileSetxattr`] and [`Event::FileRemovexattr`] (#262
-/// Phase 3): two new enum variants for Linux extended-attribute telemetry
-/// (`setxattr(2)`/`removexattr(2)`). Same reasoning as v13-v19.
-pub const SCHEMA_VERSION: u32 = 20;
+/// Bumped 19 → 20 for [`Event::TccDecision`] and [`Event::GatekeeperVerdict`]
+/// (#95): two new enum variants for macOS unified-log telemetry (TCC
+/// privacy-permission decisions, Gatekeeper scan verdicts). macOS-only families,
+/// same precedent as the Windows-only `RegistrySet`/`WmiActivity`/`ScriptBlock`
+/// variants; same serialization-visible reasoning as v13-v19. Originally
+/// claimed as 18 → 19 while #95's branch was open; renumbered once #263's
+/// `SocketAccept` (18 → 19) merged into `main` first — the same coordination
+/// note as v13 and ADR-0005.
+///
+/// Bumped 20 → 21 for [`Event::FileQuarantine`], [`Event::Mount`],
+/// [`Event::Signal`], and [`Event::XpcConnect`] (#96, the macOS
+/// `EndpointSecurity` catalog widening): download provenance, mount/unmount,
+/// tamper-relevant signals, and XPC connections. `Mount` and `Signal` are
+/// platform-neutral shapes (Linux mount/kill telemetry can reuse them);
+/// `FileQuarantine`/`XpcConnect` are macOS-only families per the v20
+/// precedent. Same serialization-visible reasoning as v13-v20. Originally
+/// claimed as 19 → 20 while #96's branch was open; renumbered with the rest
+/// of the macOS stack when `SocketAccept` took v19 on `main` first.
+///
+/// Bumped 21 → 22 for [`Event::FileSetxattr`] and [`Event::FileRemovexattr`]
+/// (#262 Phase 3): two new enum variants for Linux extended-attribute
+/// telemetry (`setxattr(2)`/`removexattr(2)`). Same reasoning as v13-v21.
+/// Originally claimed as 19 → 20 while this branch was open; renumbered once
+/// the macOS stack (#95/#96) took v19-v21 on `main` first — same coordination
+/// note as v13 and ADR-0005.
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -162,6 +184,28 @@ pub const FLAG_PERSISTENCE_ACCOUNT_ARTIFACT: u32 = 0x0800_0000;
 /// A distinct bit from every other `FLAG_PERSISTENCE_*` constant, so no two
 /// techniques cross-fire off a single event.
 pub const FLAG_PERSISTENCE_SYSTEMD_ARTIFACT: u32 = 0x4000_0000;
+
+/// Same principle as [`FLAG_PERSISTENCE_ARTIFACT`], for a macOS **launch item
+/// registration** observed by Background Task Management (`EndpointSecurity`'s
+/// `BTM_LAUNCH_ITEM_ADD`, macOS 13+) — launch agents/daemons (ATT&CK
+/// T1543.001/.004) and login items (T1547.015), set by `sensor-macos` (issue
+/// #32). Like Windows' 7045 and unlike the Linux systemd approximation, this
+/// is a registration-time fact from the OS itself: BTM emits it when the item
+/// is added, whatever the path taken (a plist dropped in `LaunchAgents`, an
+/// `SMAppService` registration, MDM).
+///
+/// `FileOpenEvent::path` carries the persistence *payload* (the executable
+/// resolved from the launchd plist) when BTM provides it, else the item URL;
+/// `meta` identifies the instigating process when BTM attributes one. A raw
+/// plist write additionally surfaces as an ordinary file event and is caught
+/// by `rules::check_persistence_write`'s path patterns — two distinct signals,
+/// not a duplicate (BTM also fires for registrations that never touch a
+/// watched directory).
+///
+/// A distinct bit from every other `FLAG_PERSISTENCE_*` constant, so no two
+/// techniques cross-fire off a single event. Not a serialization-visible
+/// schema change (same reasoning as [`FLAG_PERSISTENCE_ARTIFACT`]).
+pub const FLAG_PERSISTENCE_BTM_ARTIFACT: u32 = 0x0400_0000;
 
 /// Identity of the user a process runs as, per platform.
 ///
@@ -970,6 +1014,162 @@ pub enum AuthKind {
     PrivilegedSession,
 }
 
+/// macOS TCC privacy-permission decision — tccd answered a process's request
+/// for a protected capability (screen capture, microphone, Accessibility, full
+/// disk access, ...). Emitted by `sensor-macos-unifiedlog` (issue #95) from the
+/// `com.apple.TCC` unified-log subsystem, joining tccd's `AUTHREQ_CTX` (which
+/// carries the service) with the matching `AUTHREQ_RESULT` (which carries the
+/// verdict) on tccd's own message id.
+///
+/// Detection value: malware granting itself Accessibility/screen-capture (via
+/// synthetic clicks or a compromised MDM profile), and the reconnaissance
+/// pattern of a fresh binary probing many services. A *denial* is signal too —
+/// repeated denials for the same client is a process trying to escalate.
+///
+/// macOS-only family, same precedent as the Windows-only [`RegistrySetEvent`]/
+/// [`WmiActivityEvent`]/[`ScriptBlockEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TccDecisionEvent {
+    /// The deciding daemon (`tccd`) — the unified log does not attribute the
+    /// requesting process on the result record; `client` below carries what
+    /// the log did say about the requester.
+    pub meta: EventMeta,
+    /// TCC service identifier as logged (e.g. `kTCCServiceScreenCapture`).
+    pub service: String,
+    /// True when access was granted (including "limited" grants).
+    pub allowed: bool,
+    /// Raw `authValue` from the log (0 denied, 1 unknown, 2 allowed, 3
+    /// limited) — kept for forensic completeness; rules match on `allowed`.
+    pub auth_value: u32,
+    /// Raw `authReason` code when logged (e.g. 11 = user consent, 12 =
+    /// service policy) — uninterpreted, forensic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_reason: Option<u32>,
+    /// Requesting client when the joined context carried one (bundle
+    /// identifier or binary path). `None` when tccd redacted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+}
+
+/// macOS Gatekeeper scan verdict — syspolicyd evaluated a target (first
+/// launch, quarantine, background scan). Emitted by `sensor-macos-unifiedlog`
+/// (issue #95) from syspolicyd's `GK evaluateScanResult` unified-log messages.
+///
+/// The join keys for putting a verdict next to its exec event on a case are
+/// `team_id`/`signing_id` plus time proximity: syspolicyd hash-redacts file
+/// paths in the public log stream (they only appear with the private-data
+/// logging profile installed — see `docs/sensors/macos.md`), so `target` is
+/// honest about possibly being an opaque token rather than a path.
+///
+/// macOS-only family, same precedent as [`TccDecisionEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatekeeperVerdictEvent {
+    /// The scanning daemon (`syspolicyd`).
+    pub meta: EventMeta,
+    /// Scan target as syspolicyd logged it: the bundle identifier when
+    /// present, else syspolicyd's path token (hash-redacted without the
+    /// logging profile).
+    pub target: String,
+    /// Signing team identifier, when the target is signed and logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// Code-signing identifier, when logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_id: Option<String>,
+    /// Raw `evaluateScanResult` code. Deliberately uninterpreted: the values
+    /// are undocumented by Apple, so the sensor forwards them for forensics
+    /// and fleet-side statistics instead of guessing an allow/deny meaning
+    /// that could silently invert on an OS update.
+    pub result_code: u32,
+}
+
+/// macOS download provenance — the `com.apple.quarantine` extended attribute
+/// was set on a file, marking it as downloaded from the network. Emitted by
+/// `sensor-macos` (#96) on `SETEXTATTR`, with the quarantine string and the
+/// `kMDItemWhereFroms` origin URLs read back from the file at event time.
+///
+/// This is the network→file link: a later exec of `path` joins this event to
+/// answer "where did that binary come from" — the macOS mark-of-the-web
+/// (cross-platform note in `docs/sensors/sources.md`).
+///
+/// `agent`/`origin_url`/`referrer_url` are `None` when the writing application
+/// did not (or had not yet) recorded them — the quarantine mark alone is still
+/// the signal that the file arrived from outside.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileQuarantineEvent {
+    pub meta: EventMeta,
+    /// The quarantined file.
+    pub path: String,
+    /// Application that downloaded it, from the quarantine string's agent
+    /// field (e.g. `Safari`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Download URL from `kMDItemWhereFroms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
+    /// Referrer URL from `kMDItemWhereFroms`, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrer_url: Option<String>,
+}
+
+/// A filesystem was mounted or unmounted. Emitted by `sensor-macos` (#96);
+/// deliberately platform-neutral — Linux mount telemetry can reuse it.
+///
+/// Detection value: staging via disk images (`hdiutil attach` of a downloaded
+/// DMG is the classic macOS malware delivery step), USB mass storage, and
+/// unmounts destroying evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountEvent {
+    pub meta: EventMeta,
+    /// Where the filesystem is (or was) mounted.
+    pub mount_point: String,
+    /// What was mounted (device node, image path, network source), when the
+    /// platform reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Filesystem type (`hfs`, `apfs`, `smbfs`, ...), when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_type: Option<String>,
+    /// True for a read-only mount.
+    pub readonly: bool,
+    /// True for a mount, false for an unmount.
+    pub mounted: bool,
+}
+
+/// A signal was sent to a monitored security process. Emitted by
+/// `sensor-macos` (#96), filtered at the source to targets that are
+/// `EndpointSecurity` clients — i.e. this agent and other security tools:
+/// the tamper-attempt subset of the platform's full (and enormous) signal
+/// stream, per the sensor's volume discipline. Platform-neutral shape;
+/// a Linux kill-tracing source can reuse it with its own target filter.
+///
+/// `meta` is the *sender* — the interesting party in a tamper attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalEvent {
+    pub meta: EventMeta,
+    /// Signal number, platform-native (SIGKILL=9, SIGTERM=15, ...).
+    pub signal: u32,
+    pub target_pid: u32,
+    /// Image path of the targeted process, when the platform resolves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_image_path: Option<String>,
+}
+
+/// macOS XPC connection — a process connected to an XPC service by name.
+/// Emitted by `sensor-macos` (#96, macOS 14+). High-volume by nature; rules
+/// should match on sensitive `service_name`s (e.g. TCC, launchd control,
+/// screen capture services) rather than alerting per event. macOS-only
+/// family, per the v19 precedent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpcConnectEvent {
+    pub meta: EventMeta,
+    /// The requested service name (e.g. `com.apple.tccd`).
+    pub service_name: String,
+    /// Raw `es_xpc_domain_type_t` (1 = system, 2 = user, ... 7 = pid) — kept
+    /// as the platform reports it, uninterpreted.
+    pub domain_type: u32,
+}
+
 /// The normalized event envelope.
 ///
 /// `#[non_exhaustive]`: new telemetry categories (registry, DNS, image load, ...) are
@@ -1007,6 +1207,12 @@ pub enum Event {
     FileChown(FileChownEvent),
     SocketListen(SocketListenEvent),
     SocketAccept(SocketAcceptEvent),
+    TccDecision(TccDecisionEvent),
+    GatekeeperVerdict(GatekeeperVerdictEvent),
+    FileQuarantine(FileQuarantineEvent),
+    Mount(MountEvent),
+    Signal(SignalEvent),
+    XpcConnect(XpcConnectEvent),
     FileSetxattr(FileSetxattrEvent),
     FileRemovexattr(FileRemovexattrEvent),
 }
@@ -1044,6 +1250,12 @@ impl Event {
             Event::FileChown(e) => &e.meta,
             Event::SocketListen(e) => &e.meta,
             Event::SocketAccept(e) => &e.meta,
+            Event::TccDecision(e) => &e.meta,
+            Event::GatekeeperVerdict(e) => &e.meta,
+            Event::FileQuarantine(e) => &e.meta,
+            Event::Mount(e) => &e.meta,
+            Event::Signal(e) => &e.meta,
+            Event::XpcConnect(e) => &e.meta,
             Event::FileSetxattr(e) => &e.meta,
             Event::FileRemovexattr(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
