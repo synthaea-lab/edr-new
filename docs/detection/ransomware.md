@@ -16,3 +16,19 @@ A dedicated vertical over existing machinery — no new engine, one wired reflex
 
 Acceptance is scenario-driven: a lab encryptor (benign, marker-based) must be killed
 before it processes more than N canary-adjacent files.
+
+## File Activity Detection (issue #262)
+
+With `FileWrite`, `FileDelete`, and `FileRename` telemetry (SCHEMA_VERSION 15+),
+the burst detection component (#2 above) now has real-time syscall-level signals:
+
+- **Mass rename patterns**: detect `.locked`/`.encrypted` suffix in 50+ files/60s
+- **Burst write + rename correlation**: 100MB written + 50 renames in 60s window
+- **FileOpen → FileWrite correlation**: `FileWriteEvent` has no path, rules must join
+  to prior `FileOpenEvent` on `(pid, fd)` to get file paths
+
+See **[file-activity-patterns.md](./file-activity-patterns.md)** for:
+- Full detection pseudo-code with thresholds
+- Correlation patterns and state management
+- False positive mitigation strategies
+- Performance considerations (write syscalls are high-volume)
