@@ -19,6 +19,35 @@ evaluated yet — named so it stays a visible decision), **rejected** (per
 platform, where the reason is the row). MITRE tags are the techniques as
 actually tagged in `crates/rules`/`correlator`, not aspirational mappings.
 
+
+## Coverage at a glance
+
+One cell per platform and signal domain: the status glyph plus the master
+source that delivers (or will deliver) it. The per-platform tables below
+carry the detail behind every cell.
+
+**Legend:** ✅ used · 🔨 built (runtime prerequisite outstanding) ·
+📋 planned (issue filed) · 🔍 evaluated (matrix) · ⭕ gap (no mechanism
+evaluated yet) · — not applicable
+
+| Focus | Linux | Windows | macOS |
+| --- | --- | --- | --- |
+| **Process execution** | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
+| **File activity** | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
+| **Network** | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ ES mount · 📋 #358 listen |
+| **DNS** | 📋 #267 | ✅ ETW | 🔨 NE |
+| **Encrypted traffic** | ✅ uprobes · 📋 JA4 #86 | ⭕ gap | 📋 #360 |
+| **Scripts & shells** | ✅ uprobes | ✅ ETW · 📋 AMSI #282 | ⭕ gap |
+| **Memory & injection** | 📋 #265 | 📋 driver #137 | 📋 #355 |
+| **Identity & privilege** | ✅ journald · 📋 #266 | ✅ WEL · 📋 #364 #285 | ✅ ES + log · 📋 #356 |
+| **Persistence & autostart** | ✅ journald + rules | ✅ WEL + ETW | ✅ ES |
+| **OS security verdicts** | 🔍 SELinux AVC | 📋 #283 | ✅ log · 📋 #356 |
+| **Tamper & anti-forensics** | 📋 #264 #362 | 📋 driver #136 | ✅ ES · 📋 #357 |
+| **Download provenance** | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
+| **Devices** | 📋 #84 | 📋 #84 | 📋 device-control |
+| **Containers** | ✅ /proc | — | — |
+| **Host state & inventory** | 📋 #87 | ✅ WMI · 📋 #286 | 📋 #359 |
+
 ## Linux
 
 See [linux-telemetry-matrix.md](linux-telemetry-matrix.md) for the full
@@ -41,30 +70,30 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 
 | Focus | Source | What we get | Status | MITRE | Issue |
 | --- | --- | --- | --- | --- | --- |
-| **Process execution** | eBPF · tracepoints | exec/fork/exit with argv, comm, uid/gid, lineage | used | T1059 | #262 |
-| **Process execution** | netlink · audit | fallback exec + connect where eBPF is unavailable (lockdown, old kernel) | used | T1059 degraded | #34/#247 |
-| **Process execution** | eBPF · tracepoints | security-relevant exec environment (`LD_PRELOAD` family), present-only allowlist — never the whole env | planned | T1574.006 | #363 |
-| **File activity** | eBPF · tracepoints | open/write/delete/rename/chmod/chown with paths + attribution; noisy /dev,/proc,/sys,/tmp filtered | used | T1105, T1485/T1486, T1070.004, T1222 | #262 |
-| **File activity** | eBPF · BPF-LSM | `file_open` at the security decision point — deliberate double observation (blinding check), io_uring-proof vantage; inline-block ready | used | T1562 context | #91 |
-| **File activity** | eBPF · BPF-LSM | timestomping via `inode_setattr` hook | planned | T1070.006 | matrix row |
-| **Network** | eBPF · tracepoints | connect/bind/listen/accept, UDP sends — discrete, real-time | used | T1071/T1041, backdoor listeners | #263 |
-| **Network** | netlink · sock_diag+conntrack | listening-port snapshots (LISTENER-DRIFT), flow 5-tuples + byte counters | used | beacon volume features | #92 |
-| **Network** | eBPF · tracepoints | mount/umount → platform-neutral v21 `Mount` | planned | staging, evidence destruction | #362 |
-| **DNS** | eBPF | query/answer joined to the resolving process (udp:53 parse vs. `getaddrinfo` uprobe — choice in-issue) | planned | T1071.004, DGA features | #267 |
-| **Encrypted traffic** | eBPF · uprobes | TLS plaintext pre-encryption/post-decryption (OpenSSL/BoringSSL/GnuTLS), byte-budgeted + redacted | used | T1071 C2 visibility without MITM | #90 |
-| **Encrypted traffic** | eBPF | JA4 fingerprint + SNI on connects | planned | C2 tooling fingerprints | #86 |
-| **Scripts & shells** | eBPF · uprobes | interactive shell input (readline) incl. builtins that never exec | used | T1059 | #90 |
-| **Memory & injection** | eBPF · tracepoints | ptrace ops, `process_vm_*`, `/proc/*/mem` writes, `memfd_create`+exec (fileless) | planned | T1055, T1620 | #265 |
-| **Identity & privilege** | journald | sshd accept/fail, PAM sessions, sudo/su → `Auth` | used | T1078 | #93 |
-| **Identity & privilege** | eBPF · tracepoints | `setuid`/`setresuid`/`capset`/`setns` | planned | T1548, container escape | #266 |
-| **Persistence & autostart** | journald + rules | systemd unit first-start (flagged approximation, documented); rc/cron/systemd path writes via the file stream | used | T1543.002, T1053.003 | #93 |
-| **OS security verdicts** | netlink · audit | SELinux AVC denials — already on the socket, one classifier arm away | evaluated | T1562-adjacent | matrix row |
-| **Tamper & anti-forensics** | eBPF · tracepoints | module loads/unloads, `bpf(2)` loads (eBPF-rootkit visibility) | planned | T1547.006, T1562 | #264 |
-| **Tamper & anti-forensics** | eBPF · tracepoints | kernel-side kill tracing filtered to agent/security targets — SIGKILL **sender** attribution userspace cannot see → v21 `Signal` | planned | T1562 | #362 |
-| **Download provenance** | inventory | no OS-level mark on Linux — browser artifacts only | planned | provenance context | #87 |
-| **Devices** | device-control | USB attach/detach + policy | planned | T1091, T1052 | #84 |
-| **Containers** | /proc | cgroup → container-id attribution on every event | used | container context for all rules | #80 |
-| **Host state** | inventory | diffed snapshots (packages, units, cron) — persistence that predates the agent | planned | | #87 |
+| **Process execution** | eBPF · tracepoints | exec/fork/exit with argv, comm, uid/gid, lineage | ✅ used | T1059 | #262 |
+| **Process execution** | netlink · audit | fallback exec + connect where eBPF is unavailable (lockdown, old kernel) | ✅ used | T1059 degraded | #34/#247 |
+| **Process execution** | eBPF · tracepoints | security-relevant exec environment (`LD_PRELOAD` family), present-only allowlist — never the whole env | 📋 planned | T1574.006 | #363 |
+| **File activity** | eBPF · tracepoints | open/write/delete/rename/chmod/chown with paths + attribution; noisy /dev,/proc,/sys,/tmp filtered | ✅ used | T1105, T1485/T1486, T1070.004, T1222 | #262 |
+| **File activity** | eBPF · BPF-LSM | `file_open` at the security decision point — deliberate double observation (blinding check), io_uring-proof vantage; inline-block ready | ✅ used | T1562 context | #91 |
+| **File activity** | eBPF · BPF-LSM | timestomping via `inode_setattr` hook | 📋 planned | T1070.006 | matrix row |
+| **Network** | eBPF · tracepoints | connect/bind/listen/accept, UDP sends — discrete, real-time | ✅ used | T1071/T1041, backdoor listeners | #263 |
+| **Network** | netlink · sock_diag+conntrack | listening-port snapshots (LISTENER-DRIFT), flow 5-tuples + byte counters | ✅ used | beacon volume features | #92 |
+| **Network** | eBPF · tracepoints | mount/umount → platform-neutral v21 `Mount` | 📋 planned | staging, evidence destruction | #362 |
+| **DNS** | eBPF | query/answer joined to the resolving process (udp:53 parse vs. `getaddrinfo` uprobe — choice in-issue) | 📋 planned | T1071.004, DGA features | #267 |
+| **Encrypted traffic** | eBPF · uprobes | TLS plaintext pre-encryption/post-decryption (OpenSSL/BoringSSL/GnuTLS), byte-budgeted + redacted | ✅ used | T1071 C2 visibility without MITM | #90 |
+| **Encrypted traffic** | eBPF | JA4 fingerprint + SNI on connects | 📋 planned | C2 tooling fingerprints | #86 |
+| **Scripts & shells** | eBPF · uprobes | interactive shell input (readline) incl. builtins that never exec | ✅ used | T1059 | #90 |
+| **Memory & injection** | eBPF · tracepoints | ptrace ops, `process_vm_*`, `/proc/*/mem` writes, `memfd_create`+exec (fileless) | 📋 planned | T1055, T1620 | #265 |
+| **Identity & privilege** | journald | sshd accept/fail, PAM sessions, sudo/su → `Auth` | ✅ used | T1078 | #93 |
+| **Identity & privilege** | eBPF · tracepoints | `setuid`/`setresuid`/`capset`/`setns` | 📋 planned | T1548, container escape | #266 |
+| **Persistence & autostart** | journald + rules | systemd unit first-start (flagged approximation, documented); rc/cron/systemd path writes via the file stream | ✅ used | T1543.002, T1053.003 | #93 |
+| **OS security verdicts** | netlink · audit | SELinux AVC denials — already on the socket, one classifier arm away | 🔍 evaluated | T1562-adjacent | matrix row |
+| **Tamper & anti-forensics** | eBPF · tracepoints | module loads/unloads, `bpf(2)` loads (eBPF-rootkit visibility) | 📋 planned | T1547.006, T1562 | #264 |
+| **Tamper & anti-forensics** | eBPF · tracepoints | kernel-side kill tracing filtered to agent/security targets — SIGKILL **sender** attribution userspace cannot see → v21 `Signal` | 📋 planned | T1562 | #362 |
+| **Download provenance** | inventory | no OS-level mark on Linux — browser artifacts only | 📋 planned | provenance context | #87 |
+| **Devices** | device-control | USB attach/detach + policy | 📋 planned | T1091, T1052 | #84 |
+| **Containers** | /proc | cgroup → container-id attribution on every event | ✅ used | container context for all rules | #80 |
+| **Host state** | inventory | diffed snapshots (packages, units, cron) — persistence that predates the agent | 📋 planned | | #87 |
 
 ### Rejected
 
@@ -93,33 +122,33 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 
 | Focus | Source | What we get | Status | MITRE | Issue |
 | --- | --- | --- | --- | --- | --- |
-| **Process execution** | ETW · Kernel-Process | exec with the **real** PEB command line (F-1), per-event SID + integrity level (F-3), lineage | used | T1059 | #20 |
-| **Process execution** | ETW · Kernel-Process | image/DLL loads (EID 5) | used | T1574.002 side-loading | #21 |
-| **File activity** | ETW · Kernel-File | create/write (`NameCreate`+`CreateNewFile` join, F-6 partial), NT→drive-letter paths via real volume map (F-5) | used | T1105, dropper joins | #20 |
-| **File activity** | driver · minifilter | authoritative deletes/renames, named pipes, ADS, raw-volume access | planned | ransomware primitives | #136 |
-| **Network** | ETW · Kernel-Network | TCP connects (IPv4+IPv6 first-class F-7, dedup window), UDP sends (EID 14) | used | T1071/T1041 BEACON, T1048 | #20/#97 |
-| **Network** | Win32 · GetExtendedTcpTable | listening-port snapshots + startup baseline — LISTENER-DRIFT does not exist on Windows today | planned | backdoor listeners | #366 |
-| **Network** | ETW · SMBClient | SMB connections established (EID 30704; failures dropped) | used | T1021.002 | #97 |
-| **Network** | driver · WFP | flows + inline block | planned | response primitive | #138 |
-| **DNS** | ETW · DNS-Client | query + answer + status joined to the process (EID 3008; 3006 dropped as noise) | used | T1071.004, IOC join | #21 |
-| **Encrypted traffic** | — | no mechanism evaluated yet — schannel has no plaintext-tap analog; JA4-style fingerprinting would ride the driver tier | gap | | likely #138/#39 |
-| **Scripts & runtimes** | ETW · PowerShell | script blocks (EID 4104) **post-decode** — `-EncodedCommand` arrives plain, fragments reassembled | used | T1059.001, T1027 | #21 |
-| **Scripts & runtimes** | ETW · AMSI | script/VBS/JS content at the scan interface | planned | T1059, T1027 | #282 |
-| **Scripts & runtimes** | ETW · DotNETRuntime | **dynamic (in-memory) assembly loads only** (EID 154, `flags & 0x2`) — file-backed dropped at the sensor | used | T1620, T1055 | #97 |
-| **Memory & injection** | driver · ObCallbacks+TI-ETW | handle access to LSASS; injection telemetry | planned | T1003.001, T1055 | #137 |
-| **Identity & privilege** | WEL · Security | logons 4624/4625/4648/4672 → `Auth` | used | T1078, T1110 | #94 |
-| **Identity & privilege** | ETW · Kerberos/NTLM/LDAP-Client | client-side ticket requests (RC4-etype shadow), NTLM validation, LDAP recon bursts — DC-side 4768/4769 stay server scope, honestly | planned | T1558, AD recon | #364 |
-| **Identity & privilege** | WEL · TerminalServices | RDP session lifecycle | planned | T1021.001 | #285 |
-| **Persistence & autostart** | WEL · System+Security | service install 7045, scheduled task 4698, local account 4720 — flag-gated deterministic events | used | T1543.003, T1053.005, T1136.001 | #94 |
-| **Persistence & autostart** | ETW · Kernel-Registry | value writes (EID 4, NT→`HKLM` normalized; reads deliberately not taken) | used | T1547.001, T1112 | #21 |
-| **Persistence & autostart** | driver · kernel callbacks | process/image/registry from the tamper-resistant vantage | planned | same, authoritative | #39 |
-| **OS security verdicts** | WEL · operational channels | AppLocker, WDAC, Defender, Task-Scheduler | planned | policy + AV context | #283 |
-| **Lateral-movement services** | ETW · WMI-Activity | WQL queries (EID 23) + method invocations (EID 24, `Win32_Process.Create`) | used | T1047 | #21 |
-| **Lateral-movement services** | ETW · BITS-Client | background transfer jobs | planned | T1197 | #284 |
-| **Tamper & anti-forensics** | driver · minifilter | timestomping (SetInformation), ADS manipulation, raw-volume access | planned | T1070.006, T1564.004 | #136 |
-| **Download provenance** | ETW · Kernel-File | `Zone.Identifier` ADS (mark-of-the-web) → v21 `FileQuarantine` (`HostUrl`/`ReferrerUrl` read-back); minifilter supersedes | planned | T1553.005 | #365 |
-| **Devices** | device-control | Windows collectors land with the cross-platform crate | planned | T1091 | #84 |
-| **Host state** | Win32 · WMI/CIM | point-in-time inventory; Sysmon-channel opt-in is an ADR-first decision | used / planned | pre-existing persistence | collectors; #286 |
+| **Process execution** | ETW · Kernel-Process | exec with the **real** PEB command line (F-1), per-event SID + integrity level (F-3), lineage | ✅ used | T1059 | #20 |
+| **Process execution** | ETW · Kernel-Process | image/DLL loads (EID 5) | ✅ used | T1574.002 side-loading | #21 |
+| **File activity** | ETW · Kernel-File | create/write (`NameCreate`+`CreateNewFile` join, F-6 partial), NT→drive-letter paths via real volume map (F-5) | ✅ used | T1105, dropper joins | #20 |
+| **File activity** | driver · minifilter | authoritative deletes/renames, named pipes, ADS, raw-volume access | 📋 planned | ransomware primitives | #136 |
+| **Network** | ETW · Kernel-Network | TCP connects (IPv4+IPv6 first-class F-7, dedup window), UDP sends (EID 14) | ✅ used | T1071/T1041 BEACON, T1048 | #20/#97 |
+| **Network** | Win32 · GetExtendedTcpTable | listening-port snapshots + startup baseline — LISTENER-DRIFT does not exist on Windows today | 📋 planned | backdoor listeners | #366 |
+| **Network** | ETW · SMBClient | SMB connections established (EID 30704; failures dropped) | ✅ used | T1021.002 | #97 |
+| **Network** | driver · WFP | flows + inline block | 📋 planned | response primitive | #138 |
+| **DNS** | ETW · DNS-Client | query + answer + status joined to the process (EID 3008; 3006 dropped as noise) | ✅ used | T1071.004, IOC join | #21 |
+| **Encrypted traffic** | — | no mechanism evaluated yet — schannel has no plaintext-tap analog; JA4-style fingerprinting would ride the driver tier | ⭕ gap | | likely #138/#39 |
+| **Scripts & runtimes** | ETW · PowerShell | script blocks (EID 4104) **post-decode** — `-EncodedCommand` arrives plain, fragments reassembled | ✅ used | T1059.001, T1027 | #21 |
+| **Scripts & runtimes** | ETW · AMSI | script/VBS/JS content at the scan interface | 📋 planned | T1059, T1027 | #282 |
+| **Scripts & runtimes** | ETW · DotNETRuntime | **dynamic (in-memory) assembly loads only** (EID 154, `flags & 0x2`) — file-backed dropped at the sensor | ✅ used | T1620, T1055 | #97 |
+| **Memory & injection** | driver · ObCallbacks+TI-ETW | handle access to LSASS; injection telemetry | 📋 planned | T1003.001, T1055 | #137 |
+| **Identity & privilege** | WEL · Security | logons 4624/4625/4648/4672 → `Auth` | ✅ used | T1078, T1110 | #94 |
+| **Identity & privilege** | ETW · Kerberos/NTLM/LDAP-Client | client-side ticket requests (RC4-etype shadow), NTLM validation, LDAP recon bursts — DC-side 4768/4769 stay server scope, honestly | 📋 planned | T1558, AD recon | #364 |
+| **Identity & privilege** | WEL · TerminalServices | RDP session lifecycle | 📋 planned | T1021.001 | #285 |
+| **Persistence & autostart** | WEL · System+Security | service install 7045, scheduled task 4698, local account 4720 — flag-gated deterministic events | ✅ used | T1543.003, T1053.005, T1136.001 | #94 |
+| **Persistence & autostart** | ETW · Kernel-Registry | value writes (EID 4, NT→`HKLM` normalized; reads deliberately not taken) | ✅ used | T1547.001, T1112 | #21 |
+| **Persistence & autostart** | driver · kernel callbacks | process/image/registry from the tamper-resistant vantage | 📋 planned | same, authoritative | #39 |
+| **OS security verdicts** | WEL · operational channels | AppLocker, WDAC, Defender, Task-Scheduler | 📋 planned | policy + AV context | #283 |
+| **Lateral-movement services** | ETW · WMI-Activity | WQL queries (EID 23) + method invocations (EID 24, `Win32_Process.Create`) | ✅ used | T1047 | #21 |
+| **Lateral-movement services** | ETW · BITS-Client | background transfer jobs | 📋 planned | T1197 | #284 |
+| **Tamper & anti-forensics** | driver · minifilter | timestomping (SetInformation), ADS manipulation, raw-volume access | 📋 planned | T1070.006, T1564.004 | #136 |
+| **Download provenance** | ETW · Kernel-File | `Zone.Identifier` ADS (mark-of-the-web) → v21 `FileQuarantine` (`HostUrl`/`ReferrerUrl` read-back); minifilter supersedes | 📋 planned | T1553.005 | #365 |
+| **Devices** | device-control | Windows collectors land with the cross-platform crate | 📋 planned | T1091 | #84 |
+| **Host state** | Win32 · WMI/CIM | point-in-time inventory; Sysmon-channel opt-in is an ADR-first decision | ✅ / 📋 | pre-existing persistence | collectors; #286 |
 
 ### Rejected
 
@@ -149,28 +178,28 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 
 | Focus | Source | What we get | Status | MITRE | Issue |
 | --- | --- | --- | --- | --- | --- |
-| **Process execution** | ES · exec | argv + the kernel's code-signing state at the source (`CS_VALID`, signing/team id, platform-binary bit), lineage | used | T1059, unsigned-binary-ran | #32 |
-| **File activity** | ES · file events | open/create/rename/unlink; mmap **filtered to writable+shared** (dyld torrent dropped in-shim); POSIX `O_*` flags so cross-platform write rules apply unchanged | used | T1105, T1485/T1486, T1070.004 | #32 |
-| **File activity** | ES · widening | quarantine **strip**, timestomp, hidden flags, APFS clone/exchangedata staging, remount | planned | T1070.006, T1564.001 | #357 |
-| **Network** | NE · filter-data | flows with audit-token attribution (inbound + outbound) → `Connect`, close-time byte counts → `NetworkFlow` — BEACON consumes macOS flows unchanged | built | T1071/T1041 | #33/#351 |
-| **Network** | libproc/sysctl | listening-port snapshots + baseline — the one source needing **no entitlement** | planned | LISTENER-DRIFT parity | #358 |
-| **Network** | ES · mount | mount/unmount (DMG delivery, USB staging) → v21 `Mount` | used | staging, evidence destruction | #96 |
-| **DNS** | NE · DNS-proxy | proxied query/response with process attribution → `DnsQuery` (RCODE in `status`) | built | T1071.004, domain↔process join | #33/#351 |
-| **Encrypted traffic** | NE · filter-data | TLS ClientHello peek → SNI + JA4 (Linux #86 parity) | planned | C2 fingerprints | #360 |
-| **Scripts & shells** | — | no macOS analog taken yet — interactive-shell visibility would be the Linux readline uprobe's sibling | gap | | matrix candidate |
-| **Memory & injection** | ES · widening | task-port acquisition, ptrace, remote thread creation, CS invalidation, suspend/resume, RWX mprotect, pty — the coverage-matrix promise #32/#96 only partially landed | planned | T1055, T1562 | #355 |
-| **Identity & privilege** | ES · sessions | SSH/console/loginwindow logins → `Auth` (13+) | used | T1078 | #96 |
-| **Identity & privilege** | unified log · sudo | sudo outcomes → `Auth`; ES-native su/sudo supersedes on 14+ | used / planned | T1548.003 | #95; #356 |
-| **Persistence & autostart** | ES · BTM | launch-item registration — deterministic, the macOS 7045 (payload path + instigator); launchd/cron path writes via the file stream | used | T1543.001/.004, T1547.015 | #32 |
-| **Persistence & autostart** | ES · widening | Open Directory account manipulation, configuration-profile installs (14+) | planned | T1136.001 | #356 |
-| **OS security verdicts** | unified log · syspolicyd+tccd | Gatekeeper scan verdicts (Mach-O only — scripts log `performScan` without a verdict, observed live); TCC grant/deny joined on tccd's msgID (client redacted → #354) | used | delivery context, TCC-probing recon | #95 |
-| **OS security verdicts** | ES · widening | XProtect malware verdicts, Gatekeeper **user override**, native TCC modify with client identity (15.4+) | planned | OS's own AV verdict for free | #356 |
-| **Tamper & anti-forensics** | ES · signal | signals **filtered to ES-client targets** (this agent, other security tools), sender attributed | used | T1562 | #96 |
-| **Tamper & anti-forensics** | ES · widening | kext loads, sensitive IOKit user-client opens | planned | T1547.006, keylogger preludes | #357 |
-| **Tamper & anti-forensics** | ES · XPC | XPC connects (14+) — rules match sensitive service names, never per-event | used | agent-impersonation surface | #96 |
-| **Download provenance** | ES · quarantine | quarantine xattr + `kMDItemWhereFroms` read-back → v21 `FileQuarantine` (agent, origin + referrer URLs) — the network→file link | used | provenance | #96 |
-| **Devices** | DiskArbitration/IOKit | disk/volume + device attach/detach | planned | T1091, T1052 | `device-control` |
-| **Host state** | inventory | pre-existing launch items, kexts/system extensions, profiles, the standing TCC-grant map, browser artifacts | planned | persistence that predates the agent | #359 |
+| **Process execution** | ES · exec | argv + the kernel's code-signing state at the source (`CS_VALID`, signing/team id, platform-binary bit), lineage | ✅ used | T1059, unsigned-binary-ran | #32 |
+| **File activity** | ES · file events | open/create/rename/unlink; mmap **filtered to writable+shared** (dyld torrent dropped in-shim); POSIX `O_*` flags so cross-platform write rules apply unchanged | ✅ used | T1105, T1485/T1486, T1070.004 | #32 |
+| **File activity** | ES · widening | quarantine **strip**, timestomp, hidden flags, APFS clone/exchangedata staging, remount | 📋 planned | T1070.006, T1564.001 | #357 |
+| **Network** | NE · filter-data | flows with audit-token attribution (inbound + outbound) → `Connect`, close-time byte counts → `NetworkFlow` — BEACON consumes macOS flows unchanged | 🔨 built | T1071/T1041 | #33/#351 |
+| **Network** | libproc/sysctl | listening-port snapshots + baseline — the one source needing **no entitlement** | 📋 planned | LISTENER-DRIFT parity | #358 |
+| **Network** | ES · mount | mount/unmount (DMG delivery, USB staging) → v21 `Mount` | ✅ used | staging, evidence destruction | #96 |
+| **DNS** | NE · DNS-proxy | proxied query/response with process attribution → `DnsQuery` (RCODE in `status`) | 🔨 built | T1071.004, domain↔process join | #33/#351 |
+| **Encrypted traffic** | NE · filter-data | TLS ClientHello peek → SNI + JA4 (Linux #86 parity) | 📋 planned | C2 fingerprints | #360 |
+| **Scripts & shells** | — | no macOS analog taken yet — interactive-shell visibility would be the Linux readline uprobe's sibling | ⭕ gap | | matrix candidate |
+| **Memory & injection** | ES · widening | task-port acquisition, ptrace, remote thread creation, CS invalidation, suspend/resume, RWX mprotect, pty — the coverage-matrix promise #32/#96 only partially landed | 📋 planned | T1055, T1562 | #355 |
+| **Identity & privilege** | ES · sessions | SSH/console/loginwindow logins → `Auth` (13+) | ✅ used | T1078 | #96 |
+| **Identity & privilege** | unified log · sudo | sudo outcomes → `Auth`; ES-native su/sudo supersedes on 14+ | ✅ / 📋 | T1548.003 | #95; #356 |
+| **Persistence & autostart** | ES · BTM | launch-item registration — deterministic, the macOS 7045 (payload path + instigator); launchd/cron path writes via the file stream | ✅ used | T1543.001/.004, T1547.015 | #32 |
+| **Persistence & autostart** | ES · widening | Open Directory account manipulation, configuration-profile installs (14+) | 📋 planned | T1136.001 | #356 |
+| **OS security verdicts** | unified log · syspolicyd+tccd | Gatekeeper scan verdicts (Mach-O only — scripts log `performScan` without a verdict, observed live); TCC grant/deny joined on tccd's msgID (client redacted → #354) | ✅ used | delivery context, TCC-probing recon | #95 |
+| **OS security verdicts** | ES · widening | XProtect malware verdicts, Gatekeeper **user override**, native TCC modify with client identity (15.4+) | 📋 planned | OS's own AV verdict for free | #356 |
+| **Tamper & anti-forensics** | ES · signal | signals **filtered to ES-client targets** (this agent, other security tools), sender attributed | ✅ used | T1562 | #96 |
+| **Tamper & anti-forensics** | ES · widening | kext loads, sensitive IOKit user-client opens | 📋 planned | T1547.006, keylogger preludes | #357 |
+| **Tamper & anti-forensics** | ES · XPC | XPC connects (14+) — rules match sensitive service names, never per-event | ✅ used | agent-impersonation surface | #96 |
+| **Download provenance** | ES · quarantine | quarantine xattr + `kMDItemWhereFroms` read-back → v21 `FileQuarantine` (agent, origin + referrer URLs) — the network→file link | ✅ used | provenance | #96 |
+| **Devices** | DiskArbitration/IOKit | disk/volume + device attach/detach | 📋 planned | T1091, T1052 | `device-control` |
+| **Host state** | inventory | pre-existing launch items, kexts/system extensions, profiles, the standing TCC-grant map, browser artifacts | 📋 planned | persistence that predates the agent | #359 |
 
 ### Rejected
 
