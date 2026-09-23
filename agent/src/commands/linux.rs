@@ -200,23 +200,30 @@ fn can_use_ebpf() -> bool {
 /// it). Both feed the same `DetectionSink`, shared via `Arc` (`schema::sensor`'s
 /// blanket `EventSink for Arc<T>`) since `LinuxSensor::run` needs to own its sink
 /// for `Sensor`'s lifetime but the poller thread outlives no particular caller.
-pub(crate) fn cmd_run(
-    alerts: &std::path::Path,
-    events: &std::path::Path,
-    enable_kill: bool,
-    enable_quarantine: bool,
-    enable_tls_capture: bool,
-    enable_readline_capture: bool,
-    server: Option<&str>,
-) -> anyhow::Result<()> {
+pub(crate) fn cmd_run(opts: super::RunOptions) -> anyhow::Result<()> {
+    let super::RunOptions {
+        alerts,
+        events,
+        state_dir,
+        enable_kill,
+        enable_quarantine,
+        enable_tls_capture,
+        enable_readline_capture,
+        server,
+    } = opts;
     // Kill-loudness (#71): must run before any other thread exists — the signal mask
     // set here is inherited by every thread spawned below, including `DetectionSink`'s
     // own worker threads.
     crate::kill_loudness::block_termination_signals();
-    crate::kill_loudness::spawn_watcher(alerts.to_path_buf());
 
     let pipeline = super::common::wire_run_pipeline(seeded_rule_state(), alerts, events, server)?;
     let sink = pipeline.sink;
+
+    // The watcher thread itself can start any time after the mask above — only the
+    // masking has to precede every other thread. Started here (not right after the
+    // masking call) so it can hold a clone of the sink's enrich queue for #341's
+    // bounded shutdown drain.
+    crate::kill_loudness::spawn_watcher(alerts.to_path_buf(), sink.enrich_queue().clone());
 
     // Select the primary sensor (eBPF or audit fallback) before creating heartbeats
     // so telemetry reports the correct sensor type.
@@ -277,6 +284,13 @@ pub(crate) fn cmd_run(
     }
     crate::silence::spawn_monitor(silence_monitor.clone(), sink.clone());
 
+    // Self-integrity verification (#71/#30): periodic re-check of the installed
+    // binaries against the signed release manifest `updater` persisted at promote
+    // time — the real root of trust the heartbeat above cannot provide (silence
+    // proves a sensor stopped producing, not that the binary producing it is the
+    // one that was actually shipped).
+    crate::integrity::spawn_monitor(state_dir.to_path_buf(), sink.clone());
+
     // Spawn health beacon thread — emits periodic self-diagnostics to the control
     // plane (issue #134). Sensor health is now the real silence-monitor snapshot
     // (#71) rather than a no-op; spool stays a no-op until that component exists.
@@ -311,7 +325,7 @@ pub(crate) fn cmd_run(
     let (_health_handle, _health_stop) = health.spawn();
 
     spawn_netlink_poller(sink.clone(), netlink_heartbeat);
-    spawn_journal_tail(sink.clone(), journal_heartbeat);
+    spawn_journal_tail(sink.clone(), journal_heartbeat, alerts);
     if enable_tls_capture || enable_readline_capture {
         spawn_uprobes_sensor(
             sink.clone(),
@@ -320,6 +334,12 @@ pub(crate) fn cmd_run(
             enable_readline_capture,
         );
     }
+
+    // Observation-only BPF-LSM coverage (issue #91/#313): best-effort, never
+    // fails `cmd_run`. `_lsm_ebpf` must stay bound for the rest of this function
+    // — dropping it detaches the hook — so it lives alongside `sensor` below,
+    // both held until `sensor.run()`'s Ctrl-C return ends the process.
+    let _lsm_ebpf = attach_lsm_hooks();
 
     // Protected-resource monitoring (#71): only the eBPF sensor produces `FileOpen`
     // events, so only its chain needs the guard — the netlink/journal sinks above
@@ -427,11 +447,25 @@ fn forward_netlink_events(
 /// `watchdog::service::linux`'s own doc on this) has no `journalctl` at all —
 /// logged once and skipped, not a reason to fail `agent run` entirely, same
 /// posture as [`seeded_rule_state`]'s netlink snapshot.
-fn spawn_journal_tail(sink: Arc<DetectionSink>, heartbeat: SensorHeartbeat) {
+///
+/// Cursor persistence (issue #321): the tail resumes from the last cursor this
+/// process saw (`crate::journal_cursor`, a file derived from `alerts` — same
+/// convention as `heartbeat_path_for`) when one exists, falling back to
+/// `journalctl`'s own "now" snapshot on a fresh install or a missing/corrupt
+/// cursor file — either way the honest "no prior state" case, not an error.
+/// Bounded catch-up: a restart replays whatever landed since the last persisted
+/// cursor, not the whole journal from epoch.
+fn spawn_journal_tail(
+    sink: Arc<DetectionSink>,
+    heartbeat: SensorHeartbeat,
+    alerts: &std::path::Path,
+) {
+    let cursor_path = crate::journal_cursor::cursor_path_for(alerts);
     std::thread::Builder::new()
         .name("journal-tail".into())
         .spawn(move || {
-            let cursor = sensor_linux_journal::current_cursor().ok();
+            let cursor = crate::journal_cursor::read(&cursor_path)
+                .or_else(|| sensor_linux_journal::current_cursor().ok());
             let mut child = match sensor_linux_journal::spawn_follow(cursor.as_deref()) {
                 Ok(child) => child,
                 Err(e) => {
@@ -454,6 +488,7 @@ fn spawn_journal_tail(sink: Arc<DetectionSink>, heartbeat: SensorHeartbeat) {
                 heartbeat.pulse();
                 match item {
                     Ok((record, event)) => {
+                        crate::journal_cursor::write(&cursor_path, &record.cursor);
                         if let Some(auth) = sensor_linux_journal::to_auth_event(&record, &event) {
                             sink.on_event(schema::Event::Auth(auth));
                         }
@@ -509,6 +544,51 @@ fn spawn_uprobes_sensor(
             }
         })
         .expect("spawning the uprobes sensor thread");
+}
+
+/// Attaches the observation-only `file_open` BPF-LSM hook (issue #91/#313) and
+/// returns the `Ebpf` object that keeps it live — dropping it detaches the
+/// program, so the caller must hold the return value for the process's lifetime,
+/// same as the primary sensor's own internal `Ebpf` object.
+///
+/// Best-effort, never fails `cmd_run`: every outcome (no BPF-LSM support on this
+/// kernel, compiled in but not in the active `lsm=` boot list, or a genuine
+/// attach failure) is the honest capability-absent case, logged and moved past —
+/// see `sensor_linux_lsm`'s crate doc on why a structured capability report
+/// doesn't exist yet. Gated behind `can_use_ebpf`: a host that can't load the
+/// primary eBPF object can't load this hook's object either (same compiled
+/// object, same privilege/BTF preflight), so skip the attempt entirely rather
+/// than log a second, redundant failure.
+fn attach_lsm_hooks() -> Option<aya::Ebpf> {
+    if !can_use_ebpf() {
+        return None;
+    }
+    if !sensor_linux_lsm::detect_hook_support("file_open") {
+        tracing::info!("lsm: kernel has no BPF-LSM support for `file_open`, skipping");
+        return None;
+    }
+    let mut ebpf = match sensor_linux::load_ebpf() {
+        Ok(ebpf) => ebpf,
+        Err(e) => {
+            tracing::warn!(error = %e, "lsm: failed to load the eBPF object for the file_open hook");
+            return None;
+        }
+    };
+    match sensor_linux_lsm::attach_file_open(&mut ebpf) {
+        Ok(()) => {
+            tracing::info!("lsm: file_open BPF-LSM hook attached");
+            Some(ebpf)
+        }
+        Err(e) => {
+            // BTF said the type exists but attach still failed — most commonly
+            // "bpf" is not in the active `lsm=` boot list (compiled in, not
+            // live). Still the honest capability-absent case, just a notch more
+            // notable than "no BTF at all" since it means the operator could
+            // fix this with a boot-cmdline change.
+            tracing::warn!(error = %e, "lsm: file_open BPF-LSM hook did not attach");
+            None
+        }
+    }
 }
 
 /// Linux: rules-filtered benign capture via `BaselineSink` (Ctrl-C handled by the

@@ -22,6 +22,7 @@ name = "agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aya",
  "clap",
  "config",
  "correlator",
@@ -40,9 +41,11 @@ dependencies = [
  "sensor-linux-uprobes",
  "sensor-macos",
  "sensor-macos-network-extension",
+ "sensor-macos-sockets",
  "sensor-macos-unifiedlog",
  "sensor-windows",
  "sensor-windows-eventlog",
+ "sensor-windows-sockets",
  "serde",
  "sigma",
  "sinks",
@@ -2355,6 +2358,8 @@ dependencies = [
  "regex",
  "schema",
  "sensor-linux-wire",
+ "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
@@ -2392,6 +2397,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-macos-sockets"
+version = "0.1.0"
+dependencies = [
+ "cc",
+ "schema",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
 name = "sensor-macos-unifiedlog"
 version = "0.1.0"
 dependencies = [
@@ -2418,6 +2433,16 @@ version = "0.1.0"
 dependencies = [
  "schema",
  "tracing",
+]
+
+[[package]]
+name = "sensor-windows-sockets"
+version = "0.1.0"
+dependencies = [
+ "schema",
+ "thiserror 2.0.20",
+ "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -163,6 +163,20 @@ Packaging, entitlements (both restricted, same Apple request as ES), and the
 user/MDM approval flow: `packaging/macos/README.md`. The beacon-scenario lab
 validation rides the packaged extension.
 
+## Socket-table snapshots (`sensor-macos-sockets`, issue #358)
+
+The entitlement-free source: a libproc walk (C shim against the SDK's own
+`proc_info` headers — `socket_fdinfo` layout never transcribed into Rust)
+snapshots every visible TCP socket with direct attribution (pid, real ppid,
+uid/gid, executable path — richer than the Linux inode join). Listeners map
+to `Event::ListenPort` on a 10s poll; the agent seeds the LISTENER-DRIFT
+baseline from one startup snapshot, so boot-time services are baseline, not
+findings. Unprivileged it sees the caller's own scope; as root, the whole
+table. Established sockets are snapshotted but deliberately not emitted —
+the NE flow stream (#33) is the connection source. Live-validated in the
+default test suite: the crate's integration tests bind a real listener and
+require the walk to find and normalize it.
+
 ## Fork/exit and process-tree state
 
 `NOTIFY_FORK`/`NOTIFY_EXIT` are not subscribed: `schema` has no fork/exit
