@@ -2068,14 +2068,26 @@ pub fn sys_enter_ptrace(ctx: TracePointContext) -> u32 {
 }
 
 fn try_sys_enter_ptrace(ctx: TracePointContext) -> Result<u32, u32> {
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let request: u64 = unsafe { ctx.read_at(PTRACE_REQUEST_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let request: u64 =
+        unsafe { ctx.read_at::<u32>(PTRACE_REQUEST_OFFSET).map_err(|_| 1u32)? as u64 };
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let target_pid: u64 = unsafe { ctx.read_at(PTRACE_PID_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let target_pid: u64 =
         unsafe { ctx.read_at::<u32>(PTRACE_PID_OFFSET).map_err(|_| 1u32)? as u64 };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let addr: u64 = unsafe { ctx.read_at(PTRACE_ADDR_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let addr: u64 =
+        unsafe { ctx.read_at::<u32>(PTRACE_ADDR_OFFSET).map_err(|_| 1u32)? as u64 };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let data: u64 = unsafe { ctx.read_at(PTRACE_DATA_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let data: u64 =
+        unsafe { ctx.read_at::<u32>(PTRACE_DATA_OFFSET).map_err(|_| 1u32)? as u64 };
 
     let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
     let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
@@ -2150,15 +2162,26 @@ const PROCESS_VM_REMOTE_IOV_OFFSET: usize = 28;
 #[cfg(bpf_target_arch = "x86")]
 const PROCESS_VM_RIOVCNT_OFFSET: usize = 32;
 
-/// Reads `iovec[0].iov_len` from a user-space `struct iovec *` — `iov_base` occupies
-/// the first 8 bytes (a pointer, unread here), `iov_len` (`size_t`) the next 8.
-/// `0` if `iov_ptr` is null, `count` is `0` (nothing to read), or the read fails —
-/// best-effort, matching every other user-memory read in this file.
+/// Reads `iovec[0].iov_len` from a user-space `struct iovec *`. On x86_64/aarch64
+/// `iov_base` (a pointer, unread here) occupies the first 8 bytes and `iov_len`
+/// (`size_t`) the next 8. On i686 the whole struct is 4+4 — a 32-bit userspace
+/// process's `struct iovec` has no 8-byte fields — so `iov_len` sits at offset 4,
+/// not 8, and is itself 4 bytes wide; reading it the 64-bit way would pull half of
+/// the next struct into the value. `0` if `iov_ptr` is null, `count` is `0`
+/// (nothing to read), or the read fails — best-effort, matching every other
+/// user-memory read in this file.
 fn read_first_iovec_len(iov_ptr: u64, count: u64) -> u64 {
     if iov_ptr == 0 || count == 0 {
         return 0;
     }
-    unsafe { bpf_probe_read_user((iov_ptr + 8) as *const u64) }.unwrap_or(0)
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+    {
+        unsafe { bpf_probe_read_user((iov_ptr + 8) as *const u64) }.unwrap_or(0)
+    }
+    #[cfg(bpf_target_arch = "x86")]
+    {
+        unsafe { bpf_probe_read_user((iov_ptr + 4) as *const u32) }.unwrap_or(0) as u64
+    }
 }
 
 #[tracepoint]
@@ -2175,17 +2198,35 @@ fn try_sys_enter_process_vm_readv(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(bpf_target_arch = "x86")]
     let target_pid: u64 =
         unsafe { ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? as u64 };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let local_iov_count: u64 = unsafe {
         ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET)
             .map_err(|_| 1u32)?
     };
+    #[cfg(bpf_target_arch = "x86")]
+    let local_iov_count: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_LIOVCNT_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let remote_iov_ptr: u64 = unsafe {
         ctx.read_at(PROCESS_VM_REMOTE_IOV_OFFSET)
             .map_err(|_| 1u32)?
     };
+    #[cfg(bpf_target_arch = "x86")]
+    let remote_iov_ptr: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_REMOTE_IOV_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let remote_iov_count: u64 = unsafe {
         ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET)
             .map_err(|_| 1u32)?
+    };
+    #[cfg(bpf_target_arch = "x86")]
+    let remote_iov_count: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_RIOVCNT_OFFSET)
+            .map_err(|_| 1u32)? as u64
     };
     let remote_iov_len = read_first_iovec_len(remote_iov_ptr, remote_iov_count);
 
@@ -2239,17 +2280,35 @@ fn try_sys_enter_process_vm_writev(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(bpf_target_arch = "x86")]
     let target_pid: u64 =
         unsafe { ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? as u64 };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let local_iov_count: u64 = unsafe {
         ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET)
             .map_err(|_| 1u32)?
     };
+    #[cfg(bpf_target_arch = "x86")]
+    let local_iov_count: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_LIOVCNT_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let remote_iov_ptr: u64 = unsafe {
         ctx.read_at(PROCESS_VM_REMOTE_IOV_OFFSET)
             .map_err(|_| 1u32)?
     };
+    #[cfg(bpf_target_arch = "x86")]
+    let remote_iov_ptr: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_REMOTE_IOV_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let remote_iov_count: u64 = unsafe {
         ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET)
             .map_err(|_| 1u32)?
+    };
+    #[cfg(bpf_target_arch = "x86")]
+    let remote_iov_count: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_RIOVCNT_OFFSET)
+            .map_err(|_| 1u32)? as u64
     };
     let remote_iov_len = read_first_iovec_len(remote_iov_ptr, remote_iov_count);
 
@@ -2329,7 +2388,11 @@ fn try_sys_enter_memfd_create(ctx: TracePointContext) -> Result<u32, u32> {
         ctx.read_at::<u32>(MEMFD_CREATE_NAME_PTR_OFFSET)
             .map_err(|_| 1u32)? as u64
     };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let flags: u64 = unsafe { ctx.read_at(MEMFD_CREATE_FLAGS_OFFSET).map_err(|_| 1u32)? };
+    #[cfg(bpf_target_arch = "x86")]
+    let flags: u64 =
+        unsafe { ctx.read_at::<u32>(MEMFD_CREATE_FLAGS_OFFSET).map_err(|_| 1u32)? as u64 };
 
     let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
     let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
