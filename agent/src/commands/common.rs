@@ -23,7 +23,7 @@ pub(crate) struct RunPipeline {
     /// Where the platform deposits its sensor-health source for `cli health`
     /// (issue #388). Left empty on a platform with no silence monitor wired:
     /// the IPC handler then reports no sensors rather than invented ones.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "linux", windows)), allow(dead_code))]
     pub(crate) sensor_health: SensorHealthSlot,
 }
 

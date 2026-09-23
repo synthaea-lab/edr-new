@@ -66,14 +66,30 @@ const USER_ACCOUNT_MGMT_AUDIT_SUBCATEGORY_GUID: &str = "{0CCE9235-69AE-11D9-BED3
 /// process rather than leaving it blank.
 const LSASS_COMM: &str = "lsass.exe";
 
-fn wevtutil(args: &[&str]) -> String {
-    match Command::new("wevtutil").args(args).output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Err(e) => {
-            tracing::warn!(error = %e, ?args, "wevtutil invocation failed");
-            String::new()
-        }
+/// Runs `wevtutil` and returns its stdout, or why the call failed.
+///
+/// A non-zero exit is a failure even though stdout is empty either way:
+/// `wevtutil qe` exits 0 with empty output when nothing matches, and *also*
+/// prints nothing on stdout when it is refused — exit 5
+/// (`ERROR_ACCESS_DENIED`, e.g. reading Security without admin rights,
+/// observed on a dev host). Folding both into `""` made a blinded channel
+/// indistinguishable from a quiet one (#388).
+fn wevtutil(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("wevtutil")
+        .args(args)
+        .output()
+        .map_err(|e| format!("wevtutil could not be spawned: {e}"))?;
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "no exit code".to_string(), |c| c.to_string());
+        return Err(format!(
+            "wevtutil exited with {code}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // ── The shared poll pipeline ─────────────────────────────────────────────────
@@ -98,6 +114,9 @@ pub(crate) type ParsedBlock = Option<(u64, Option<Event>)>;
 pub(crate) struct PollTarget {
     /// Names the poll thread in logs.
     pub(crate) label: &'static str,
+    /// Names this target's silence heartbeat (`cli health`, T1562 alerts) —
+    /// see [`EventLogSensor::liveness`].
+    heartbeat: &'static str,
     /// `wevtutil` channel (`System` / `Security`).
     pub(crate) channel: &'static str,
     /// The `EventID=...` predicate, without the surrounding `*[System[...]]`.
@@ -115,7 +134,7 @@ pub(crate) struct PollTarget {
 }
 
 /// `EventRecordID` of the newest matching event already in the channel.
-fn last_known_record_id(target: &PollTarget) -> u64 {
+fn last_known_record_id(target: &PollTarget) -> Result<u64, String> {
     let query = format!("/q:*[System[({})]]", target.id_filter);
     let xml_out = wevtutil(&[
         "qe",
@@ -124,49 +143,101 @@ fn last_known_record_id(target: &PollTarget) -> u64 {
         "/rd:true",
         "/f:xml",
         query.as_str(),
-    ]);
-    xml::split_event_blocks(&xml_out)
+    ])?;
+    Ok(xml::split_event_blocks(&xml_out)
         .first()
         .and_then(|block| (target.parse_block)(block))
-        .map(|(record_id, _)| record_id)
-        .unwrap_or(0)
+        .map_or(0, |(record_id, _)| record_id))
 }
 
 /// Parsed blocks newer than `since_record_id` (exclusive), oldest to newest.
-fn new_blocks(target: &PollTarget, since_record_id: u64) -> Vec<(u64, Option<Event>)> {
+fn new_blocks(
+    target: &PollTarget,
+    since_record_id: u64,
+) -> Result<Vec<(u64, Option<Event>)>, String> {
     let query = format!(
         "/q:*[System[({}) and (EventRecordID>{since_record_id})]]",
         target.id_filter
     );
-    let xml_out = wevtutil(&["qe", target.channel, "/rd:false", "/f:xml", query.as_str()]);
-    xml::split_event_blocks(&xml_out)
+    let xml_out = wevtutil(&["qe", target.channel, "/rd:false", "/f:xml", query.as_str()])?;
+    Ok(xml::split_event_blocks(&xml_out)
         .into_iter()
         .filter_map(|block| (target.parse_block)(block))
-        .collect()
+        .collect())
 }
 
+/// One poll tick: establishes the startup cursor if there is none yet,
+/// otherwise forwards everything newer than it. Returns the new cursor.
+fn poll_once(
+    target: &PollTarget,
+    cursor: Option<u64>,
+    sink: &dyn EventSink,
+    counters: &EventLogCounters,
+) -> Result<u64, String> {
+    let Some(since) = cursor else {
+        return last_known_record_id(target);
+    };
+    let mut newest = since;
+    for (record_id, event) in new_blocks(target, since)? {
+        newest = newest.max(record_id);
+        if let Some(event) = event {
+            (target.counter)(counters).fetch_add(1, Ordering::Relaxed);
+            sink.on_event(event);
+        }
+    }
+    Ok(newest)
+}
+
+/// Runs one target's poll loop on its own thread. `liveness` is incremented
+/// once per tick that succeeded — events found or not — and never on a failed
+/// one (see [`EventLogSensor::liveness`]).
 fn poll(
     target: &'static PollTarget,
     sink: Arc<dyn EventSink>,
     stop: Arc<AtomicBool>,
     counters: Arc<EventLogCounters>,
+    liveness: Arc<AtomicU64>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut last_id = last_known_record_id(target);
-        tracing::info!(
-            target = target.label,
-            last_record_id = last_id,
-            "poll started"
-        );
+        // `None` until the startup cursor is read. A channel unreadable at
+        // startup must not fall back to record 0 — that would replay its whole
+        // history the moment it becomes readable — so the cursor read is
+        // retried every tick instead.
+        let mut cursor: Option<u64> = None;
+        // Warn once per failure streak, not every `POLL_INTERVAL`.
+        let mut failing = false;
+        tracing::info!(target = target.label, "poll started");
         while !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(POLL_INTERVAL);
-            for (record_id, event) in new_blocks(target, last_id) {
-                last_id = last_id.max(record_id);
-                if let Some(event) = event {
-                    (target.counter)(&counters).fetch_add(1, Ordering::Relaxed);
-                    sink.on_event(event);
+            match poll_once(target, cursor, sink.as_ref(), &counters) {
+                Ok(newest) => {
+                    if cursor.is_none() {
+                        tracing::info!(
+                            target = target.label,
+                            last_record_id = newest,
+                            "poll cursor established"
+                        );
+                    }
+                    cursor = Some(newest);
+                    liveness.fetch_add(1, Ordering::Relaxed);
+                    if failing {
+                        tracing::info!(target = target.label, "poll recovered");
+                        failing = false;
+                    }
+                }
+                Err(error) => {
+                    if !failing {
+                        tracing::warn!(
+                            target = target.label,
+                            channel = target.channel,
+                            %error,
+                            "poll failed — this channel reports nothing until it recovers, \
+                             and its silence heartbeat stops"
+                        );
+                        failing = true;
+                    }
                 }
             }
+            std::thread::sleep(POLL_INTERVAL);
         }
         tracing::info!(target = target.label, "poll stopped");
     })
@@ -247,6 +318,7 @@ fn normalize_service_install(block: &str) -> ParsedBlock {
 
 static SERVICE_INSTALLS: PollTarget = PollTarget {
     label: "service-install",
+    heartbeat: "windows-eventlog:service-install",
     channel: "System",
     id_filter: "EventID=7045",
     counter: |c| &c.service_installs,
@@ -293,6 +365,7 @@ fn normalize_scheduled_task(block: &str) -> ParsedBlock {
 
 static SCHEDULED_TASKS: PollTarget = PollTarget {
     label: "scheduled-task",
+    heartbeat: "windows-eventlog:scheduled-task",
     channel: "Security",
     id_filter: "EventID=4698",
     counter: |c| &c.scheduled_tasks,
@@ -322,6 +395,7 @@ fn normalize_logon(block: &str) -> ParsedBlock {
 
 static LOGON_EVENTS: PollTarget = PollTarget {
     label: "logon",
+    heartbeat: "windows-eventlog:logon",
     channel: "Security",
     // One query across all four IDs (they share the Security channel's single
     // `EventRecordID` sequence), rather than four separate polls hammering the
@@ -439,6 +513,7 @@ fn normalize_account_created(block: &str) -> ParsedBlock {
 
 static ACCOUNT_CREATIONS: PollTarget = PollTarget {
     label: "account-creation",
+    heartbeat: "windows-eventlog:account-creation",
     channel: "Security",
     id_filter: "EventID=4720",
     counter: |c| &c.account_creations,
@@ -485,6 +560,7 @@ fn normalize_applocker_block(block: &str) -> ParsedBlock {
 
 static APPLOCKER_BLOCKS: PollTarget = PollTarget {
     label: "applocker-block",
+    heartbeat: "windows-eventlog:applocker-block",
     channel: "Microsoft-Windows-AppLocker/EXE and DLL",
     id_filter: "EventID=8004",
     counter: |c| &c.applocker_blocks,
@@ -525,6 +601,7 @@ fn normalize_task_scheduler_op_registered(block: &str) -> ParsedBlock {
 
 static TASK_SCHEDULER_OP: PollTarget = PollTarget {
     label: "task-scheduler-op",
+    heartbeat: "windows-eventlog:task-scheduler-op",
     channel: "Microsoft-Windows-TaskScheduler/Operational",
     id_filter: "EventID=106",
     counter: |c| &c.task_scheduler_op,
@@ -610,6 +687,31 @@ pub struct EventLogConfig {
     pub task_scheduler_op_enabled: bool,
 }
 
+impl EventLogConfig {
+    /// Per-target switches, in [`TARGETS`] order.
+    fn enabled(&self) -> [bool; 6] {
+        [
+            self.service_installs_enabled,
+            self.scheduled_tasks_enabled,
+            self.account_creations_enabled,
+            self.logon_events_enabled,
+            self.applocker_blocks_enabled,
+            self.task_scheduler_op_enabled,
+        ]
+    }
+}
+
+/// Every poll target, in the order [`EventLogConfig::enabled`] and
+/// [`EventLogSensor`]'s liveness counters follow.
+static TARGETS: [&PollTarget; 6] = [
+    &SERVICE_INSTALLS,
+    &SCHEDULED_TASKS,
+    &ACCOUNT_CREATIONS,
+    &LOGON_EVENTS,
+    &APPLOCKER_BLOCKS,
+    &TASK_SCHEDULER_OP,
+];
+
 impl Default for EventLogConfig {
     /// Every group enabled — this crate's behavior before `EventLogConfig`
     /// existed.
@@ -652,6 +754,8 @@ pub struct EventLogSensor {
     stop: Arc<AtomicBool>,
     config: EventLogConfig,
     counters: Arc<EventLogCounters>,
+    /// One per [`TARGETS`] entry, same order — see [`Self::liveness`].
+    liveness: [Arc<AtomicU64>; 6],
 }
 
 impl EventLogSensor {
@@ -668,6 +772,7 @@ impl EventLogSensor {
             stop: Arc::new(AtomicBool::new(false)),
             config,
             counters: Arc::new(EventLogCounters::default()),
+            liveness: std::array::from_fn(|_| Arc::new(AtomicU64::new(0))),
         }
     }
 
@@ -683,6 +788,34 @@ impl EventLogSensor {
     #[must_use]
     pub fn counters(&self) -> Arc<EventLogCounters> {
         Arc::clone(&self.counters)
+    }
+
+    /// One liveness counter per **enabled** poll target, named for a silence
+    /// monitor (`windows-eventlog:<target>`). Each is incremented once per poll
+    /// tick that actually succeeded (`wevtutil` exited 0), whether or not it
+    /// found events: a quiet channel stays live, a refused or broken one goes
+    /// dark. Per target rather than per sensor, because one shared counter would
+    /// let a healthy System poll mask a Security channel that stopped answering.
+    /// A disabled target is omitted — it never polls, so it must never be
+    /// watched for silence.
+    ///
+    /// Empty under [`EventLogTransport::Subscribe`]: a push subscription has
+    /// no poll tick, so a counter would never move on a quiet channel and a
+    /// silence monitor would raise a false T1562 on a healthy target. Until
+    /// that transport has a liveness signal of its own, it is simply not
+    /// watched (issues #403, #423).
+    #[must_use]
+    pub fn liveness(&self) -> Vec<(&'static str, Arc<AtomicU64>)> {
+        if self.config.transport == EventLogTransport::Subscribe {
+            return Vec::new();
+        }
+        TARGETS
+            .iter()
+            .zip(self.config.enabled())
+            .zip(&self.liveness)
+            .filter(|((_, enabled), _)| *enabled)
+            .map(|((target, _), counter)| (target.heartbeat, Arc::clone(counter)))
+            .collect()
     }
 }
 
@@ -713,21 +846,14 @@ impl Sensor for EventLogSensor {
         self.stop.store(false, Ordering::SeqCst);
         let sink: Arc<dyn EventSink> = Arc::from(sink);
 
-        let targets = [
-            (self.config.service_installs_enabled, &SERVICE_INSTALLS),
-            (self.config.scheduled_tasks_enabled, &SCHEDULED_TASKS),
-            (self.config.account_creations_enabled, &ACCOUNT_CREATIONS),
-            (self.config.logon_events_enabled, &LOGON_EVENTS),
-            (self.config.applocker_blocks_enabled, &APPLOCKER_BLOCKS),
-            (self.config.task_scheduler_op_enabled, &TASK_SCHEDULER_OP),
-        ];
+        let enabled = self.config.enabled();
 
         // Audit-subcategory enablement is transport-independent: whether
         // events land in the channel does not depend on whether we read them
         // via `wevtutil` or `EvtSubscribe`. So we run each target's
         // `enable_audit` (if any) once up front, regardless of transport.
-        for (enabled, target) in targets {
-            if !enabled {
+        for (i, target) in TARGETS.iter().enumerate() {
+            if !enabled[i] {
                 continue;
             }
             if let Some(enable_audit) = target.enable_audit {
@@ -745,8 +871,8 @@ impl Sensor for EventLogSensor {
 
         match self.config.transport {
             EventLogTransport::Polling => {
-                for (enabled, target) in targets {
-                    if !enabled {
+                for (i, target) in TARGETS.iter().enumerate() {
+                    if !enabled[i] {
                         continue;
                     }
                     poll_handles.push(poll(
@@ -754,14 +880,15 @@ impl Sensor for EventLogSensor {
                         Arc::clone(&sink),
                         Arc::clone(&self.stop),
                         Arc::clone(&self.counters),
+                        Arc::clone(&self.liveness[i]),
                     ));
                 }
             }
             EventLogTransport::Subscribe => {
                 #[cfg(windows)]
                 {
-                    for (enabled, target) in targets {
-                        if !enabled {
+                    for (i, target) in TARGETS.iter().enumerate() {
+                        if !enabled[i] {
                             continue;
                         }
                         // `subscribe` returns `None` on `EvtSubscribe`
@@ -913,5 +1040,88 @@ mod config_tests {
         assert_eq!(counters.logon_events.load(Ordering::Relaxed), 0);
         assert_eq!(counters.applocker_blocks.load(Ordering::Relaxed), 0);
         assert_eq!(counters.task_scheduler_op.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn liveness_covers_every_target_by_default_with_distinct_names() {
+        let names: Vec<_> = EventLogSensor::new()
+            .liveness()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "windows-eventlog:service-install",
+                "windows-eventlog:scheduled-task",
+                "windows-eventlog:account-creation",
+                "windows-eventlog:logon",
+                "windows-eventlog:applocker-block",
+                "windows-eventlog:task-scheduler-op",
+            ]
+        );
+    }
+
+    #[test]
+    fn liveness_omits_disabled_targets() {
+        let sensor = EventLogSensor::with_config(EventLogConfig {
+            service_installs_enabled: false,
+            scheduled_tasks_enabled: true,
+            account_creations_enabled: false,
+            logon_events_enabled: true,
+            applocker_blocks_enabled: false,
+            task_scheduler_op_enabled: false,
+            transport: EventLogTransport::Polling,
+        });
+        let names: Vec<_> = sensor.liveness().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            ["windows-eventlog:scheduled-task", "windows-eventlog:logon"]
+        );
+    }
+
+    #[test]
+    fn subscribe_transport_exposes_no_liveness_counters() {
+        let sensor = EventLogSensor::with_config(EventLogConfig {
+            transport: EventLogTransport::Subscribe,
+            ..EventLogConfig::default()
+        });
+        assert!(
+            sensor.liveness().is_empty(),
+            "a push subscription has no poll tick: watching it would raise false T1562"
+        );
+    }
+
+    #[test]
+    fn liveness_handles_share_the_sensor_counters() {
+        let sensor = EventLogSensor::new();
+        let (_, first) = &sensor.liveness()[0];
+        first.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(sensor.liveness()[0].1.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod wevtutil_tests {
+    use super::*;
+
+    #[test]
+    fn a_query_matching_nothing_is_a_success_with_empty_output() {
+        let out = wevtutil(&[
+            "qe",
+            "System",
+            "/c:1",
+            "/f:xml",
+            "/q:*[System[(EventID=99999)]]",
+        ])
+        .expect("an empty result is not a failure");
+        assert!(out.trim().is_empty());
+    }
+
+    #[test]
+    fn a_failing_query_is_an_error_not_an_empty_result() {
+        let err = wevtutil(&["qe", "Synthaea-No-Such-Channel", "/c:1"])
+            .expect_err("an unknown channel must not look like a quiet one");
+        assert!(err.contains("exited with"), "{err}");
     }
 }
