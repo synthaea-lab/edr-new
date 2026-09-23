@@ -12,6 +12,10 @@
 //! - 5xx repeated `max_drain_attempts` times on the same segment → `skip`,
 //!   so a permanently-500ing segment can't wedge newer segments forever.
 //! - connection refused → retryable, drain untouched.
+//! - connection refused repeated → gated on the separate, larger
+//!   `max_network_drain_attempts` budget, not `max_drain_attempts` (issue
+//!   #394): never having reached the server is weaker poison-segment
+//!   evidence than a 5xx it actually sent.
 
 use std::{
     io::{Read as _, Write as _},
@@ -204,6 +208,48 @@ fn connection_refused_is_retryable_and_loses_nothing() {
     assert!(err.is_retryable(), "unreachable server is the nominal case");
     assert_eq!(acked.load(Ordering::SeqCst), 0);
     assert_eq!(skipped.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn connection_refused_repeated_is_skipped_only_at_the_larger_network_budget() {
+    // Issue #394: before this fix, a pure connectivity failure counted
+    // toward the same `max_drain_attempts` budget as a 5xx, so a segment
+    // could be skipped — and its events lost — after ~15s of a VPN
+    // reconnect or DNS hiccup, even though the server was never actually
+    // reached, let alone rejected anything.
+    let max_attempts = transport::DEFAULT_MAX_DRAIN_ATTEMPTS;
+    let max_network_attempts = transport::DEFAULT_MAX_NETWORK_DRAIN_ATTEMPTS;
+    assert!(
+        max_network_attempts > max_attempts,
+        "the network budget must be the larger of the two, or this test proves nothing"
+    );
+
+    // Bind then drop: the port stays closed for the uploader's lifetime.
+    let url = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        format!("http://{}", listener.local_addr().unwrap())
+    };
+    let (mut uploader, acked, skipped) = uploader_against(&url, events(2));
+
+    for attempt in 1..max_network_attempts {
+        let err = uploader.upload_once().expect_err("refused must surface");
+        assert!(err.is_retryable(), "connection refused is transient");
+        assert_eq!(
+            skipped.load(Ordering::SeqCst),
+            0,
+            "must not skip before max_network_drain_attempts (attempt {attempt}), \
+             even past max_drain_attempts ({max_attempts})"
+        );
+    }
+    // The Nth attempt hits max_network_drain_attempts and skips.
+    let err = uploader.upload_once().expect_err("refused must surface");
+    assert!(err.is_retryable(), "connection refused is transient");
+    assert_eq!(
+        skipped.load(Ordering::SeqCst),
+        1,
+        "network budget exhausted — forward progress restored"
+    );
+    assert_eq!(acked.load(Ordering::SeqCst), 0);
 }
 
 /// A drain backed by several segments, like the real spool: `drain` always

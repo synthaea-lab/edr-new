@@ -47,4 +47,16 @@ impl TransportError {
             _ => false,
         }
     }
+
+    /// Returns true for a pure connectivity failure (DNS, connection refused,
+    /// timeout) as opposed to a response the server actually sent (even a
+    /// rejection). Used to give connectivity blips their own, longer
+    /// same-segment retry budget than server-side rejections (issue #394).
+    #[must_use]
+    pub fn is_network_error(&self) -> bool {
+        matches!(
+            self,
+            TransportError::Network(_) | TransportError::Unreachable
+        )
+    }
 }
