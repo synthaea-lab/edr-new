@@ -90,11 +90,14 @@ pub const WIRE_VERSION: u32 = 12;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
-/// Maximum captured length of an xattr name (issue #262 Phase 3). Real names are
-/// `namespace.attribute` (`security.capability`, `security.selinux`,
-/// `user.some_marker`, `trusted.overlay.origin`); the kernel caps the whole name at
-/// 255 bytes (`XATTR_NAME_MAX`), but every name seen in practice is well under 64.
-pub const MAX_XATTR_NAME_LEN: usize = 64;
+/// Maximum captured length of an xattr name (issue #262 Phase 3): the kernel's own
+/// `XATTR_NAME_MAX`. Real names (`security.capability`, `security.selinux`,
+/// `user.some_marker`, `trusted.overlay.origin`) are far shorter, but capturing the
+/// kernel's actual ceiling rather than a smaller "should be enough" guess means
+/// there is no truncation case to silently misreport — an attacker who picked an
+/// unusually long name (evasion, or just an unusual but legitimate tool) is exactly
+/// the case a smaller buffer would have hidden (review finding, PR #332).
+pub const MAX_XATTR_NAME_LEN: usize = 255;
 /// Budget for TLS plaintext capture (first N bytes). Chosen to fit comfortably
 /// in a ring-buffer event with metadata while staying under 512 bytes total.
 pub const MAX_TLS_CAPTURE: usize = 256;
