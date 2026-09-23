@@ -50,7 +50,7 @@ pending (the coverage packs #376–#381 — see
 | **Credential-attack shadow**<br><sub>TA0006 Cred Access</sub> | 🟡* shadow-file reads | 📋 #364 Kerberos/NTLM/LDAP | 🟡* keychain reads |
 | **Account management**<br><sub>TA0003 T1136</sub> | 🟡* useradd content | ✅ WEL 4720 | 📋 #356 OD events |
 | **Services & autostart**<br><sub>TA0003 T1543/T1547</sub> | ✅ journald + rules | ✅ WEL 7045 + ETW registry | ✅ ES BTM |
-| **Scheduled execution**<br><sub>TA0002/TA0003 T1053</sub> | ✅ cron/systemd paths | ✅ WEL 4698 | ✅ cron/launchd paths |
+| **Scheduled execution**<br><sub>TA0002/TA0003 T1053</sub> | ✅ cron/systemd paths | ✅ WEL 4698 · 4702 | ✅ cron/launchd paths |
 | **OS security verdicts**<br><sub>TA0005 Evasion context</sub> | 🔍 SELinux AVC | 📋 #283 | ✅ log · 📋 #356 |
 | **Kernel modules & drivers**<br><sub>TA0003/TA0005 rootkits</sub> | 📋 #264 module+bpf | 🟡* image loads · 📋 #39 | 📋 #357 kexts |
 | **Tamper on security tooling**<br><sub>TA0005 T1562</sub> | 📋 #362 kill-trace | 📋 #39 driver vantage | ✅ ES signals |
@@ -151,7 +151,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Identity & privilege** | WEL · Security | logons 4624/4625/4648/4672 → `Auth` | ✅ used | T1078, T1110 | #94 |
 | **Identity & privilege** | ETW · Kerberos/NTLM/LDAP-Client | client-side ticket requests (RC4-etype shadow), NTLM validation, LDAP recon bursts — DC-side 4768/4769 stay server scope, honestly | 📋 planned | T1558, AD recon | #364 |
 | **Identity & privilege** | WEL · TerminalServices | RDP session lifecycle | 📋 planned | T1021.001 | #285 |
-| **Persistence & autostart** | WEL · System+Security | service install 7045, scheduled task 4698, local account 4720 — flag-gated deterministic events | ✅ used | T1543.003, T1053.005, T1136.001 | #94 |
+| **Persistence & autostart** | WEL · System+Security | service install 7045, scheduled task 4698 + update 4702 (task hijack, path-gated), local account 4720 — flag-gated deterministic events | ✅ used | T1543.003, T1053.005, T1136.001 | #94 |
 | **Persistence & autostart** | ETW · Kernel-Registry | value writes (EID 4, NT→`HKLM` normalized; reads deliberately not taken) | ✅ used | T1547.001, T1112 | #21 |
 | **Persistence & autostart** | driver · kernel callbacks | process/image/registry from the tamper-resistant vantage | 📋 planned | same, authoritative | #39 |
 | **OS security verdicts** | WEL · operational channels | AppLocker, WDAC, Defender, Task-Scheduler | 📋 planned | policy + AV context | #283 |
