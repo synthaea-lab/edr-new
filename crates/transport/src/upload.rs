@@ -116,7 +116,17 @@ impl<D: EventDrain> EventUploader<D> {
 
         let count = events.len();
 
-        // Upload in batches
+        // Upload in batches. `consecutive_failures` is NOT reset here on a
+        // per-batch success (issue #315 regression, found in PR #349 review):
+        // a segment larger than `batch_size` splits into several batches per
+        // call, and resetting mid-call erases the count from every PRIOR
+        // failed call on this same still-unacked segment the moment any
+        // later batch happens to land before the one that keeps failing —
+        // `consecutive_failures` never reaches `max_drain_attempts` unless
+        // the poison record happens to sit in the segment's very first
+        // batch. It resets exactly once, only when the whole call succeeds
+        // (see the `ack()` call below) — that is the only point at which
+        // this segment's attempt history should be forgotten.
         for batch in events.chunks(self.config.batch_size) {
             match self.client.upload_events(batch) {
                 Ok(response) => {
@@ -125,7 +135,6 @@ impl<D: EventDrain> EventUploader<D> {
                         batch_id = ?response.batch_id,
                         "uploaded events"
                     );
-                    self.consecutive_failures = 0;
                 }
                 Err(e) if !e.is_retryable() => {
                     tracing::warn!(
@@ -159,6 +168,7 @@ impl<D: EventDrain> EventUploader<D> {
         }
 
         self.drain.ack()?;
+        self.consecutive_failures = 0;
         tracing::info!(count, "uploaded events successfully");
         Ok(count)
     }

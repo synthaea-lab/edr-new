@@ -281,3 +281,67 @@ fn poison_segment_that_always_500s_is_skipped_after_max_attempts_and_newer_segme
         "failure counter resets once the poison segment is gone"
     );
 }
+
+#[test]
+fn poison_batch_not_in_the_first_slot_still_reaches_max_drain_attempts() {
+    // Regression for the #315 fix's own bug (found in PR #349 review): a
+    // segment larger than `batch_size` splits into several upload requests
+    // per `upload_once` call. Before the fix, `consecutive_failures` reset
+    // to 0 on every successful BATCH, not just a successful call — so a
+    // call whose first batch(es) succeed before a later one fails erased
+    // the count from every earlier failed call on this same still-unacked
+    // segment, and `max_drain_attempts` was never reached unless the
+    // poison record happened to sit in the segment's very first batch. The
+    // test above (`poison_segment_that_always_500s...`) couldn't catch this
+    // class of bug: both its segments are smaller than `batch_size`, so
+    // every call only ever produces one request.
+    let max_attempts = transport::DEFAULT_MAX_DRAIN_ATTEMPTS;
+
+    // Each call sends exactly 2 requests: batch 1 (200) then batch 2 (500)
+    // — the call returns as soon as a batch fails, so batch 3 (the segment
+    // has 5 events at batch_size=2: batches of 2, 2, 1) is never requested.
+    let mut responses: Vec<(u16, &'static str)> = Vec::new();
+    for _ in 0..max_attempts {
+        responses.push((200, r#"{"accepted":2,"batch_id":null}"#));
+        responses.push((500, r#"{"error":"try later"}"#));
+    }
+    let url = sequenced_server(responses);
+
+    let acked = Arc::new(AtomicU32::new(0));
+    let skipped = Arc::new(AtomicU32::new(0));
+    let mut segments = std::collections::VecDeque::new();
+    segments.push_back(events(5));
+    let drain = MultiSegmentDrain {
+        segments,
+        acked: Arc::clone(&acked),
+        skipped: Arc::clone(&skipped),
+    };
+    let mut config = TransportConfig::new(&url);
+    config.request_timeout = std::time::Duration::from_secs(5);
+    config.batch_size = 2;
+    let client = TransportClient::new(config).unwrap();
+    let mut uploader = EventUploader::new(client, drain);
+
+    for attempt in 1..max_attempts {
+        let err = uploader
+            .upload_once()
+            .expect_err("the second batch's 500 must surface");
+        assert!(err.is_retryable(), "5xx is transient");
+        assert_eq!(
+            skipped.load(Ordering::SeqCst),
+            0,
+            "must not skip before max_drain_attempts (attempt {attempt}) \
+             — the first batch's success must not have erased earlier attempts"
+        );
+    }
+    let err = uploader
+        .upload_once()
+        .expect_err("the second batch's 500 must surface");
+    assert!(err.is_retryable(), "5xx is transient");
+    assert_eq!(
+        skipped.load(Ordering::SeqCst),
+        1,
+        "poison segment skipped even though its poison batch isn't the first"
+    );
+    assert_eq!(acked.load(Ordering::SeqCst), 0);
+}
