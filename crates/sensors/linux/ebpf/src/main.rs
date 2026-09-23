@@ -2119,13 +2119,13 @@ static MOUNT_SCRATCH: PerCpuArray<MountEvent> = PerCpuArray::with_max_entries(1,
 /// dependent offset.
 const MS_RDONLY: u64 = 1;
 
-/// Offsets of the `syscalls:sys_enter_mount` tracepoint, inferred from `mount(2)`'s
-/// own argument order (`source`, `target`, `filesystemtype`, `mountflags`, `data`) via
-/// the standard `syscalls:*` layout every other probe in this file documents
-/// (16-byte header + 8 bytes/arg on x86_64/aarch64, 12-byte header + 4 bytes/arg on
-/// i686) — **not yet independently verified against `/format` on the lab**, unlike
-/// this file's other offset tables. Verify on `lab/MATRIX.md` before this probe is
-/// trusted the way `sys_enter_rename`/`sys_enter_chmod` are.
+/// Offsets of the `syscalls:sys_enter_mount` tracepoint: `dev_name`(16, the
+/// `source` arg), `dir_name`(24, `target`), `type`(32, `filesystemtype`),
+/// `flags`(40, `mountflags`), `data`(48, unread). Verified on 2026-09-23 on Ubuntu
+/// 22.04 (kernel 5.15.0-91-generic, x86_64) via
+/// `/sys/kernel/tracing/events/syscalls/sys_enter_mount/format` — matched the
+/// standard `syscalls:*` layout inferred here on first write, no offset changes
+/// needed.
 #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
 const MOUNT_SOURCE_PTR_OFFSET: usize = 16;
 #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
@@ -2143,12 +2143,19 @@ const MOUNT_FSTYPE_PTR_OFFSET: usize = 20;
 #[cfg(bpf_target_arch = "x86")]
 const MOUNT_FLAGS_OFFSET: usize = 24;
 
-/// Offsets of the `syscalls:sys_enter_umount2` tracepoint: `target`(16), `flags`(24)
-/// on x86_64/aarch64 — same inferred-not-verified status as the mount offsets above.
+/// glibc's `umount2(2)` libc wrapper maps to a kernel syscall the kernel itself
+/// (`fs/namespace.c`) names plain `umount` — `SYSCALL_DEFINE2(umount, ...)`, not
+/// `umount2` — so the tracepoint is `syscalls:sys_enter_umount`, confirmed live
+/// (the assumed `sys_enter_umount2` name does not exist; this file's doc comments
+/// below keep saying "`umount2(2)`" for the libc call itself, which IS
+/// `umount2()`, while the identifiers here match the kernel's own name).
+/// Offsets: `name`(16, the target path), `flags`(24). Verified on 2026-09-23 on
+/// Ubuntu 22.04 (kernel 5.15.0-91-generic, x86_64) via
+/// `/sys/kernel/tracing/events/syscalls/sys_enter_umount/format`.
 #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-const UMOUNT2_TARGET_PTR_OFFSET: usize = 16;
+const UMOUNT_TARGET_PTR_OFFSET: usize = 16;
 #[cfg(bpf_target_arch = "x86")]
-const UMOUNT2_TARGET_PTR_OFFSET: usize = 12;
+const UMOUNT_TARGET_PTR_OFFSET: usize = 12;
 
 #[tracepoint]
 pub fn sys_enter_mount(ctx: TracePointContext) -> u32 {
@@ -2190,26 +2197,26 @@ fn try_sys_enter_mount(ctx: TracePointContext) -> Result<u32, u32> {
 }
 
 #[tracepoint]
-pub fn sys_enter_umount2(ctx: TracePointContext) -> u32 {
-    match try_sys_enter_umount2(ctx) {
+pub fn sys_enter_umount(ctx: TracePointContext) -> u32 {
+    match try_sys_enter_umount(ctx) {
         Ok(ret) => ret,
         Err(ret) => ret,
     }
 }
 
-fn try_sys_enter_umount2(ctx: TracePointContext) -> Result<u32, u32> {
+fn try_sys_enter_umount(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-    let target_ptr: u64 = unsafe { ctx.read_at(UMOUNT2_TARGET_PTR_OFFSET).map_err(|_| 1u32)? };
+    let target_ptr: u64 = unsafe { ctx.read_at(UMOUNT_TARGET_PTR_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let target_ptr: u64 = unsafe {
-        ctx.read_at::<u32>(UMOUNT2_TARGET_PTR_OFFSET)
+        ctx.read_at::<u32>(UMOUNT_TARGET_PTR_OFFSET)
             .map_err(|_| 1u32)? as u64
     };
 
     emit_mount_event(&ctx, target_ptr, 0, 0, 0, false)
 }
 
-/// Shared by `sys_enter_mount` and `sys_enter_umount2` above. `source_ptr`/
+/// Shared by `sys_enter_mount` and `sys_enter_umount` above. `source_ptr`/
 /// `fstype_ptr` are `0` on an unmount (`umount2(2)` has neither argument) — left
 /// zero-length on the wire event, which `normalize::mount` maps to `None`.
 fn emit_mount_event(

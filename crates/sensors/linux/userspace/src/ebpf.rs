@@ -40,9 +40,13 @@ pub(crate) fn err(msg: String) -> SensorError {
 /// plain path-taking syscalls only — `lsetxattr`/`fsetxattr` (symlink/fd-only
 /// variants) are deferred, same posture as `chmod`/`chown`'s fd-only siblings.
 ///
-/// `sys_enter_mount`/`sys_enter_umount2` (issue #362) feed `Event::Mount`;
-/// `move_mount(2)` is deferred (see `sensor-linux-wire`'s `WIRE_VERSION` v13
-/// changelog). `sys_enter_kill`/`sys_enter_tgkill` feed `Event::Signal`, filtered
+/// `sys_enter_mount`/`sys_enter_umount` (issue #362) feed `Event::Mount` — note
+/// `sys_enter_umount`, not `sys_enter_umount2`: glibc's `umount2(2)` libc wrapper
+/// maps to a kernel syscall the kernel itself names plain `umount`
+/// (`fs/namespace.c`'s `SYSCALL_DEFINE2(umount, ...)`), confirmed live on the lab
+/// (`sys_enter_umount2` does not exist). `move_mount(2)` is deferred (see
+/// `sensor-linux-wire`'s `WIRE_VERSION` v13 changelog). `sys_enter_kill`/
+/// `sys_enter_tgkill` feed `Event::Signal`, filtered
 /// kernel-side to the agent's own pid by `SIGNAL_WATCH_PID` — [`write_signal_watch_pid`]
 /// **must** run before these two are attached, same ordering requirement
 /// `prime_proc_lineage` documents for the fork/exit pair above. `sys_enter_tkill` is
@@ -75,7 +79,7 @@ pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
     ("sys_enter_setxattr", "syscalls", "sys_enter_setxattr"),
     ("sys_enter_removexattr", "syscalls", "sys_enter_removexattr"),
     ("sys_enter_mount", "syscalls", "sys_enter_mount"),
-    ("sys_enter_umount2", "syscalls", "sys_enter_umount2"),
+    ("sys_enter_umount", "syscalls", "sys_enter_umount"),
     ("sys_enter_kill", "syscalls", "sys_enter_kill"),
     ("sys_enter_tgkill", "syscalls", "sys_enter_tgkill"),
 ];

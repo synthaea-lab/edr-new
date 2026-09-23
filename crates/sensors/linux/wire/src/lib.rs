@@ -89,7 +89,12 @@ extern crate std;
 /// - v13: `MountEvent`/`SignalEvent` added (issue #362) — feeds the two
 ///   platform-neutral `schema` variants #96 introduced for macOS. `MountEvent`
 ///   covers `mount(2)`/`umount2(2)` (`move_mount(2)` deferred, same "known gap, not
-///   silently dropped" treatment as `fchmod`/`fchown`'s fd-only variants). `fs_type`
+///   silently dropped" treatment as `fchmod`/`fchown`'s fd-only variants).
+///   `umount2(2)`'s actual kernel tracepoint is `syscalls:sys_enter_umount`, not
+///   `sys_enter_umount2`: glibc's `umount2(2)` libc wrapper maps to a kernel
+///   syscall the kernel itself (`fs/namespace.c`) names plain `umount`, confirmed
+///   live on the lab 2026-09-23 after the assumed `sys_enter_umount2` turned out
+///   not to exist. `fs_type`
 ///   gets its own small `MAX_FS_TYPE_LEN` budget — filesystem type names
 ///   (`ext4`, `overlay`, `tmpfs`, ...) never approach `MAX_PATH_LEN`.
 ///   `SignalEvent` covers `kill(2)`/`tgkill(2)`, filtered at the probe via
@@ -379,10 +384,11 @@ pub struct SocketAcceptEvent {
     pub is_ipv6: bool,
 }
 
-/// Mount/unmount (`syscalls:sys_enter_mount`/`sys_enter_umount2`, issue #362).
+/// Mount/unmount (`syscalls:sys_enter_mount`/`sys_enter_umount`, issue #362 — the
+/// latter is `sys_enter_umount`, not `sys_enter_umount2`, despite the libc call
+/// being `umount2(2)`; see this file's `WIRE_VERSION` v12 changelog).
 /// `source`/`fs_type` are zero-length on an unmount — `umount2(2)` only takes a
-/// target path. `move_mount(2)` is not captured here — see this file's
-/// `WIRE_VERSION` v12 changelog.
+/// target path. `move_mount(2)` is not captured here.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct MountEvent {
