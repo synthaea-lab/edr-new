@@ -2,7 +2,10 @@
 //! administrator privileges; Ctrl-C is wired to both sensors' stop flags here (on
 //! Linux the sensor handles it itself).
 
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 use schema::{
     Event,
@@ -31,7 +34,51 @@ fn seeded_rule_state() -> rules::RuleState {
     }
     let mut rule_state = rules::RuleState::new();
     rule_state.seed_pid_comm(map);
+    // LISTENER-DRIFT baseline (#366), same reasoning as the Linux/macOS
+    // seeding: every listener already up when the agent starts (RPC 135, SMB
+    // 445, vendor services) is the baseline, not a finding. Best-effort — a
+    // snapshot failure leaves the baseline empty rather than failing startup.
+    match sensor_windows_sockets::snapshot() {
+        Ok(entries) => {
+            rule_state.seed_listen_ports(entries.iter().map(|e| (e.local.ip(), e.local.port())));
+        }
+        Err(e) => tracing::warn!(error = %e, "socket snapshot for listener baseline failed"),
+    }
     rule_state
+}
+
+/// Poll cadence for the socket-table snapshots — same 10s as the Linux and
+/// macOS pollers; the tightness of the LISTENER-DRIFT window, not a
+/// correctness knob.
+const SOCKET_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Spawns the background thread that snapshots the listener table every
+/// [`SOCKET_POLL_INTERVAL`] and pushes each listener into the sink
+/// (`sensor-windows-sockets`, issue #366). Supplementary and non-fatal, same
+/// posture as the Event Log sensor.
+fn spawn_socket_poller(
+    sink: Arc<dyn EventSink>,
+    stop: Arc<AtomicBool>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("socket-poller".into())
+        .spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match sensor_windows_sockets::listen_port_events(schema::time::now_ns()) {
+                    Ok(events) => {
+                        for event in events {
+                            sink.on_event(event);
+                        }
+                    }
+                    Err(e) => tracing::warn!(error = %e, "socket-table poll failed"),
+                }
+                // Sleep in short slices so Ctrl-C never waits a full interval.
+                let deadline = std::time::Instant::now() + SOCKET_POLL_INTERVAL;
+                while std::time::Instant::now() < deadline && !stop.load(Ordering::SeqCst) {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+            }
+        })
 }
 
 /// Forwards to a shared `Arc<dyn EventSink>` — lets two sensors run concurrently
@@ -86,11 +133,25 @@ fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
         sensor_windows_eventlog::EventLogSensor::with_config(eventlog_config(&eventlog_policy));
     let eventlog_stop = eventlog_sensor.stop_handle();
 
-    ctrlc::set_handler(move || {
-        eprintln!("\n[!] Shutdown requested...");
-        etw_stop.store(true, Ordering::SeqCst);
-        eventlog_stop.store(true, Ordering::SeqCst);
-    })?;
+    let sockets_stop = Arc::new(AtomicBool::new(false));
+
+    {
+        let sockets_stop = Arc::clone(&sockets_stop);
+        ctrlc::set_handler(move || {
+            eprintln!("\n[!] Shutdown requested...");
+            etw_stop.store(true, Ordering::SeqCst);
+            eventlog_stop.store(true, Ordering::SeqCst);
+            sockets_stop.store(true, Ordering::SeqCst);
+        })?;
+    }
+
+    let socket_poller = match spawn_socket_poller(Arc::clone(&sink), Arc::clone(&sockets_stop)) {
+        Ok(handle) => Some(handle),
+        Err(e) => {
+            eprintln!("[!] Socket poller failed to start (LISTENER-DRIFT degraded): {e}");
+            None
+        }
+    };
 
     let eventlog_thread = {
         let sink = Arc::clone(&sink);
@@ -100,6 +161,14 @@ fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
     let etw_result = etw_sensor
         .run(Box::new(SharedSink(sink)))
         .map_err(|e| anyhow::anyhow!("ETW sensor failed: {e}"));
+
+    // The ETW sensor returning (error or not) ends the run: stop the poller too.
+    sockets_stop.store(true, Ordering::SeqCst);
+    if let Some(handle) = socket_poller
+        && handle.join().is_err()
+    {
+        eprintln!("[!] Socket poller thread panicked (LISTENER-DRIFT degraded)");
+    }
 
     match eventlog_thread.join() {
         Ok(Ok(())) => {}
@@ -124,6 +193,7 @@ pub(crate) fn cmd_status() -> anyhow::Result<()> {
         "          Event Log polling (System/7045 + Security/4698/4624/4625/4648/4672 — \
          service and scheduled-task persistence, logon/session events)"
     );
+    println!("          Socket-table snapshots (GetExtendedTcpTable — listening ports, 10s)");
     println!("Run as administrator for the kernel providers.");
     Ok(())
 }

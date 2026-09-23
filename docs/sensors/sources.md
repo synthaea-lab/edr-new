@@ -38,7 +38,7 @@ pending (the coverage packs #376–#381 — see
 | --- | --- | --- | --- |
 | **Process execution**<br><sub>TA0002 Execution</sub> | ✅ eBPF (+netlink fallback) | ✅ ETW | ✅ ES |
 | **File activity**<br><sub>TA0040 Impact · TA0005 Evasion</sub> | ✅ eBPF + BPF-LSM | ✅ ETW · 📋 driver #136 | ✅ ES · 📋 #357 |
-| **Network — flows & listeners**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · 📋 #366 listen | 🔨 NE · ✅ libproc listen |
+| **Network — flows & listeners**<br><sub>TA0011 C2 · TA0008 Lateral</sub> | ✅ eBPF + netlink | ✅ ETW · ✅ IP Helper listen | 🔨 NE · ✅ libproc listen |
 | **Mounts & volumes**<br><sub>staging · TA0005 Evasion</sub> | 📋 #362 | 📋 #136 raw-volume | ✅ ES |
 | **DNS**<br><sub>TA0011 C2</sub> | 📋 #267 | ✅ ETW | 🔨 NE |
 | **Lateral-movement services**<br><sub>TA0008</sub> | 🟡* SSH-out content | ✅ SMB + WMI · 📋 #284 BITS | 🟡* SSH-out content |
@@ -139,7 +139,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **File activity** | ETW · Kernel-File | create/write (`NameCreate`+`CreateNewFile` join, F-6 partial), NT→drive-letter paths via real volume map (F-5) | ✅ used | T1105, dropper joins | #20 |
 | **File activity** | driver · minifilter | authoritative deletes/renames, named pipes, ADS, raw-volume access | 📋 planned | ransomware primitives | #136 |
 | **Network** | ETW · Kernel-Network | TCP connects (IPv4+IPv6 first-class F-7, dedup window), UDP sends (EID 14) | ✅ used | T1071/T1041 BEACON, T1048 | #20/#97 |
-| **Network** | Win32 · GetExtendedTcpTable | listening-port snapshots + startup baseline — LISTENER-DRIFT does not exist on Windows today | 📋 planned | backdoor listeners | #366 |
+| **Network** | Win32 · GetExtendedTcpTable | listening-port snapshots (IPv4 + IPv6, 10s) + startup baseline — LISTENER-DRIFT parity with Linux/macOS; unprivileged, owner pid/ppid/name via Toolhelp32 | ✅ used | backdoor listeners | #366 |
 | **Network** | ETW · SMBClient | SMB connections established (EID 30704; failures dropped) | ✅ used | T1021.002 | #97 |
 | **Network** | driver · WFP | flows + inline block | 📋 planned | response primitive | #138 |
 | **DNS** | ETW · DNS-Client | query + answer + status joined to the process (EID 3008; 3006 dropped as noise) | ✅ used | T1071.004, IOC join | #21 |
