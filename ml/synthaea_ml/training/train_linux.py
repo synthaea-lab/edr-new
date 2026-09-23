@@ -39,8 +39,10 @@ from synthaea_ml.calibration import (
 )
 from synthaea_ml.data.canonical import ml_cmdline_from_record
 from synthaea_ml.data.manifest import DEFAULT_BASELINE_FILENAME
+from synthaea_ml.evaluation.robustness import run_robustness_evaluation
 from synthaea_ml.features.cmdline import FEATURE_NAMES, extract_features
 from synthaea_ml.registry.training_record import (
+    RobustnessCard,
     dataset_version_from_manifest,
     write_training_record,
 )
@@ -154,6 +156,21 @@ def main() -> None:
         required=True,
         help="Registry version directory (model.onnx + training.json are written here).",
     )
+    parser.add_argument(
+        "--robustness-scenarios",
+        type=Path,
+        nargs="*",
+        default=[],
+        help="Optional scenario yamls for adversarial robustness evaluation (issue #45).",
+    )
+    parser.add_argument(
+        "--robustness-events",
+        type=Path,
+        help=(
+            "Optional events.jsonl or baseline.jsonl file for robustness evaluation. "
+            "If provided, uses real events from this file instead of synthetic events."
+        ),
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -219,10 +236,34 @@ def main() -> None:
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(f"Metadata exported: {metadata_path}")
 
+    # Run robustness evaluation if scenarios provided
+    robustness_cards: list[RobustnessCard] = []
+    if args.robustness_scenarios:
+        print(f"\nRunning robustness evaluation on {len(args.robustness_scenarios)} scenario(s)...")
+        if args.robustness_events:
+            print(f"  Using events from: {args.robustness_events}")
+        for scenario_path in args.robustness_scenarios:
+            try:
+                card = run_robustness_evaluation(
+                    model=clf,
+                    scenario_yaml=scenario_path,
+                    tier="T0",
+                    mutation_seed=42,
+                    events_source=args.robustness_events,
+                )
+                robustness_cards.append(card)
+                print(
+                    f"  {card.scenario_name}: escape_rate={card.escape_rate:.2%}, "
+                    f"median_degradation={card.median_score_degradation:+.3f}"
+                )
+            except Exception as e:
+                print(f"  WARNING: robustness evaluation failed for {scenario_path}: {e}")
+
     write_training_record(
         args.output_dir,
         training_script=TRAINING_SCRIPT,
         dataset_versions=dataset_versions,
+        robustness_cards=robustness_cards,
         hyperparameters=HYPERPARAMETERS,
         conformal_calibration=conformal_cal,
         feature_bounds=bounds,

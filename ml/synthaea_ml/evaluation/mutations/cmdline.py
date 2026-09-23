@@ -1,0 +1,268 @@
+"""T0 command-line mutators for adversarial evaluation.
+
+Five mutation classes, each with light/medium/heavy intensity:
+- Base64EncodeMutator: encode tokens
+- ArgumentReorderMutator: shuffle arguments
+- PathSubstitutionMutator: substitute paths
+- TokenSplittingMutator: split tokens with quotes
+- PaddingMutator: add whitespace/comments
+
+All mutators operate on argv-style lists (null-separated when serialized).
+"""
+
+import base64
+import copy
+from typing import Any
+
+from .base import Mutator
+from .prng import LCG
+
+
+class Base64EncodeMutator(Mutator):
+    """Encode tokens in base64.
+
+    Light: encode 1 token
+    Medium: encode 2-3 tokens
+    Heavy: encode all tokens
+    """
+
+    def mutation_class_name(self) -> str:
+        return "base64_encode"
+
+    def mutate(self, record: dict[str, Any], intensity: str, rng: LCG) -> dict[str, Any]:
+        if "argv" not in record or not isinstance(record["argv"], list):
+            raise ValueError("record must have 'argv' list field")
+
+        mutated = copy.deepcopy(record)
+        argv = mutated["argv"]
+
+        if not argv or len(argv) == 0:
+            return mutated
+
+        if intensity == "light":
+            count = 1
+        elif intensity == "medium":
+            count = min(3, len(argv))
+        elif intensity == "heavy":
+            count = len(argv)
+        else:
+            raise ValueError(f"invalid intensity: {intensity}")
+
+        indices = list(range(len(argv)))
+        selected = rng.shuffle(indices)[:count]
+
+        for idx in selected:
+            if idx < len(argv):
+                original = argv[idx]
+                encoded = base64.b64encode(original.encode("utf-8")).decode("ascii")
+                argv[idx] = encoded
+
+        return mutated
+
+
+class ArgumentReorderMutator(Mutator):
+    """Shuffle command-line arguments.
+
+    Light: swap 2 adjacent args
+    Medium: shuffle non-positional args (skip argv[0])
+    Heavy: full permutation
+    """
+
+    def mutation_class_name(self) -> str:
+        return "argument_reorder"
+
+    def mutate(self, record: dict[str, Any], intensity: str, rng: LCG) -> dict[str, Any]:
+        if "argv" not in record or not isinstance(record["argv"], list):
+            raise ValueError("record must have 'argv' list field")
+
+        mutated = copy.deepcopy(record)
+        argv = mutated["argv"]
+
+        if len(argv) < 2:
+            return mutated
+
+        if intensity == "light":
+            # Swap 2 adjacent args
+            idx = rng.uniform(0, len(argv) - 1)
+            argv[idx], argv[idx + 1] = argv[idx + 1], argv[idx]
+        elif intensity == "medium":
+            # Shuffle non-positional (keep argv[0] in place)
+            if len(argv) > 1:
+                tail = argv[1:]
+                argv[1:] = rng.shuffle(tail)
+        elif intensity == "heavy":
+            # Full permutation
+            mutated["argv"] = rng.shuffle(argv)
+        else:
+            raise ValueError(f"invalid intensity: {intensity}")
+
+        return mutated
+
+
+class PathSubstitutionMutator(Mutator):
+    """Substitute common paths.
+
+    Example: /bin/bash → /usr/bin/bash
+
+    Light: substitute 1 path
+    Medium: substitute 2 paths
+    Heavy: substitute all paths
+    """
+
+    PATH_SUBSTITUTIONS = [
+        ("/bin/", "/usr/bin/"),
+        ("/usr/bin/", "/bin/"),
+        ("/sbin/", "/usr/sbin/"),
+        ("/usr/sbin/", "/sbin/"),
+        ("/tmp/", "/var/tmp/"),
+        ("/var/tmp/", "/tmp/"),
+        ("C:\\Windows\\System32\\", "C:\\Windows\\SysWOW64\\"),
+        ("C:\\Windows\\SysWOW64\\", "C:\\Windows\\System32\\"),
+    ]
+
+    def mutation_class_name(self) -> str:
+        return "path_substitution"
+
+    def mutate(self, record: dict[str, Any], intensity: str, rng: LCG) -> dict[str, Any]:
+        if "argv" not in record or not isinstance(record["argv"], list):
+            raise ValueError("record must have 'argv' list field")
+
+        mutated = copy.deepcopy(record)
+        argv = mutated["argv"]
+
+        if intensity == "light":
+            max_subs = 1
+        elif intensity == "medium":
+            max_subs = 2
+        elif intensity == "heavy":
+            max_subs = len(argv)
+        else:
+            raise ValueError(f"invalid intensity: {intensity}")
+
+        substitutions_made = 0
+        for i in range(len(argv)):
+            if substitutions_made >= max_subs:
+                break
+            for old, new in self.PATH_SUBSTITUTIONS:
+                if old in argv[i]:
+                    argv[i] = argv[i].replace(old, new)
+                    substitutions_made += 1
+                    break
+
+        return mutated
+
+
+class TokenSplittingMutator(Mutator):
+    """Split tokens using shell quoting.
+
+    Example: base64 → ba""se""64
+
+    Light: split 1 token
+    Medium: split 2 tokens
+    Heavy: split all tokens
+    """
+
+    def mutation_class_name(self) -> str:
+        return "token_splitting"
+
+    def mutate(self, record: dict[str, Any], intensity: str, rng: LCG) -> dict[str, Any]:
+        if "argv" not in record or not isinstance(record["argv"], list):
+            raise ValueError("record must have 'argv' list field")
+
+        mutated = copy.deepcopy(record)
+        argv = mutated["argv"]
+
+        if not argv:
+            return mutated
+
+        if intensity == "light":
+            count = 1
+        elif intensity == "medium":
+            count = min(2, len(argv))
+        elif intensity == "heavy":
+            count = len(argv)
+        else:
+            raise ValueError(f"invalid intensity: {intensity}")
+
+        indices = list(range(len(argv)))
+        selected = rng.shuffle(indices)[:count]
+
+        for idx in selected:
+            if idx < len(argv) and len(argv[idx]) > 2:
+                token = argv[idx]
+                # Split into quoted segments: ab""cd""ef
+                parts = []
+                for i, char in enumerate(token):
+                    if i % 2 == 0:
+                        parts.append(char)
+                    else:
+                        parts.append(f'"{char}"')
+                argv[idx] = "".join(parts)
+
+        return mutated
+
+
+class PaddingMutator(Mutator):
+    """Add whitespace and comments to command line.
+
+    Light: add 1 comment
+    Medium: add comments and whitespace
+    Heavy: add extensive padding
+    """
+
+    COMMENTS = [
+        "# padding",
+        "# comment",
+        "# ",
+        "## ",
+    ]
+
+    def mutation_class_name(self) -> str:
+        return "padding"
+
+    def mutate(self, record: dict[str, Any], intensity: str, rng: LCG) -> dict[str, Any]:
+        if "argv" not in record or not isinstance(record["argv"], list):
+            raise ValueError("record must have 'argv' list field")
+
+        mutated = copy.deepcopy(record)
+        argv = mutated["argv"]
+
+        if not argv:
+            return mutated
+
+        if intensity == "light":
+            # Add one comment as an argument
+            comment = rng.choice(self.COMMENTS)
+            insert_idx = rng.uniform(0, len(argv) + 1)
+            argv.insert(insert_idx, comment)
+        elif intensity == "medium":
+            # Add comments and pad some tokens with spaces
+            comment = rng.choice(self.COMMENTS)
+            argv.insert(0, comment)
+            for i in range(1, len(argv)):
+                if rng.uniform(0, 2) == 0:
+                    argv[i] = " " + argv[i] + " "
+        elif intensity == "heavy":
+            # Extensive padding
+            for _ in range(3):
+                comment = rng.choice(self.COMMENTS)
+                insert_idx = rng.uniform(0, len(argv) + 1)
+                argv.insert(insert_idx, comment)
+            for i in range(len(argv)):
+                if rng.uniform(0, 2) == 0:
+                    spaces = " " * rng.uniform(1, 4)
+                    argv[i] = spaces + argv[i] + spaces
+        else:
+            raise ValueError(f"invalid intensity: {intensity}")
+
+        return mutated
+
+
+# Registry of all T0 mutators
+ALL_T0_MUTATORS = [
+    Base64EncodeMutator(),
+    ArgumentReorderMutator(),
+    PathSubstitutionMutator(),
+    TokenSplittingMutator(),
+    PaddingMutator(),
+]
