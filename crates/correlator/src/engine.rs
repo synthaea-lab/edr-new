@@ -180,7 +180,8 @@ impl CorrelationEngine {
             let state = self
                 .beliefs
                 .get_or_insert_with(entity_key.clone(), || BeliefState::new(now_ns));
-            update_belief(state, &bv, now_ns);
+            // No ML LLR in internal path — external callers use `update_belief_with_ml`.
+            update_belief(state, &bv, None, now_ns);
         }
 
         if is_ignored(&comm) && self.masquerading.peek(&pid).is_none() {
@@ -198,6 +199,76 @@ impl CorrelationEngine {
             alerts.extend(self.bayes_alert(pid, &comm, &entity_key));
         }
         alerts
+    }
+
+    /// Returns a reference to the internal event bus (for ML scoring).
+    ///
+    /// The ML correlation scorer (`ml::CorrelationScorer`) needs access to the bus to
+    /// extract features. This is safe to expose because the bus is already append-only
+    /// from the scorer's perspective.
+    #[must_use]
+    pub fn bus(&self) -> &EventBus {
+        &self.bus
+    }
+
+    /// Updates an entity's belief with an optional ML LLR (issue #46 Phase 3).
+    ///
+    /// For use by the agent sink when ML scoring is available. Computes the behavior
+    /// vector for the given pid and updates its belief state with the provided ML LLR.
+    ///
+    /// # Parameters
+    ///
+    /// - `pid`: Process ID to update
+    /// - `ml_llr`: Optional ML log-likelihood ratio from `ml::correlation::score_to_llr`
+    ///   - `Some(llr)`: ML scorer produced a score, add it to belief
+    ///   - `None`: No score (gated, OOD, or error) — skip ML contribution
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())`: Belief updated successfully
+    /// - `Err(())`: No behavior vector available for this pid yet (not enough events)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // In agent sink after ML scoring:
+    /// let ml_llr = match scorer.score(&engine.bus(), pid) {
+    ///     Ok(Some(score)) => Some(ml::correlation::score_to_llr(score)),
+    ///     Ok(None) => None,  // Gated
+    ///     Err(ScorerError::FeatureOutOfBounds { .. }) => None,  // OOD
+    ///     Err(e) => { error!("ML scorer: {e}"); None }  // Fail open
+    /// };
+    /// engine.update_belief_with_ml(pid, ml_llr)?;
+    /// ```
+    pub fn update_belief_with_ml(&mut self, pid: u32, ml_llr: Option<f32>) -> Result<(), ()> {
+        let comm = self
+            .bus
+            .events_for_pid(pid)
+            .next()
+            .map(|e| e.meta().comm.clone())
+            .ok_or(())?;
+
+        let entity_key = self
+            .pid_entities
+            .get(&pid)
+            .cloned()
+            .unwrap_or_else(|| (pid, comm));
+
+        let bv = self.behavior_vector_for_pid(pid).ok_or(())?;
+
+        let now_ns = self
+            .bus
+            .events_for_pid(pid)
+            .map(|e| e.meta().timestamp_ns)
+            .max()
+            .unwrap_or(0);
+
+        let state = self
+            .beliefs
+            .get_or_insert_with(entity_key, || BeliefState::new(now_ns));
+
+        update_belief(state, &bv, ml_llr, now_ns);
+        Ok(())
     }
 
     /// Bayesian alert — only once per threshold crossing.

@@ -118,32 +118,34 @@ fn log_likelihood_ratio(idx: usize, value: f32) -> f32 {
     }
 }
 
-/// Updates an entity's belief with the current `BehaviorVector`.
-/// First applies the exponential decay toward the prior, then the Bayesian update.
+/// Updates an entity's belief with the current `BehaviorVector` and optional ML LLR.
 ///
-/// # Phase 3 Integration (Issue #46, blocked by #13/#14/#47)
+/// First applies the exponential decay toward the prior, then the Bayesian update from
+/// hand-calibrated per-feature LLRs, then the optional ML contribution.
 ///
-/// When the ML scorer is integrated, this function will accept an optional
-/// `ml_llr: Option<f32>` parameter (the output of `ml::correlation::score_to_llr`).
+/// # Parameters
 ///
-/// Proposed signature:
-/// ```ignore
-/// pub(crate) fn update_belief(
-///     state: &mut BeliefState,
-///     v: &BehaviorVector,
-///     ml_llr: Option<f32>,  // NEW: ML contribution (None = no score)
-///     now_ns: u64,
-/// )
-/// ```
+/// - `state`: The belief state to update
+/// - `v`: The behavior vector extracted from the correlator's event bus
+/// - `ml_llr`: Optional ML contribution from `ml::correlation::score_to_llr` (issue #46 Phase 3)
+/// - `now_ns`: Current timestamp for decay calculation
 ///
-/// Semantics:
+/// # ML LLR Semantics
+///
 /// - `ml_llr = Some(llr)` → add `llr` to `log_odds` after hand-calibrated LLRs
 /// - `ml_llr = None` → skip ML contribution (no evidence, not "benign")
-/// - OOD rejection (`ScorerError::FeatureOutOfBounds`) → `ml_llr = None`
+///   - Returned when `event_count < MIN_EVENT_COUNT` (gating)
+///   - Returned when features are OOD (`ScorerError::FeatureOutOfBounds`)
+///   - Returned when ML scorer is unavailable or errors
 ///
-/// The caller (agent sink, #47) will handle the ML scorer invocation and error
-/// handling before passing the LLR here.
-pub(crate) fn update_belief(state: &mut BeliefState, v: &BehaviorVector, now_ns: u64) {
+/// The caller (agent sink via `CorrelationEngine::update_belief_with_ml`) handles
+/// the ML scorer invocation and error handling before passing the LLR here.
+pub(crate) fn update_belief(
+    state: &mut BeliefState,
+    v: &BehaviorVector,
+    ml_llr: Option<f32>,
+    now_ns: u64,
+) {
     // Exponential decay toward the prior when inactive
     let dt_s = (now_ns.saturating_sub(state.last_update_ns)) as f32 / 1e9;
     let decay = 1.0 - (-dt_s / DECAY_TAU_S).exp();
@@ -154,10 +156,11 @@ pub(crate) fn update_belief(state: &mut BeliefState, v: &BehaviorVector, now_ns:
         state.log_odds += log_likelihood_ratio(i, value);
     }
 
-    // TODO(#46 Phase 3): Add optional ML LLR parameter and contribution here
-    // if let Some(llr) = ml_llr {
-    //     state.log_odds += llr;
-    // }
+    // ML contribution (issue #46 Phase 3): only if we have a score.
+    // None means "no evidence" (gated, OOD, or error), not "benign".
+    if let Some(llr) = ml_llr {
+        state.log_odds += llr;
+    }
 
     state.last_update_ns = now_ns;
 }
