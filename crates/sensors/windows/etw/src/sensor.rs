@@ -33,16 +33,10 @@ use crate::{
 /// ETW behavior under buffer pressure, not a theoretical one.
 const PID_CACHE_CAP: usize = 16_384;
 
-/// Where the previous session's randomized name is persisted, so orphan cleanup
-/// after a crash still works despite F-2's name randomization.
-fn session_state_path() -> std::path::PathBuf {
-    std::env::temp_dir().join("synthaea-etw-session")
-}
-
-/// Stops an orphaned ETW session, if one exists. Named sessions are kernel objects
-/// that outlive the creating process: after a `taskkill /f` or crash the session
-/// stays Running and any restart fails with `AlreadyExist` — without this cleanup the
-/// agent could never restart after an unclean shutdown, defeating the watchdog.
+/// Stops an orphaned ETW session. Named sessions are kernel objects that outlive
+/// the creating process: after a `taskkill /f` or crash the session stays Running
+/// and any restart fails with `AlreadyExist` — without this cleanup the agent
+/// could never restart after an unclean shutdown, defeating the watchdog.
 fn stop_orphaned_session(name: &str) {
     let out = std::process::Command::new("logman")
         .args(["stop", name, "-ets"])
@@ -56,6 +50,34 @@ fn stop_orphaned_session(name: &str) {
         }
         Ok(_) => {} // no such session — nominal on a clean start
         Err(e) => tracing::warn!(error = %e, "logman unavailable — ETW orphan cleanup skipped"),
+    }
+}
+
+/// Stops every ETW session we could have orphaned (issue #408), not just the
+/// one from the most recent unclean shutdown. The previous mechanism persisted
+/// a single session name to a state file and only ever cleaned that one up — a
+/// *second* consecutive unclean shutdown overwrote the file before the first
+/// orphan was ever stopped, and it accumulated forever (each one a kernel
+/// session that keeps costing ETW resources and, per #408's lab observation,
+/// may leave a freshly started session receiving zero events).
+///
+/// Enumerates `logman query -ets` and stops every session matching our fixed
+/// `wtrace-` prefix (`normalize::random_session_name`) — no persisted state
+/// needed, and it catches every orphan regardless of how many unclean shutdowns
+/// preceded this start. See `normalize::parse_orphaned_sessions` for the pure,
+/// tested parsing logic.
+fn stop_all_orphaned_sessions() {
+    let out = std::process::Command::new("logman")
+        .args(["query", "-ets"])
+        .output();
+    match out {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            for name in normalize::parse_orphaned_sessions(&stdout) {
+                stop_orphaned_session(&name);
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "logman unavailable — ETW orphan enumeration skipped"),
     }
 }
 
@@ -136,24 +158,18 @@ fn seed_pid_store(state: &SharedState) {
     tracing::info!(processes = pids.len(), "pid store seeded");
 }
 
-/// F-2: randomized session name; the previous name is persisted so orphan cleanup
-/// survives both crashes AND the randomization.
-fn rotate_session_name(state_path: &std::path::Path) -> String {
-    if let Ok(previous) = std::fs::read_to_string(state_path) {
-        let previous = previous.trim();
-        if !previous.is_empty() {
-            stop_orphaned_session(previous);
-        }
-    }
-    let session = normalize::random_session_name(
+/// F-2: a freshly randomized session name for this run — anti-fingerprinting of
+/// the session *name*, see `normalize::random_session_name`. Caller is
+/// responsible for orphan cleanup first (`stop_all_orphaned_sessions`); no state
+/// is persisted between runs, unlike the old per-name file (issue #408).
+fn new_session_name() -> String {
+    normalize::random_session_name(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0),
         std::process::id(),
-    );
-    let _ = std::fs::write(state_path, &session);
-    session
+    )
 }
 
 /// F-2: the silence watchdog, made deterministic by a canary: every heartbeat the
@@ -259,8 +275,8 @@ impl Sensor for WindowsSensor {
 
         seed_pid_store(&state);
 
-        let state_path = session_state_path();
-        let session = rotate_session_name(&state_path);
+        stop_all_orphaned_sessions();
+        let session = new_session_name();
 
         let trace = UserTrace::new()
             .named(session.clone())
@@ -280,9 +296,6 @@ impl Sensor for WindowsSensor {
 
         let _ = trace.stop();
         let _ = std::fs::remove_file(&canary_file);
-        if result.is_ok() {
-            let _ = std::fs::remove_file(&state_path);
-        }
         result
     }
 
