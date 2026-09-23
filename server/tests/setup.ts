@@ -15,4 +15,5 @@ process.env.BETTER_AUTH_SECRET =
 process.env.CRON_SECRET =
   process.env.CRON_SECRET || "test_cron_secret";
 
-process.env.NODE_ENV = "test";
+// Set NODE_ENV for tests
+(process.env as { NODE_ENV: string }).NODE_ENV = "test";
