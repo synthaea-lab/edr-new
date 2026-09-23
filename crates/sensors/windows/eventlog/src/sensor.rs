@@ -131,6 +131,10 @@ pub(crate) struct PollTarget {
     /// `auditpol` enablement to run once before polling starts, for targets
     /// whose audit subcategory may be off (see each target's enable fn doc).
     pub(crate) enable_audit: Option<fn()>,
+    /// Which [`EventLogConfig`] switch gates this target. Carried by the
+    /// target itself so adding one is a single entry in [`TARGETS`], with no
+    /// parallel array to keep in step (several targets may share a switch).
+    enabled: fn(&EventLogConfig) -> bool,
 }
 
 /// `EventRecordID` of the newest matching event already in the channel.
@@ -325,6 +329,7 @@ static SERVICE_INSTALLS: PollTarget = PollTarget {
     parse_block: normalize_service_install,
     // 7045 lands in the System log unconditionally — nothing to enable.
     enable_audit: None,
+    enabled: |c| c.service_installs_enabled,
 };
 
 // ── Event 4698 — scheduled task creation (T1053.005) ─────────────────────────
@@ -371,6 +376,7 @@ static SCHEDULED_TASKS: PollTarget = PollTarget {
     counter: |c| &c.scheduled_tasks,
     parse_block: normalize_scheduled_task,
     enable_audit: Some(enable_scheduled_task_audit),
+    enabled: |c| c.scheduled_tasks_enabled,
 };
 
 // ── Events 4624/4625/4648/4672 — logon/session (#94) ─────────────────────────
@@ -404,6 +410,7 @@ static LOGON_EVENTS: PollTarget = PollTarget {
     counter: |c| &c.logon_events,
     parse_block: normalize_logon,
     enable_audit: Some(enable_logon_audit),
+    enabled: |c| c.logon_events_enabled,
 };
 
 /// Maps a parsed [`LogonEvent`] to the normalized [`Event::Auth`], or `None`
@@ -519,6 +526,7 @@ static ACCOUNT_CREATIONS: PollTarget = PollTarget {
     counter: |c| &c.account_creations,
     parse_block: normalize_account_created,
     enable_audit: Some(enable_account_creation_audit),
+    enabled: |c| c.account_creations_enabled,
 };
 
 // ── Event 8004 — `AppLocker` EXE/DLL block (Microsoft-Windows-AppLocker/EXE and DLL) ───
@@ -571,6 +579,7 @@ static APPLOCKER_BLOCKS: PollTarget = PollTarget {
     // deployment (a disabled channel is a policy decision, not an oversight
     // the sensor should override on its own).
     enable_audit: None,
+    enabled: |c| c.applocker_blocks_enabled,
 };
 
 // ── Event 106 — TaskScheduler Operational "task registered" ─────────────────
@@ -608,6 +617,7 @@ static TASK_SCHEDULER_OP: PollTarget = PollTarget {
     parse_block: normalize_task_scheduler_op_registered,
     // Operational channel, always on — nothing to enable.
     enable_audit: None,
+    enabled: |c| c.task_scheduler_op_enabled,
 };
 
 // ── Policy-configurable allowlist and volume counters (#94) ─────────────────
@@ -687,23 +697,9 @@ pub struct EventLogConfig {
     pub task_scheduler_op_enabled: bool,
 }
 
-impl EventLogConfig {
-    /// Per-target switches, in [`TARGETS`] order.
-    fn enabled(&self) -> [bool; 6] {
-        [
-            self.service_installs_enabled,
-            self.scheduled_tasks_enabled,
-            self.account_creations_enabled,
-            self.logon_events_enabled,
-            self.applocker_blocks_enabled,
-            self.task_scheduler_op_enabled,
-        ]
-    }
-}
-
-/// Every poll target, in the order [`EventLogConfig::enabled`] and
-/// [`EventLogSensor`]'s liveness counters follow.
-static TARGETS: [&PollTarget; 6] = [
+/// Every poll target. Adding one = one entry here: its switch, heartbeat name
+/// and liveness counter all follow from it.
+static TARGETS: &[&PollTarget] = &[
     &SERVICE_INSTALLS,
     &SCHEDULED_TASKS,
     &ACCOUNT_CREATIONS,
@@ -755,7 +751,7 @@ pub struct EventLogSensor {
     config: EventLogConfig,
     counters: Arc<EventLogCounters>,
     /// One per [`TARGETS`] entry, same order — see [`Self::liveness`].
-    liveness: [Arc<AtomicU64>; 6],
+    liveness: Vec<Arc<AtomicU64>>,
 }
 
 impl EventLogSensor {
@@ -772,7 +768,10 @@ impl EventLogSensor {
             stop: Arc::new(AtomicBool::new(false)),
             config,
             counters: Arc::new(EventLogCounters::default()),
-            liveness: std::array::from_fn(|_| Arc::new(AtomicU64::new(0))),
+            liveness: TARGETS
+                .iter()
+                .map(|_| Arc::new(AtomicU64::new(0)))
+                .collect(),
         }
     }
 
@@ -811,10 +810,9 @@ impl EventLogSensor {
         }
         TARGETS
             .iter()
-            .zip(self.config.enabled())
             .zip(&self.liveness)
-            .filter(|((_, enabled), _)| *enabled)
-            .map(|((target, _), counter)| (target.heartbeat, Arc::clone(counter)))
+            .filter(|(target, _)| (target.enabled)(&self.config))
+            .map(|(target, counter)| (target.heartbeat, Arc::clone(counter)))
             .collect()
     }
 }
@@ -846,14 +844,12 @@ impl Sensor for EventLogSensor {
         self.stop.store(false, Ordering::SeqCst);
         let sink: Arc<dyn EventSink> = Arc::from(sink);
 
-        let enabled = self.config.enabled();
-
         // Audit-subcategory enablement is transport-independent: whether
         // events land in the channel does not depend on whether we read them
         // via `wevtutil` or `EvtSubscribe`. So we run each target's
         // `enable_audit` (if any) once up front, regardless of transport.
-        for (i, target) in TARGETS.iter().enumerate() {
-            if !enabled[i] {
+        for target in TARGETS {
+            if !(target.enabled)(&self.config) {
                 continue;
             }
             if let Some(enable_audit) = target.enable_audit {
@@ -871,8 +867,8 @@ impl Sensor for EventLogSensor {
 
         match self.config.transport {
             EventLogTransport::Polling => {
-                for (i, target) in TARGETS.iter().enumerate() {
-                    if !enabled[i] {
+                for (target, liveness) in TARGETS.iter().zip(&self.liveness) {
+                    if !(target.enabled)(&self.config) {
                         continue;
                     }
                     poll_handles.push(poll(
@@ -880,15 +876,15 @@ impl Sensor for EventLogSensor {
                         Arc::clone(&sink),
                         Arc::clone(&self.stop),
                         Arc::clone(&self.counters),
-                        Arc::clone(&self.liveness[i]),
+                        Arc::clone(liveness),
                     ));
                 }
             }
             EventLogTransport::Subscribe => {
                 #[cfg(windows)]
                 {
-                    for (i, target) in TARGETS.iter().enumerate() {
-                        if !enabled[i] {
+                    for target in TARGETS {
+                        if !(target.enabled)(&self.config) {
                             continue;
                         }
                         // `subscribe` returns `None` on `EvtSubscribe`
@@ -1090,6 +1086,15 @@ mod config_tests {
             sensor.liveness().is_empty(),
             "a push subscription has no poll tick: watching it would raise false T1562"
         );
+    }
+
+    #[test]
+    fn every_target_has_a_distinct_heartbeat_name() {
+        let mut names: Vec<_> = TARGETS.iter().map(|t| t.heartbeat).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TARGETS.len(), "two targets share a heartbeat");
+        assert!(names.iter().all(|n| n.starts_with("windows-eventlog:")));
     }
 
     #[test]
