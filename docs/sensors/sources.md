@@ -84,7 +84,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | --- | --- | --- | --- | --- | --- |
 | **Process execution** | eBPF · tracepoints | exec/fork/exit with argv, comm, uid/gid, lineage | ✅ used | T1059 | #262 |
 | **Process execution** | netlink · audit | fallback exec + connect where eBPF is unavailable (lockdown, old kernel) | ✅ used | T1059 degraded | #34/#247 |
-| **Process execution** | eBPF · tracepoints | security-relevant exec environment (`LD_PRELOAD` family), present-only allowlist — never the whole env | 📋 planned | T1574.006 | #363 |
+| **Process execution** | procfs · `/proc/<pid>/environ` at exec-time drain | security-relevant exec environment (`LD_PRELOAD` family), present-only allowlist — never the whole env | ✅ used | T1574.006 | #363 |
 | **File activity** | eBPF · tracepoints | open/write/delete/rename/chmod/chown with paths + attribution; noisy /dev,/proc,/sys,/tmp filtered | ✅ used | T1105, T1485/T1486, T1070.004, T1222 | #262 |
 | **File activity** | eBPF · BPF-LSM | `file_open` at the security decision point — deliberate double observation (blinding check), io_uring-proof vantage; inline-block ready | ✅ used | T1562 context | #91 |
 | **File activity** | eBPF · BPF-LSM | timestomping via `inode_setattr` hook | 📋 planned | T1070.006 | matrix row |

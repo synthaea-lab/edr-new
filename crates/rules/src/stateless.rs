@@ -130,6 +130,7 @@ pub fn evaluate_exec(event: &ExecEvent) -> Vec<Alert> {
         .chain(check_masquerading(event))
         .chain(check_recovery_inhibit(event))
         .chain(check_log_clear_exec(event))
+        .chain(check_ld_preload_hijack(event))
         .collect()
 }
 
@@ -454,6 +455,62 @@ pub(crate) fn check_masquerading(event: &ExecEvent) -> Option<Alert> {
         message: format!(
             "pid={} comm={}: system-binary name `{matched}` executing from outside its \
              legitimate location: {path}",
+            event.meta.pid, event.meta.comm,
+        ),
+    })
+}
+
+/// Trusted directories for [`check_ld_preload_hijack`] — the dynamic linker's default
+/// search path (`ld.so.conf` plus its `.d/` includes on every mainstream distro):
+/// `/lib`, `/lib64`, `/usr/lib`, `/usr/lib64`, and `/usr/local/lib`, each also covering
+/// its multiarch subdirectories (e.g. `/usr/lib/x86_64-linux-gnu/...`, nested under
+/// `/usr/lib/`). Deliberately *not* `LD_LIBRARY_PATH` or a binary's own
+/// `RPATH`/`RUNPATH`, which are per-process and unknowable from an `ExecEvent` alone —
+/// this checks only against the system trust set, same posture as
+/// [`check_masquerading`]'s allowed-prefix sets.
+const LD_TRUST_PREFIXES: &[&str] = &[
+    "/lib/",
+    "/lib64/",
+    "/usr/lib/",
+    "/usr/lib64/",
+    "/usr/local/lib/",
+];
+
+/// Whether every `:`-separated entry in an `LD_PRELOAD`/`LD_AUDIT` value falls under
+/// [`LD_TRUST_PREFIXES`]. A bare filename (no `/`) is resolved via the trusted search
+/// path itself and counts as trusted; only an explicit path outside the trust set is
+/// suspicious.
+fn all_paths_trusted(value: &str) -> bool {
+    value.split(':').filter(|p| !p.is_empty()).all(|p| {
+        !p.starts_with('/') || LD_TRUST_PREFIXES.iter().any(|prefix| p.starts_with(prefix))
+    })
+}
+
+/// T1574.006 — Hijack Execution Flow: Dynamic Linker Hijacking. `LD_PRELOAD` (and its
+/// quieter `LD_AUDIT` sibling) force the dynamic linker to load an attacker-chosen
+/// shared object into every dynamically linked exec that inherits the variable; a path
+/// outside the linker's own trust set ([`LD_TRUST_PREFIXES`]) is exactly that shape. A
+/// path already inside the trust set is standard operational use (some distros ship a
+/// legitimate preload this way) and does not fire — no heuristics beyond the trust set,
+/// same false-positive posture as `check_masquerading`.
+///
+/// Evidence-gated on [`ExecEvent::env_security`] actually carrying the variable
+/// (#363): capture is a fixed allowlist, so this never scans the full environment for
+/// names it doesn't already have — it only ever judges what the sensor chose to keep.
+#[must_use]
+pub(crate) fn check_ld_preload_hijack(event: &ExecEvent) -> Option<Alert> {
+    let (name, value) = event
+        .env_security
+        .iter()
+        .find(|(name, _)| name.as_str() == "LD_PRELOAD" || name.as_str() == "LD_AUDIT")?;
+    if all_paths_trusted(value) {
+        return None;
+    }
+    Some(Alert {
+        technique: "T1574.006",
+        message: format!(
+            "pid={} comm={}: {name}={value} loads a shared object outside the dynamic \
+             linker's trusted search path",
             event.meta.pid, event.meta.comm,
         ),
     })
