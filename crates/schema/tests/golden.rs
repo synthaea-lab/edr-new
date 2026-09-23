@@ -13,11 +13,10 @@ use schema::{
     EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
     FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
     GatekeeperVerdictEvent, ImageLoadEvent, ListenPortEvent, MountEvent, NetworkFlowEvent,
-    POLICY_MECHANISM_SELINUX, PolicyDenialEvent,
-    ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent, ShellType, SignalEvent,
-    SmbConnectEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent, TccDecisionEvent,
-    TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
-    XpcConnectEvent,
+    POLICY_MECHANISM_SELINUX, PolicyDenialEvent, ReadlineInputEvent, RegistrySetEvent,
+    ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
+    SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
+    UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 

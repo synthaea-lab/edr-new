@@ -108,7 +108,7 @@ pub fn policy_denial_event(evt: &AuditEvent, timestamp_ns: u64) -> Event {
     Event::PolicyDenial(PolicyDenialEvent {
         meta: EventMeta {
             timestamp_ns,
-            pid: 0,  // HONEST: the AVC preamble corrupts pid, see AuditEvent::PolicyDenial's doc
+            pid: 0, // HONEST: the AVC preamble corrupts pid, see AuditEvent::PolicyDenial's doc
             ppid: 0, // HONEST: audit doesn't provide this
             user: User::Unknown, // HONEST: classify_avc doesn't extract uid/gid
             comm: comm.clone().unwrap_or_else(|| "unknown".into()),
@@ -193,7 +193,10 @@ mod tests {
                 assert_eq!(e.meta.pid, 0); // Honest: AVC preamble corrupts pid
                 assert_eq!(e.meta.comm, "httpd");
                 assert_eq!(e.mechanism, schema::POLICY_MECHANISM_SELINUX);
-                assert_eq!(e.subject_context.as_deref(), Some("system_u:system_r:httpd_t:s0"));
+                assert_eq!(
+                    e.subject_context.as_deref(),
+                    Some("system_u:system_r:httpd_t:s0")
+                );
                 assert_eq!(
                     e.object_context.as_deref(),
                     Some("system_u:object_r:user_home_t:s0")
