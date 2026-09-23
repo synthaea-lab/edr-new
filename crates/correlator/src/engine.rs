@@ -223,10 +223,11 @@ impl CorrelationEngine {
     ///   - `Some(llr)`: ML scorer produced a score, add it to belief
     ///   - `None`: No score (gated, OOD, or error) — skip ML contribution
     ///
-    /// # Returns
+    /// # Errors
     ///
-    /// - `Ok(())`: Belief updated successfully
-    /// - `Err(())`: No behavior vector available for this pid yet (not enough events)
+    /// Returns `Err(())` when no behavior vector is available for this pid yet (not
+    /// enough events in the correlator window). This is a normal condition for newly
+    /// seen pids and should be handled silently by the caller.
     ///
     /// # Example
     ///
@@ -240,6 +241,7 @@ impl CorrelationEngine {
     /// };
     /// engine.update_belief_with_ml(pid, ml_llr)?;
     /// ```
+    #[allow(clippy::result_unit_err)]
     pub fn update_belief_with_ml(&mut self, pid: u32, ml_llr: Option<f32>) -> Result<(), ()> {
         let comm = self
             .bus
@@ -252,7 +254,7 @@ impl CorrelationEngine {
             .pid_entities
             .get(&pid)
             .cloned()
-            .unwrap_or_else(|| (pid, comm));
+            .unwrap_or((pid, comm));
 
         let bv = self.behavior_vector_for_pid(pid).ok_or(())?;
 
