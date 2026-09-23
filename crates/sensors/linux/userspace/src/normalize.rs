@@ -8,8 +8,8 @@
 use schema::{
     ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent,
     FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent,
-    FileWriteEvent, MountEvent, SignalEvent, SocketAcceptEvent, SocketBindEvent,
-    SocketListenEvent, UdpSendEvent, User,
+    FileWriteEvent, MountEvent, SignalEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent,
+    UdpSendEvent, User,
 };
 use sensor_linux_wire as wire;
 
@@ -372,8 +372,7 @@ pub fn mount(
     boot_epoch_offset_ns: u64,
     container: Option<ContainerContext>,
 ) -> Event {
-    let mp_raw =
-        &event.mount_point[..(event.mount_point_len as usize).min(wire::MAX_PATH_LEN)];
+    let mp_raw = &event.mount_point[..(event.mount_point_len as usize).min(wire::MAX_PATH_LEN)];
     let mp_end = mp_raw.iter().position(|&b| b == 0).unwrap_or(mp_raw.len());
     let source = (event.source_len > 0).then(|| {
         let raw = &event.source[..(event.source_len as usize).min(wire::MAX_PATH_LEN)];

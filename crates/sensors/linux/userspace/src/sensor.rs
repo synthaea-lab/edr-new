@@ -18,8 +18,7 @@ use tracing::warn;
 use crate::{
     container::{CgroupIdCache, DockerInfoCache, container_context},
     ebpf::{
-        TRACEPOINTS, attach_tracepoint, err, load_ebpf, prime_proc_lineage,
-        write_signal_watch_pid,
+        TRACEPOINTS, attach_tracepoint, err, load_ebpf, prime_proc_lineage, write_signal_watch_pid,
     },
     normalize,
     proc::read_proc_cmdline,
