@@ -177,10 +177,8 @@ impl Layout {
             path: path.clone(),
             source,
         })?;
-        serde_json::from_slice(&bytes).map_err(|source| UpdaterError::ManifestCorrupt {
-            path,
-            source,
-        })
+        serde_json::from_slice(&bytes)
+            .map_err(|source| UpdaterError::ManifestCorrupt { path, source })
     }
 
     /// Atomically repoints `current` at `version_dir(release_version)`

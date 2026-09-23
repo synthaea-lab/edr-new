@@ -13,13 +13,10 @@ use std::{collections::BTreeMap, env, fs, path::PathBuf};
 use updater::{ReleaseManifest, hash::hash_file, key::test_key_pair, layout::Layout};
 
 fn main() {
-    let base_dir = env::args()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            eprintln!("usage: stage_demo_release <base_dir>");
-            std::process::exit(1);
-        });
+    let base_dir = env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| {
+        eprintln!("usage: stage_demo_release <base_dir>");
+        std::process::exit(1);
+    });
 
     let layout = Layout::new(&base_dir);
     fs::create_dir_all(layout.bootstrap_dir()).expect("create bootstrap dir");
@@ -45,13 +42,18 @@ fn main() {
         .verify_signature()
         .expect("freshly signed manifest must verify");
 
-    layout.verify_staged(&manifest).expect("staged files must verify");
+    layout
+        .verify_staged(&manifest)
+        .expect("staged files must verify");
     layout
         .persist_manifest(&manifest)
         .expect("persist manifest");
     layout.promote(release_version).expect("promote release");
 
-    println!("staged and promoted release {release_version} at {}", base_dir.display());
+    println!(
+        "staged and promoted release {release_version} at {}",
+        base_dir.display()
+    );
     println!("protected file: {}", protected_file.display());
     println!(
         "tamper with it and watch agent::integrity's next check cycle catch it: \

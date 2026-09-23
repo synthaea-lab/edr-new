@@ -158,7 +158,11 @@ mod tests {
         let sink = sink_in(&dir);
         check_once(&layout, &sink);
 
-        assert_eq!(alerts_of(&dir), "", "no manifest exists yet — nothing to check");
+        assert_eq!(
+            alerts_of(&dir),
+            "",
+            "no manifest exists yet — nothing to check"
+        );
     }
 
     #[test]
