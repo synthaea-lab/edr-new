@@ -164,3 +164,18 @@ pub(crate) fn update_belief(
 
     state.last_update_ns = now_ns;
 }
+
+/// Adds an ML log-likelihood ratio to an already-updated belief state.
+///
+/// Deliberately does NOT call [`update_belief`]: `CorrelationEngine::on_event`
+/// already runs the full decay-then-feature-LLR update for this cycle before
+/// the ML scorer even has a chance to run (ML scoring needs the event on the
+/// bus first). Calling `update_belief` a second time here re-summed the same
+/// hand-calibrated feature LLRs on top of themselves — found in PR #345
+/// review: `log_odds` grew roughly 2x calibration intent once a correlation
+/// model was loaded, causing premature `BAYES` alerts (and, via issue #25,
+/// premature auto-kill) on benign processes. This only ever adds the one new
+/// term the first update didn't have.
+pub(crate) fn apply_ml_llr(state: &mut BeliefState, llr: f32) {
+    state.log_odds += llr;
+}
