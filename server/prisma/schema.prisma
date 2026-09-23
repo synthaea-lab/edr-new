@@ -17,10 +17,11 @@ model Tenant {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  agents     Agent[]
-  detections Detection[]
-  cases      Case[]
-  auditLogs  AuditLog[]  @relation("TenantAuditLogs")
+  agents          Agent[]
+  detections      Detection[]
+  cases           Case[]
+  auditLogs       AuditLog[]       @relation("TenantAuditLogs")
+  contentReleases ContentRelease[]
 
   @@map("tenants")
 }
@@ -102,4 +103,24 @@ model AuditLog {
   @@index([tenantId, timestamp])
   @@index([userId, timestamp])
   @@index([action])
+}
+
+// Content release - tracks content manifest versions per ring
+model ContentRelease {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  ring            String   // canary_0, canary_1, canary_2, prod
+  releaseVersion  Int      @map("release_version") // Monotone counter
+  manifestUrl     String   @map("manifest_url") // Storage URL for manifest JSON
+  manifestSha256  String   @map("manifest_sha256") // SHA-256 of manifest file
+  status          String   @default("active") // active, halted, rolled_back
+  releasedAt      DateTime @map("released_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, ring, releaseVersion])
+  @@map("content_releases")
+  @@index([tenantId, ring, status])
+  @@index([tenantId, ring, releaseVersion])
 }

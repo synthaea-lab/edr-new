@@ -11,6 +11,7 @@ export async function cleanDatabase() {
   await prisma.auditLog.deleteMany();
   await prisma.case.deleteMany();
   await prisma.detection.deleteMany();
+  await prisma.contentRelease.deleteMany();
   await prisma.agent.deleteMany();
   await prisma.tenant.deleteMany();
 }
@@ -31,15 +32,22 @@ export async function createTestTenant(name?: string) {
  */
 export async function createTestAgent(
   tenantId: string,
-  enrollmentId?: string
+  enrollmentId?: string,
+  overrides?: Partial<{
+    ring: string;
+    hostname: string;
+    version: string;
+    lastSeen: Date;
+  }>
 ) {
   return prisma.agent.create({
     data: {
       tenantId,
       enrollmentId: enrollmentId || `agent-test-${Date.now()}`,
-      hostname: "test-host",
-      version: "0.1.0",
-      lastSeen: new Date(),
+      hostname: overrides?.hostname || "test-host",
+      version: overrides?.version || "0.1.0",
+      ring: overrides?.ring || "prod",
+      lastSeen: overrides?.lastSeen || new Date(),
     },
   });
 }
