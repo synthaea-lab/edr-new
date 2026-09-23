@@ -1,0 +1,20 @@
+{"name": "no_parent_lineage", "event": {"image_path": "/usr/bin/curl", "cmdline": "curl -fsSL https://example.com"}, "features": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "bash_parent", "event": {"image_path": "/usr/bin/curl", "cmdline": "curl -fsSL https://example.com", "parent_comm": "bash"}, "features": [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "powershell_parent", "event": {"image_path": "C:\\Windows\\System32\\curl.exe", "cmdline": "curl.exe https://example.com", "parent_comm": "powershell.exe"}, "features": [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "nginx_webserver_parent", "event": {"image_path": "/bin/sh", "cmdline": "sh -c whoami", "parent_comm": "nginx"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+{"name": "w3wp_iis_parent", "event": {"image_path": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe /c whoami", "parent_comm": "w3wp.exe"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+{"name": "winword_office_parent", "event": {"image_path": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe /c calc.exe", "parent_comm": "winword.exe"}, "features": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]}
+{"name": "excel_office_parent", "event": {"image_path": "C:\\Windows\\System32\\powershell.exe", "cmdline": "powershell.exe -enc ABCD", "parent_comm": "excel.exe"}, "features": [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]}
+{"name": "system_path_usr_bin", "event": {"image_path": "/usr/bin/ls", "cmdline": "ls -la", "parent_image_path": "/usr/bin/bash"}, "features": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]}
+{"name": "system_path_system32", "event": {"image_path": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe", "parent_image_path": "C:\\Windows\\System32\\explorer.exe"}, "features": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]}
+{"name": "suspicious_path_tmp", "event": {"image_path": "/bin/sh", "cmdline": "sh -c id", "parent_image_path": "/tmp/malware.elf"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]}
+{"name": "suspicious_path_appdata", "event": {"image_path": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe", "parent_image_path": "C:\\Users\\Bob\\AppData\\Local\\Temp\\dropper.exe"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]}
+{"name": "case_insensitive_bash", "event": {"image_path": "/usr/bin/ls", "cmdline": "ls", "parent_comm": "BASH"}, "features": [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "case_insensitive_nginx", "event": {"image_path": "/bin/sh", "cmdline": "sh", "parent_comm": "NGINX"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+{"name": "both_comm_and_path", "event": {"image_path": "/bin/curl", "cmdline": "curl http://evil.com", "parent_comm": "bash", "parent_image_path": "/usr/bin/bash"}, "features": [1.0, 1.0, 0.0, 0.0, 1.0, 0.0]}
+{"name": "webshell_pattern", "event": {"image_path": "/bin/bash", "cmdline": "bash -c id", "parent_comm": "httpd", "parent_image_path": "/usr/sbin/httpd"}, "features": [1.0, 0.0, 1.0, 0.0, 1.0, 0.0]}
+{"name": "macro_pattern", "event": {"image_path": "C:\\Windows\\System32\\cmd.exe", "cmdline": "cmd.exe /c powershell -enc ABC", "parent_comm": "outlook.exe", "parent_image_path": "C:\\Program Files\\Microsoft Office\\Office16\\OUTLOOK.EXE"}, "features": [1.0, 0.0, 0.0, 1.0, 1.0, 0.0]}
+{"name": "dropper_pattern", "event": {"image_path": "/bin/bash", "cmdline": "bash -i", "parent_comm": "unknown", "parent_image_path": "/tmp/setup.sh"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 1.0]}
+{"name": "node_webserver", "event": {"image_path": "/bin/sh", "cmdline": "sh -c env", "parent_comm": "node"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+{"name": "java_webserver", "event": {"image_path": "/bin/bash", "cmdline": "bash -c whoami", "parent_comm": "java"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
+{"name": "macos_system_path", "event": {"image_path": "/usr/bin/say", "cmdline": "say hello", "parent_image_path": "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"}, "features": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]}
