@@ -28,6 +28,7 @@ dependencies = [
  "correlator",
  "ctrlc",
  "enrich",
+ "ipc",
  "libc",
  "policy",
  "response",
@@ -51,9 +52,11 @@ dependencies = [
  "sinks",
  "store",
  "tamper",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "transport",
+ "updater",
  "yara",
 ]
 
