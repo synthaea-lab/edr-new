@@ -67,14 +67,19 @@ Vagrant.configure("2") do |config|
     config.vm.define name, autostart: false do |m|
       m.vm.box = opts[:box]
       m.vm.communicator = "winrm"
-      # Windows provisioning lands as ../provisioning/windows-toolchain.ps1
-      # with the M3 Windows lab work (issue #22).
+
       ["virtualbox", "hyperv", "vmware_desktop"].each do |p|
         m.vm.provider p do |v|
           v.memory = 8192 if v.respond_to?(:memory=)
           v.cpus = 4 if v.respond_to?(:cpus=)
         end
       end
+
+      # Provider-neutral, same as the Linux machines above (#22): rustup +
+      # the MSVC/Windows SDK Build Tools the ETW/Event Log/SCM sensors need.
+      # `agent-install.ps1` (also in ../provisioning/) is run separately, per
+      # scenario, once a build exists — not part of one-time provisioning.
+      m.vm.provision "shell", path: "../provisioning/windows-toolchain.ps1"
     end
   end
 

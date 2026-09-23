@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, bail};
 
-use super::SERVICE_DESC;
-use crate::paths::{child_log_path, resolve_agent_bin};
+use super::{SERVICE_DESC, resolve_paths};
+use crate::paths::child_log_path;
 
 const SYSTEMD_UNIT: &str = "/etc/systemd/system/synthaea-agent.service";
 const OPENRC_SCRIPT: &str = "/etc/init.d/synthaea-agent";
@@ -39,54 +39,6 @@ fn detect_init_system() -> anyhow::Result<InitSystem> {
     } else {
         bail!("no supported init system detected (neither systemd nor OpenRC)")
     }
-}
-
-/// Paths baked into the generated unit/script: absolute, so they survive the
-/// service manager starting the process with `/` as its working directory.
-struct ResolvedPaths {
-    watchdog_abs: PathBuf,
-    agent_abs: PathBuf,
-    alerts_abs: PathBuf,
-}
-
-fn resolve_paths(agent_bin: Option<PathBuf>, alerts: PathBuf) -> anyhow::Result<ResolvedPaths> {
-    let agent = resolve_agent_bin(agent_bin)?;
-    anyhow::ensure!(agent.exists(), "agent not found: {}", agent.display());
-    let agent_abs = agent
-        .canonicalize()
-        .with_context(|| format!("canonicalize {}", agent.display()))?;
-
-    // The unit/script runs the watchdog (layer 2), which supervises the agent
-    // (layer 1) — same shape as the Windows SCM service and the launchd daemon.
-    let watchdog_abs = std::env::current_exe()
-        .context("current_exe")?
-        .canonicalize()
-        .context("canonicalize watchdog")?;
-
-    // #103: refuse to install pointing at a binary an unprivileged user could
-    // overwrite in place — the integrity check `supervise::watchdog_loop` does
-    // at every respawn is worthless if the file it re-hashes lives in a
-    // directory anyone can drop a replacement into.
-    for bin in [&agent_abs, &watchdog_abs] {
-        if let Some(dir) = bin.parent() {
-            crate::tamper::refuse_world_writable_dir(dir)
-                .with_context(|| format!("checking install directory for {}", bin.display()))?;
-        }
-        crate::tamper::harden_permissions(bin, 0o755)
-            .with_context(|| format!("hardening permissions on {}", bin.display()))?;
-    }
-
-    let alerts_abs =
-        std::path::absolute(&alerts).with_context(|| format!("absolutize {}", alerts.display()))?;
-    if let Some(parent) = alerts_abs.parent() {
-        std::fs::create_dir_all(parent).with_context(|| format!("mkdir {}", parent.display()))?;
-    }
-
-    Ok(ResolvedPaths {
-        watchdog_abs,
-        agent_abs,
-        alerts_abs,
-    })
 }
 
 /// A snapshot of the installed service definition's on-disk state, taken once
@@ -129,7 +81,10 @@ pub(crate) fn snapshot_definition() -> anyhow::Result<DefinitionSnapshot> {
 /// Compares two snapshots of the same installation, describing anything that
 /// changed between them in a human-readable line each — empty means no drift.
 #[must_use]
-pub(crate) fn drift_report(baseline: &DefinitionSnapshot, current: &DefinitionSnapshot) -> Vec<String> {
+pub(crate) fn drift_report(
+    baseline: &DefinitionSnapshot,
+    current: &DefinitionSnapshot,
+) -> Vec<String> {
     let mut report = Vec::new();
     match (&baseline.digest, &current.digest) {
         (Some(b), Some(c)) if b != c => report.push(format!(
@@ -210,6 +165,8 @@ fn install_systemd(agent_bin: Option<PathBuf>, alerts: PathBuf) -> anyhow::Resul
     // #103: don't rely on umask for a root-owned service definition's permissions.
     crate::tamper::harden_permissions(std::path::Path::new(SYSTEMD_UNIT), 0o644)
         .with_context(|| format!("hardening permissions on {SYSTEMD_UNIT}"))?;
+    crate::tamper::harden_ownership(std::path::Path::new(SYSTEMD_UNIT))
+        .with_context(|| format!("hardening ownership on {SYSTEMD_UNIT}"))?;
     run("systemctl", &["daemon-reload"])?;
     run("systemctl", &["enable", "--now", "synthaea-agent.service"])?;
 
@@ -279,6 +236,9 @@ fn install_openrc(agent_bin: Option<PathBuf>, alerts: PathBuf) -> anyhow::Result
     std::fs::write(OPENRC_SCRIPT, &script)
         .with_context(|| format!("writing {OPENRC_SCRIPT} (root required)"))?;
     set_executable(OPENRC_SCRIPT)?;
+    // #103: same ownership hardening the systemd unit gets above.
+    crate::tamper::harden_ownership(std::path::Path::new(OPENRC_SCRIPT))
+        .with_context(|| format!("hardening ownership on {OPENRC_SCRIPT}"))?;
 
     run("rc-update", &["add", "synthaea-agent", "default"])?;
     run("rc-service", &["synthaea-agent", "start"])?;
@@ -297,8 +257,7 @@ fn uninstall_openrc() -> anyhow::Result<()> {
     let _ = run("rc-service", &["synthaea-agent", "stop"]);
     let _ = run("rc-update", &["del", "synthaea-agent", "default"]);
     if std::path::Path::new(OPENRC_SCRIPT).exists() {
-        std::fs::remove_file(OPENRC_SCRIPT)
-            .with_context(|| format!("removing {OPENRC_SCRIPT}"))?;
+        std::fs::remove_file(OPENRC_SCRIPT).with_context(|| format!("removing {OPENRC_SCRIPT}"))?;
     }
     println!("[watchdog] synthaea-agent OpenRC service uninstalled.");
     Ok(())

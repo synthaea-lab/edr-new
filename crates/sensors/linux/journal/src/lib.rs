@@ -26,24 +26,40 @@
 //! standalone. `su`/`sshd` login-failure mapping is implemented and unit-tested
 //! but still unverified against a real prompt/failed attempt.
 //!
+//! Also done: [`persistence::UnitPersistenceTracker`] maps a unit's first
+//! observed start into `schema::FileOpenEvent`/`FLAG_PERSISTENCE_SYSTEMD_ARTIFACT`
+//! (T1543.002) — the cross-platform decision [`auth`]'s module doc had left
+//! open, resolved once issue #224 (Windows' own service-lifecycle event
+//! reconciliation) landed and confirmed `sensor-windows-eventlog`'s precedent:
+//! reuse `FileOpenEvent` + a flag, no new `Event` variant. See that module's
+//! doc for why this is an approximation ("first start seen by this agent
+//! process"), not a true install signal.
+//!
 //! Deliberately **not** here yet:
 //! - No [`schema::sensor::Sensor`] implementation — like `sensor-linux-netlink`
 //!   (issue #92), this is a supplementary poll/tail source wired directly into
 //!   `agent::commands::linux::cmd_run` alongside the main sensor, not a
 //!   standalone `Sensor`.
-//! - No cursor persistence across agent restarts (the `crates/store` integration)
-//!   — not required by issue #93's `Done when`; a restart re-tailing from "now"
-//!   rather than resuming is an accepted gap for a follow-up, not this issue.
-//! - No unit-lifecycle mapping (`JournalEvent::UnitStarted`/`Stopped`/`Failed`) —
-//!   see [`auth`]'s module doc for why.
+//! - No cursor persistence *in this crate* — `process::current_cursor`/
+//!   `process::spawn_follow(after_cursor)` are the mechanism, but reading a prior
+//!   run's cursor back and writing the current one as records arrive is
+//!   `agent::journal_cursor`'s job (issue #321: a restart now resumes from the
+//!   last persisted cursor via a small file next to the alerts output, no
+//!   `crates/store` integration needed — first start still begins at "now", same
+//!   as before). [`persistence::UnitPersistenceTracker`]'s seen-set is still
+//!   agent-process-local and still resets on restart — a known limitation of that
+//!   tracker (see its own doc), unrelated to and not closed by the journal
+//!   cursor now being persisted.
 
 mod auth;
 mod classify;
+mod persistence;
 mod record;
 mod tail;
 
 pub use auth::to_auth_event;
 pub use classify::{JournalEvent, classify};
+pub use persistence::UnitPersistenceTracker;
 pub use record::{JournalRecord, parse_record};
 pub use tail::ClassifiedJournal;
 #[cfg(target_os = "linux")]

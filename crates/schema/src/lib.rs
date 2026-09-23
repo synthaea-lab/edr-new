@@ -53,7 +53,10 @@
 use serde::{Deserialize, Serialize};
 
 pub mod detection;
+#[cfg(feature = "test-fixtures")]
+pub mod fixtures;
 pub mod sensor;
+pub mod time;
 
 /// Version of the serialized event model. Bumped on any serialization-visible change,
 /// together with a new golden-fixture directory (see crate docs).
@@ -67,7 +70,49 @@ pub mod sensor;
 /// precedent already established by versions 2 through 12. Originally claimed as
 /// 10 → 11 while this branch was open; rebased to 13 once #189 (`NetworkFlow`,
 /// 11 → 12) merged into `main` first — same coordination note as ADR-0005.
-pub const SCHEMA_VERSION: u32 = 13;
+///
+/// Bumped 13 → 14 for [`Event::TlsCapture`] and [`Event::ReadlineInput`] (#90):
+/// two new enum variants for uprobes-based TLS plaintext capture and shell readline
+/// input capture. Same serialization-visible reasoning as v13 above.
+///
+/// Bumped 14 → 15 for [`Event::FileWrite`], [`Event::FileDelete`], and
+/// [`Event::FileRename`] (#262): three new enum variants for Linux
+/// write/delete/rename telemetry. Same serialization-visible reasoning as v13/v14.
+///
+/// Bumped 15 → 16 for [`Event::SocketBind`] (#263): one new enum variant for
+/// discrete, real-time `bind(2)` telemetry on Linux. Same reasoning as v13-v15.
+///
+/// Bumped 16 → 17 for [`Event::FileChmod`] and [`Event::FileChown`] (#262 Phase 2):
+/// two new enum variants for Linux permission/ownership-change telemetry. Same
+/// reasoning as v13-v16.
+///
+/// Bumped 17 → 18 for [`Event::SocketListen`] (#263 Phase 2): one new enum variant
+/// for discrete, real-time `listen(2)` telemetry on Linux. Same reasoning as
+/// v13-v17.
+///
+/// Bumped 18 → 19 for [`Event::SocketAccept`] (#263 Phase 2): one new enum variant
+/// for `accept(2)`/`accept4(2)` telemetry (the peer address of a newly accepted
+/// connection) on Linux. Same reasoning as v13-v18.
+///
+/// Bumped 19 → 20 for [`Event::TccDecision`] and [`Event::GatekeeperVerdict`]
+/// (#95): two new enum variants for macOS unified-log telemetry (TCC
+/// privacy-permission decisions, Gatekeeper scan verdicts). macOS-only families,
+/// same precedent as the Windows-only `RegistrySet`/`WmiActivity`/`ScriptBlock`
+/// variants; same serialization-visible reasoning as v13-v19. Originally
+/// claimed as 18 → 19 while #95's branch was open; renumbered once #263's
+/// `SocketAccept` (18 → 19) merged into `main` first — the same coordination
+/// note as v13 and ADR-0005.
+///
+/// Bumped 20 → 21 for [`Event::FileQuarantine`], [`Event::Mount`],
+/// [`Event::Signal`], and [`Event::XpcConnect`] (#96, the macOS
+/// `EndpointSecurity` catalog widening): download provenance, mount/unmount,
+/// tamper-relevant signals, and XPC connections. `Mount` and `Signal` are
+/// platform-neutral shapes (Linux mount/kill telemetry can reuse them);
+/// `FileQuarantine`/`XpcConnect` are macOS-only families per the v20
+/// precedent. Same serialization-visible reasoning as v13-v20. Originally
+/// claimed as 19 → 20 while #96's branch was open; renumbered with the rest
+/// of the macOS stack when `SocketAccept` took v19 on `main` first.
+pub const SCHEMA_VERSION: u32 = 21;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -106,12 +151,54 @@ pub const FLAG_PERSISTENCE_TASK_ARTIFACT: u32 = 0x2000_0000;
 /// domain controller) is out of scope for a userland EDR on member/standalone
 /// machines — the sensor never observes it. A `computer` account creation (4741) is
 /// a distinct technique (T1136.002) and would take its own bit if we add it later.
-///
-/// On this flag, `FileOpenEvent::path` carries the new account's SID (`S-1-5-21-...`)
-/// and `FileOpenEvent::meta::comm` carries the account leaf name (SAM name). Same
-/// distinct-bit rule as the other two: the three T1136/T1053/T1543 rules never
-/// cross-fire off a single event.
 pub const FLAG_PERSISTENCE_ACCOUNT_ARTIFACT: u32 = 0x0800_0000;
+
+/// Same principle as [`FLAG_PERSISTENCE_ARTIFACT`], for a Linux **systemd unit**
+/// observed starting for the first time since the agent started (ATT&CK T1543.002
+/// — Create or Modify System Process: Systemd Service, the Linux sibling of
+/// T1543.003) rather than a Windows service. Set by `sensor-linux-journal`'s
+/// `persistence::UnitPersistenceTracker` (issue #93), the Linux side of the same
+/// "reuse `FileOpenEvent` + a flag" shape rather than a new `Event` variant —
+/// see `sensor-linux-journal::auth`'s module doc for why a Linux-only lifecycle
+/// shape was deliberately not invented while this decision was open.
+///
+/// Not the same signal as Windows' 7045: journald's `JOB_TYPE=start`/
+/// `JOB_RESULT=done` fires on every start of a unit, install or routine restart
+/// alike, unlike the Service Control Manager which only writes 7045 once, at
+/// actual registration. This flag is therefore only a "first start observed by
+/// this agent process" approximation, not a true install signal — see the
+/// tracker's own doc for the full caveat (an agent restart forgets what it had
+/// already seen).
+///
+/// `FileOpenEvent::path` and `FileOpenEvent::meta::comm` both carry the unit name
+/// (`sshd.service`) — journald's job-completion record has no image-path
+/// equivalent to Windows' 7045, so there is no separate field to put there.
+///
+/// A distinct bit from every other `FLAG_PERSISTENCE_*` constant, so no two
+/// techniques cross-fire off a single event.
+pub const FLAG_PERSISTENCE_SYSTEMD_ARTIFACT: u32 = 0x4000_0000;
+
+/// Same principle as [`FLAG_PERSISTENCE_ARTIFACT`], for a macOS **launch item
+/// registration** observed by Background Task Management (`EndpointSecurity`'s
+/// `BTM_LAUNCH_ITEM_ADD`, macOS 13+) — launch agents/daemons (ATT&CK
+/// T1543.001/.004) and login items (T1547.015), set by `sensor-macos` (issue
+/// #32). Like Windows' 7045 and unlike the Linux systemd approximation, this
+/// is a registration-time fact from the OS itself: BTM emits it when the item
+/// is added, whatever the path taken (a plist dropped in `LaunchAgents`, an
+/// `SMAppService` registration, MDM).
+///
+/// `FileOpenEvent::path` carries the persistence *payload* (the executable
+/// resolved from the launchd plist) when BTM provides it, else the item URL;
+/// `meta` identifies the instigating process when BTM attributes one. A raw
+/// plist write additionally surfaces as an ordinary file event and is caught
+/// by `rules::check_persistence_write`'s path patterns — two distinct signals,
+/// not a duplicate (BTM also fires for registrations that never touch a
+/// watched directory).
+///
+/// A distinct bit from every other `FLAG_PERSISTENCE_*` constant, so no two
+/// techniques cross-fire off a single event. Not a serialization-visible
+/// schema change (same reasoning as [`FLAG_PERSISTENCE_ARTIFACT`]).
+pub const FLAG_PERSISTENCE_BTM_ARTIFACT: u32 = 0x0400_0000;
 
 /// Identity of the user a process runs as, per platform.
 ///
@@ -257,6 +344,46 @@ pub enum Signature {
     Unsupported,
 }
 
+// Standard POSIX open(2) flag values, stable across the Linux architectures this
+// project supports (x86_64, aarch64). Defined here rather than via `libc`:
+// `FileOpenEvent::flags` is platform-native and these are the Linux values; a
+// `libc` dependency would drag platform quirks (no `O_ACCMODE` on Windows) into
+// the boundary crate that must compile everywhere.
+/// `open(2)` access-mode mask (`flags & O_ACCMODE` is one of `O_RDONLY`=0,
+/// [`O_WRONLY`], [`O_RDWR`] — a 2-bit field, not independent bits).
+pub const O_ACCMODE: u32 = 0o3;
+/// `open(2)` write-only access mode.
+pub const O_WRONLY: u32 = 0o1;
+/// `open(2)` read-write access mode.
+pub const O_RDWR: u32 = 0o2;
+/// `open(2)` create-if-absent flag.
+pub const O_CREAT: u32 = 0o100;
+
+/// Write intent on [`FileOpenEvent::flags`]: a write access mode, or creation
+/// (`O_CREAT` — creating a file is write intent even with `O_RDONLY`).
+///
+/// The ONE definition of this predicate. It used to exist five times (rules,
+/// correlator, `crates/ml`, and two Python mirrors) with two different
+/// semantics — an access-mode comparison vs. a bitmask-any — which classified
+/// `flags = 0o3` differently, so the rule engine and the correlator could
+/// disagree about the same event. The access-mode comparison is canonical
+/// because it is what the kernel does: the access mode is a 2-bit *field*
+/// (`O_ACCMODE`), not independent bits, and the `0o3` combination is invalid —
+/// `open(2)` refuses it with `EINVAL`, so no write can result and counting it
+/// would let crafted always-failing opens inflate behavioral write counts.
+/// The Python mirrors (`synthaea_ml.features.correlation._is_file_write`,
+/// `behavior._is_write`) must match this exactly — parity-tested against
+/// shared fixtures.
+///
+/// Lives in `schema` deliberately: a pure helper on a field this crate
+/// defines, additive to the semi-frozen surface (no serialization impact),
+/// and the only crate every consumer of `flags` may depend on.
+#[must_use]
+pub fn has_write_intent(flags: u32) -> bool {
+    let access_mode = flags & O_ACCMODE;
+    access_mode == O_WRONLY || access_mode == O_RDWR || (flags & O_CREAT) != 0
+}
+
 /// File open/create.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileOpenEvent {
@@ -266,6 +393,179 @@ pub struct FileOpenEvent {
     /// dispositions). Rules match primarily on `path`; flag interpretation is
     /// per-platform and documented by each sensor.
     pub flags: u32,
+}
+
+/// File write (issue #262).
+///
+/// ## ⚠️ Critical Limitation: No Path Included
+///
+/// This event carries **no path** — only `(pid, fd, bytes_requested)`. `write(2)` and
+/// `pwrite64(2)` operate on file descriptors, not paths, and the Linux sensor resolves
+/// no fd→path mapping (neither kernel-side `bpf_d_path`/LSM hooks nor userspace
+/// `/proc/<pid>/fd/<n>` lookup — see `sensor-linux-wire::FileWriteEvent`'s version
+/// history for rationale).
+///
+/// **This is a volume/frequency signal** for burst-write detection (ransomware, mass
+/// tampering, log destruction), not a per-write path trail. To correlate a write with
+/// a file path, detection rules must join to a recent [`FileOpenEvent`] on
+/// `(meta.pid, fd)`.
+///
+/// ## Detection Correlation Pattern
+///
+/// ```rust,ignore
+/// // Pseudo-code example: correlate FileOpen → FileWrite
+/// match event {
+///     Event::FileOpen(open) => {
+///         // Store (pid, fd) → path mapping
+///         state.track_fd(open.meta.pid, open.fd, open.path.clone());
+///     }
+///     Event::FileWrite(write) => {
+///         // Look up path from prior FileOpen
+///         if let Some(path) = state.get_path(write.meta.pid, write.fd) {
+///             // Now you can detect: "wrote 1MB to /etc/passwd"
+///             check_suspicious_write(path, write.bytes_requested);
+///         }
+///     }
+///     Event::FileClose(_) => {
+///         // Clean up fd tracking to bound memory
+///     }
+/// }
+/// ```
+///
+/// See `docs/detection/file-activity-patterns.md` for full worked examples including
+/// ransomware burst-write + mass-rename correlation.
+///
+/// ## Performance Notes
+///
+/// `write(2)` is one of the hottest syscalls in the system. Current implementation:
+/// - Captures **every** write syscall (no size filtering)
+/// - Expected rate: 10-1000+ events/sec under normal load, 10K+/sec under heavy I/O
+/// - No built-in sampling or backpressure (Phase 1 implementation)
+///
+/// Future work (issue #262 Phase 2):
+/// - Add min-size filter (e.g., skip writes < 4KB)
+/// - Consider sampling under sustained high-volume
+/// - Add `writev(2)`, `pwrite64(2)`, `pwritev(2)` coverage (currently only `write(2)`)
+///
+/// ## Syscall Coverage
+///
+/// Phase 1 (current): `write(2)` only
+/// Phase 2 (deferred): `writev`, `pwrite64`, `pwritev`, `pwritev2`
+///
+/// Rationale for deferral: `write(2)` covers the common case; vectored/positioned
+/// writes are used by databases and async I/O but add complexity (multiple fd/offset
+/// pairs per syscall). Added once the Phase 1 signal proves useful and performance
+/// characteristics are understood.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileWriteEvent {
+    pub meta: EventMeta,
+    /// The file descriptor written to, in the writing process's own fd table —
+    /// meaningful only paired with `meta.pid`, and reused across the process's
+    /// lifetime like any fd.
+    pub fd: u32,
+    /// The caller's requested byte count (`write(2)`'s `count` argument), read at
+    /// syscall entry — not the syscall's return value, so a short write or a
+    /// failed call still reports the requested size.
+    pub bytes_requested: u64,
+}
+
+/// File delete (issue #262): `unlink(2)`/`unlinkat(2)`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileDeleteEvent {
+    pub meta: EventMeta,
+    pub path: String,
+}
+
+/// File rename (issue #262): `rename(2)`/`renameat(2)`/`renameat2(2)`. The classic
+/// ransomware signal (`invoice.pdf` → `invoice.pdf.locked`) lives entirely in
+/// `new_path`'s suffix relative to `old_path`'s.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRenameEvent {
+    pub meta: EventMeta,
+    pub old_path: String,
+    pub new_path: String,
+}
+
+/// File permission change (issue #262 Phase 2): `chmod(2)`/`fchmodat(2)`. `fchmod(2)`
+/// (fd-only, no path) is deferred — see `sensor-linux-wire::FileChmodEvent`'s doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChmodEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    /// Requested mode bits (permission bits plus setuid/setgid/sticky). A `chmod
+    /// +s` (mode & 0o4000/0o2000) on a world-writable or unexpected binary is a
+    /// classic privilege-escalation signal (T1222.002).
+    pub mode: u32,
+}
+
+/// File ownership change (issue #262 Phase 2): `chown(2)`/`lchown(2)`/
+/// `fchownat(2)`. `fchown(2)` (fd-only, no path) is deferred — see
+/// `sensor-linux-wire::FileChownEvent`'s doc.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChownEvent {
+    pub meta: EventMeta,
+    pub path: String,
+    /// New owner uid, or `u32::MAX` (`(uid_t)-1`) meaning "leave unchanged" per
+    /// `chown(2)`'s own semantics — passed through as-is, not specially interpreted.
+    pub uid: u32,
+    /// New owner gid, same "leave unchanged" sentinel as `uid`.
+    pub gid: u32,
+}
+
+/// Socket bind (issue #263): `bind(2)`, `AF_INET`/`AF_INET6` only — a discrete,
+/// real-time trace of a process claiming a local address (backdoor/reverse-shell
+/// listener detection: `/bin/bash` binding a port is a strong signal on its own).
+///
+/// Distinct from [`ListenPortEvent`], which is a periodic poll snapshot from
+/// `sensor-linux-netlink`: this fires once, at the `bind(2)` call itself, and does
+/// NOT imply `listen(2)` followed — a UDP socket, or a TCP socket bound but never
+/// listened, binds too. See [`SocketListenEvent`] for the `listen(2)` counterpart
+/// and [`SocketAcceptEvent`] for the `accept(2)`/`accept4(2)` counterpart (see
+/// `sensor-linux-wire::SocketBindEvent`'s doc for why).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketBindEvent {
+    pub meta: EventMeta,
+    pub local_addr: core::net::IpAddr,
+    pub local_port: u16,
+}
+
+/// Socket listen (issue #263 Phase 2): `listen(2)` — a discrete, real-time trace of
+/// a process transitioning a bound socket into the listening state
+/// (backdoor/reverse-shell listener detection, same rationale as
+/// [`SocketBindEvent`]).
+///
+/// `listen(2)`'s own arguments carry no address, only `fd`+`backlog` — the sensor
+/// correlates this event's `(pid, fd)` against a prior `bind(2)` it observed.
+/// `local_addr`/`local_port` are `None` when no matching `bind()` was seen (the
+/// probe attached after it happened, or the caller relied on the kernel's implicit
+/// ephemeral-port bind at `listen()` time) rather than reporting a wrong or zeroed
+/// address as if it were real.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketListenEvent {
+    pub meta: EventMeta,
+    pub local_addr: Option<core::net::IpAddr>,
+    pub local_port: Option<u16>,
+    /// The caller's requested backlog — a small value (e.g. 1) on an otherwise
+    /// unremarkable listener can itself be a signal.
+    pub backlog: u32,
+}
+
+/// Socket accept (issue #263 Phase 2): `accept(2)`/`accept4(2)` completing — a
+/// discrete, real-time trace of a listening socket accepting a new connection,
+/// carrying the PEER's address (the connecting client), not the local one. Only
+/// emitted on success — a failed `accept()` has no peer to report. See
+/// `sensor-linux-wire::SocketAcceptEvent`'s doc for the `sys_enter`/`sys_exit`
+/// correlation this event depends on (the peer address doesn't exist until the
+/// kernel-side call returns).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SocketAcceptEvent {
+    pub meta: EventMeta,
+    /// The listening socket's fd (`accept`/`accept4`'s first argument).
+    pub listen_fd: u32,
+    /// The newly accepted connection's fd (`accept`/`accept4`'s return value).
+    pub accepted_fd: u32,
+    pub peer_addr: core::net::IpAddr,
+    pub peer_port: u16,
 }
 
 /// DNS resolution — the query name and answer, joined to the resolving process.
@@ -448,6 +748,79 @@ pub struct ListenPortEvent {
     pub local_port: u16,
 }
 
+/// Direction of TLS data flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsDirection {
+    /// Data read from network (post-decryption).
+    Read,
+    /// Data written to network (pre-encryption).
+    Write,
+}
+
+/// TLS library type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TlsLibraryType {
+    /// OpenSSL library.
+    OpenSsl,
+    /// `BoringSSL` library (Google's fork of OpenSSL).
+    BoringSsl,
+    /// `GnuTLS` library.
+    GnuTls,
+}
+
+/// Shell type for readline capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellType {
+    Bash,
+    Zsh,
+}
+
+/// TLS plaintext capture — first N bytes of data before encryption or after
+/// decryption (issue #90).
+///
+/// Emitted by Linux uprobes on `SSL_read`/`SSL_write` and `GnuTLS` equivalents.
+/// Captures HTTP headers, initial TLS handshake bytes, and other plaintext that
+/// would otherwise be invisible to network monitoring. Primary signal for C2
+/// beacon detection and exfiltration analysis.
+///
+/// Note: This is sensitive data — the plaintext may contain credentials, tokens,
+/// or PII. Sensors apply a byte budget (`MAX_TLS_CAPTURE = 256` in the wire format);
+/// longer buffers are truncated at capture time. Configuration must allow operators
+/// to disable this capture or apply process/library allowlists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TlsCaptureEvent {
+    pub meta: EventMeta,
+    /// Direction of data flow (read = inbound/decrypted, write = outbound/encrypted).
+    pub direction: TlsDirection,
+    /// TLS library that was probed.
+    pub lib_type: TlsLibraryType,
+    /// Captured plaintext bytes. May be binary data (not UTF-8). Consumers should
+    /// handle encoding errors gracefully when treating this as text.
+    pub data: Vec<u8>,
+}
+
+/// Interactive shell command capture — commands typed at a shell prompt that may
+/// not trigger execve (issue #90).
+///
+/// Emitted by Linux uprobes on bash/zsh readline functions. Captures shell builtins
+/// (`cd`, `export`, `alias`) and interactive commands that do not spawn child processes.
+/// Complements `ExecEvent` for complete shell activity visibility.
+///
+/// Note: Multi-line commands are captured as typed (newlines included). Command
+/// history navigation (up-arrow) triggers multiple readline events; deduplication
+/// is the consumer's responsibility.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadlineInputEvent {
+    pub meta: EventMeta,
+    /// Shell type (bash or zsh).
+    pub shell_type: ShellType,
+    /// Full command line as typed by the user. UTF-8 validated by the sensor.
+    pub input: String,
+}
+
 /// Outbound network connection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConnectEvent {
@@ -610,6 +983,162 @@ pub enum AuthKind {
     PrivilegedSession,
 }
 
+/// macOS TCC privacy-permission decision — tccd answered a process's request
+/// for a protected capability (screen capture, microphone, Accessibility, full
+/// disk access, ...). Emitted by `sensor-macos-unifiedlog` (issue #95) from the
+/// `com.apple.TCC` unified-log subsystem, joining tccd's `AUTHREQ_CTX` (which
+/// carries the service) with the matching `AUTHREQ_RESULT` (which carries the
+/// verdict) on tccd's own message id.
+///
+/// Detection value: malware granting itself Accessibility/screen-capture (via
+/// synthetic clicks or a compromised MDM profile), and the reconnaissance
+/// pattern of a fresh binary probing many services. A *denial* is signal too —
+/// repeated denials for the same client is a process trying to escalate.
+///
+/// macOS-only family, same precedent as the Windows-only [`RegistrySetEvent`]/
+/// [`WmiActivityEvent`]/[`ScriptBlockEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TccDecisionEvent {
+    /// The deciding daemon (`tccd`) — the unified log does not attribute the
+    /// requesting process on the result record; `client` below carries what
+    /// the log did say about the requester.
+    pub meta: EventMeta,
+    /// TCC service identifier as logged (e.g. `kTCCServiceScreenCapture`).
+    pub service: String,
+    /// True when access was granted (including "limited" grants).
+    pub allowed: bool,
+    /// Raw `authValue` from the log (0 denied, 1 unknown, 2 allowed, 3
+    /// limited) — kept for forensic completeness; rules match on `allowed`.
+    pub auth_value: u32,
+    /// Raw `authReason` code when logged (e.g. 11 = user consent, 12 =
+    /// service policy) — uninterpreted, forensic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_reason: Option<u32>,
+    /// Requesting client when the joined context carried one (bundle
+    /// identifier or binary path). `None` when tccd redacted it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+}
+
+/// macOS Gatekeeper scan verdict — syspolicyd evaluated a target (first
+/// launch, quarantine, background scan). Emitted by `sensor-macos-unifiedlog`
+/// (issue #95) from syspolicyd's `GK evaluateScanResult` unified-log messages.
+///
+/// The join keys for putting a verdict next to its exec event on a case are
+/// `team_id`/`signing_id` plus time proximity: syspolicyd hash-redacts file
+/// paths in the public log stream (they only appear with the private-data
+/// logging profile installed — see `docs/sensors/macos.md`), so `target` is
+/// honest about possibly being an opaque token rather than a path.
+///
+/// macOS-only family, same precedent as [`TccDecisionEvent`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GatekeeperVerdictEvent {
+    /// The scanning daemon (`syspolicyd`).
+    pub meta: EventMeta,
+    /// Scan target as syspolicyd logged it: the bundle identifier when
+    /// present, else syspolicyd's path token (hash-redacted without the
+    /// logging profile).
+    pub target: String,
+    /// Signing team identifier, when the target is signed and logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub team_id: Option<String>,
+    /// Code-signing identifier, when logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_id: Option<String>,
+    /// Raw `evaluateScanResult` code. Deliberately uninterpreted: the values
+    /// are undocumented by Apple, so the sensor forwards them for forensics
+    /// and fleet-side statistics instead of guessing an allow/deny meaning
+    /// that could silently invert on an OS update.
+    pub result_code: u32,
+}
+
+/// macOS download provenance — the `com.apple.quarantine` extended attribute
+/// was set on a file, marking it as downloaded from the network. Emitted by
+/// `sensor-macos` (#96) on `SETEXTATTR`, with the quarantine string and the
+/// `kMDItemWhereFroms` origin URLs read back from the file at event time.
+///
+/// This is the network→file link: a later exec of `path` joins this event to
+/// answer "where did that binary come from" — the macOS mark-of-the-web
+/// (cross-platform note in `docs/sensors/sources.md`).
+///
+/// `agent`/`origin_url`/`referrer_url` are `None` when the writing application
+/// did not (or had not yet) recorded them — the quarantine mark alone is still
+/// the signal that the file arrived from outside.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileQuarantineEvent {
+    pub meta: EventMeta,
+    /// The quarantined file.
+    pub path: String,
+    /// Application that downloaded it, from the quarantine string's agent
+    /// field (e.g. `Safari`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Download URL from `kMDItemWhereFroms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
+    /// Referrer URL from `kMDItemWhereFroms`, when recorded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub referrer_url: Option<String>,
+}
+
+/// A filesystem was mounted or unmounted. Emitted by `sensor-macos` (#96);
+/// deliberately platform-neutral — Linux mount telemetry can reuse it.
+///
+/// Detection value: staging via disk images (`hdiutil attach` of a downloaded
+/// DMG is the classic macOS malware delivery step), USB mass storage, and
+/// unmounts destroying evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MountEvent {
+    pub meta: EventMeta,
+    /// Where the filesystem is (or was) mounted.
+    pub mount_point: String,
+    /// What was mounted (device node, image path, network source), when the
+    /// platform reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    /// Filesystem type (`hfs`, `apfs`, `smbfs`, ...), when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs_type: Option<String>,
+    /// True for a read-only mount.
+    pub readonly: bool,
+    /// True for a mount, false for an unmount.
+    pub mounted: bool,
+}
+
+/// A signal was sent to a monitored security process. Emitted by
+/// `sensor-macos` (#96), filtered at the source to targets that are
+/// `EndpointSecurity` clients — i.e. this agent and other security tools:
+/// the tamper-attempt subset of the platform's full (and enormous) signal
+/// stream, per the sensor's volume discipline. Platform-neutral shape;
+/// a Linux kill-tracing source can reuse it with its own target filter.
+///
+/// `meta` is the *sender* — the interesting party in a tamper attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignalEvent {
+    pub meta: EventMeta,
+    /// Signal number, platform-native (SIGKILL=9, SIGTERM=15, ...).
+    pub signal: u32,
+    pub target_pid: u32,
+    /// Image path of the targeted process, when the platform resolves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_image_path: Option<String>,
+}
+
+/// macOS XPC connection — a process connected to an XPC service by name.
+/// Emitted by `sensor-macos` (#96, macOS 14+). High-volume by nature; rules
+/// should match on sensitive `service_name`s (e.g. TCC, launchd control,
+/// screen capture services) rather than alerting per event. macOS-only
+/// family, per the v19 precedent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XpcConnectEvent {
+    pub meta: EventMeta,
+    /// The requested service name (e.g. `com.apple.tccd`).
+    pub service_name: String,
+    /// Raw `es_xpc_domain_type_t` (1 = system, 2 = user, ... 7 = pid) — kept
+    /// as the platform reports it, uninterpreted.
+    pub domain_type: u32,
+}
+
 /// The normalized event envelope.
 ///
 /// `#[non_exhaustive]`: new telemetry categories (registry, DNS, image load, ...) are
@@ -637,6 +1166,22 @@ pub enum Event {
     Auth(AuthEvent),
     ListenPort(ListenPortEvent),
     NetworkFlow(NetworkFlowEvent),
+    TlsCapture(TlsCaptureEvent),
+    ReadlineInput(ReadlineInputEvent),
+    FileWrite(FileWriteEvent),
+    FileDelete(FileDeleteEvent),
+    FileRename(FileRenameEvent),
+    SocketBind(SocketBindEvent),
+    FileChmod(FileChmodEvent),
+    FileChown(FileChownEvent),
+    SocketListen(SocketListenEvent),
+    SocketAccept(SocketAcceptEvent),
+    TccDecision(TccDecisionEvent),
+    GatekeeperVerdict(GatekeeperVerdictEvent),
+    FileQuarantine(FileQuarantineEvent),
+    Mount(MountEvent),
+    Signal(SignalEvent),
+    XpcConnect(XpcConnectEvent),
 }
 
 impl Event {
@@ -662,10 +1207,66 @@ impl Event {
             Event::Auth(e) => &e.meta,
             Event::ListenPort(e) => &e.meta,
             Event::NetworkFlow(e) => &e.meta,
-            // Non-exhaustive: new telemetry variants must be added here.
-            // This arm ensures a compile-time reminder when adding variants.
-            #[allow(unreachable_patterns)]
-            _ => unreachable!("all Event variants must have meta — add the new variant here"),
+            Event::TlsCapture(e) => &e.meta,
+            Event::ReadlineInput(e) => &e.meta,
+            Event::FileWrite(e) => &e.meta,
+            Event::FileDelete(e) => &e.meta,
+            Event::FileRename(e) => &e.meta,
+            Event::SocketBind(e) => &e.meta,
+            Event::FileChmod(e) => &e.meta,
+            Event::FileChown(e) => &e.meta,
+            Event::SocketListen(e) => &e.meta,
+            Event::SocketAccept(e) => &e.meta,
+            Event::TccDecision(e) => &e.meta,
+            Event::GatekeeperVerdict(e) => &e.meta,
+            Event::FileQuarantine(e) => &e.meta,
+            Event::Mount(e) => &e.meta,
+            Event::Signal(e) => &e.meta,
+            Event::XpcConnect(e) => &e.meta,
+            // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
+            // the defining crate, so a new variant without its arm here is a
+            // compile error — the reminder the doc comment above promises.
         }
+    }
+}
+
+#[cfg(test)]
+mod write_intent_tests {
+    use super::has_write_intent;
+
+    #[test]
+    fn write_access_modes_are_write_intent() {
+        assert!(has_write_intent(super::O_WRONLY));
+        assert!(has_write_intent(super::O_RDWR));
+        assert!(has_write_intent(
+            super::O_WRONLY | 0o2000 /* O_APPEND */
+        ));
+    }
+
+    #[test]
+    fn creat_is_write_intent_even_with_rdonly() {
+        // Creating a file mutates the filesystem regardless of the access mode.
+        assert!(has_write_intent(super::O_CREAT));
+    }
+
+    #[test]
+    fn rdonly_is_not_write_intent() {
+        assert!(!has_write_intent(0));
+        assert!(!has_write_intent(
+            0o2000 /* O_APPEND alone — no write mode */
+        ));
+    }
+
+    #[test]
+    fn invalid_accmode_combo_is_not_write_intent() {
+        // The divergence that motivated unifying the five copies: 0o3 sets both
+        // access-mode bits, which open(2) refuses with EINVAL — no write can
+        // result, so the bitmask-any copies that counted it were wrong. Pinned
+        // so the semantics never fork again.
+        assert!(!has_write_intent(0o3));
+        assert!(
+            has_write_intent(0o3 | super::O_CREAT),
+            "creation still counts"
+        );
     }
 }

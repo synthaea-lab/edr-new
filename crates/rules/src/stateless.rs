@@ -2,6 +2,7 @@
 
 use schema::{
     ExecEvent, FLAG_PERSISTENCE_ACCOUNT_ARTIFACT, FLAG_PERSISTENCE_ARTIFACT,
+    FLAG_PERSISTENCE_BTM_ARTIFACT, FLAG_PERSISTENCE_SYSTEMD_ARTIFACT,
     FLAG_PERSISTENCE_TASK_ARTIFACT, FileOpenEvent,
 };
 
@@ -12,7 +13,7 @@ use crate::{Alert, has_write_intent};
 /// entropy analysis here — that is the role of the ML model as a complement, not of
 /// this deterministic rule.
 #[must_use]
-pub fn check_base64_decode(event: &ExecEvent) -> Option<Alert> {
+pub(crate) fn check_base64_decode(event: &ExecEvent) -> Option<Alert> {
     let cmdline = &event.cmdline;
     let has_base64 = cmdline.contains("base64");
     let has_decode_flag =
@@ -53,7 +54,7 @@ pub fn check_base64_decode(event: &ExecEvent) -> Option<Alert> {
 /// Case-insensitive on the full string — `PowerShell` parameter names and
 /// image paths are.
 #[must_use]
-pub fn check_encoded_powershell(event: &ExecEvent) -> Option<Alert> {
+pub(crate) fn check_encoded_powershell(event: &ExecEvent) -> Option<Alert> {
     let cmdline = &event.cmdline;
     let cmdline_lower = cmdline.to_ascii_lowercase();
     let mentions_powershell =
@@ -86,13 +87,22 @@ const PERSISTENCE_PATH_PATTERNS: &[&str] = &[
     "/etc/profile.d/",
     "/etc/cron.d/",
     "/etc/systemd/system/",
+    // macOS (issue #32): substring match deliberately catches the per-user
+    // (`~/Library/...`) and system (`/Library/...`) launchd directories alike.
+    "/Library/LaunchAgents/",
+    "/Library/LaunchDaemons/",
+    ".zshrc",
+    "/etc/periodic/",
+    // at(1) jobs — rare on modern macOS, which is exactly why a write there
+    // is signal.
+    "/var/at/tabs/",
 ];
 
 /// A path captured by the `open` collector can be relative to an unresolved `dfd`
 /// (known limitation of the eBPF collector) — the substring filter tolerates this case
 /// as long as the meaningful path fragment (e.g. `.bashrc`) is present verbatim.
 #[must_use]
-pub fn check_persistence_write(event: &FileOpenEvent) -> Option<Alert> {
+pub(crate) fn check_persistence_write(event: &FileOpenEvent) -> Option<Alert> {
     let path = &event.path;
     let matched_pattern = PERSISTENCE_PATH_PATTERNS
         .iter()
@@ -117,6 +127,9 @@ pub fn evaluate_exec(event: &ExecEvent) -> Vec<Alert> {
     check_base64_decode(event)
         .into_iter()
         .chain(check_encoded_powershell(event))
+        .chain(check_masquerading(event))
+        .chain(check_recovery_inhibit(event))
+        .chain(check_log_clear_exec(event))
         .collect()
 }
 
@@ -140,7 +153,7 @@ pub fn evaluate_exec(event: &ExecEvent) -> Vec<Alert> {
 /// comment in `sensor-linux`), which does not depend on the pid still existing by
 /// drain time.
 #[must_use]
-pub fn check_proc_root_escape(event: &FileOpenEvent) -> Option<Alert> {
+pub(crate) fn check_proc_root_escape(event: &FileOpenEvent) -> Option<Alert> {
     let container = event.meta.container.as_ref()?;
 
     let mut segments = event.path.split('/').filter(|s| !s.is_empty());
@@ -181,7 +194,7 @@ pub fn check_proc_root_escape(event: &FileOpenEvent) -> Option<Alert> {
 /// to the persistence artifact for triage/removal via
 /// `schtasks /Delete /TN <name> /F`.
 #[must_use]
-pub fn check_scheduled_task_persistence(event: &FileOpenEvent) -> Option<Alert> {
+pub(crate) fn check_scheduled_task_persistence(event: &FileOpenEvent) -> Option<Alert> {
     if event.flags & FLAG_PERSISTENCE_TASK_ARTIFACT == 0 {
         return None;
     }
@@ -214,7 +227,7 @@ pub fn check_scheduled_task_persistence(event: &FileOpenEvent) -> Option<Alert> 
 /// alert to the persistence artifact for triage/removal via
 /// `sc.exe delete <name>`.
 #[must_use]
-pub fn check_service_install_persistence(event: &FileOpenEvent) -> Option<Alert> {
+pub(crate) fn check_service_install_persistence(event: &FileOpenEvent) -> Option<Alert> {
     if event.flags & FLAG_PERSISTENCE_ARTIFACT == 0 {
         return None;
     }
@@ -247,7 +260,7 @@ pub fn check_service_install_persistence(event: &FileOpenEvent) -> Option<Alert>
 /// `net user <name> /delete` for triage. The SID (rather than a path) survives
 /// an attacker renaming the account before triage runs.
 #[must_use]
-pub fn check_account_creation_persistence(event: &FileOpenEvent) -> Option<Alert> {
+pub(crate) fn check_account_creation_persistence(event: &FileOpenEvent) -> Option<Alert> {
     if event.flags & FLAG_PERSISTENCE_ACCOUNT_ARTIFACT == 0 {
         return None;
     }
@@ -255,6 +268,75 @@ pub fn check_account_creation_persistence(event: &FileOpenEvent) -> Option<Alert
         technique: "T1136.001",
         message: format!(
             "account={} pid={}: local account persistence created — sid: {}",
+            event.meta.comm, event.meta.pid, event.path,
+        ),
+    })
+}
+
+/// T1543.002 — Create or Modify System Process: Systemd Service. A systemd unit
+/// was just observed starting for the first time since this agent started —
+/// `sensor-linux-journal`'s `persistence::UnitPersistenceTracker` (issue #93),
+/// the Linux sibling of `check_service_install_persistence`'s Windows T1543.003.
+/// Flows through `FileOpenEvent` with `FLAG_PERSISTENCE_SYSTEMD_ARTIFACT`
+/// (distinct bit, so this never cross-fires with the three Windows persistence
+/// techniques off a single event).
+///
+/// Unlike the Windows signal, this is an approximation, not a deterministic
+/// "just installed" fact: journald's `JOB_TYPE=start`/`JOB_RESULT=done` fires on
+/// every start of a unit, install or routine restart alike — the tracker only
+/// suppresses repeats *within one agent lifetime*, so a unit already running
+/// before the agent started still alerts once, and an agent restart forgets
+/// what it had already seen. See [`FLAG_PERSISTENCE_SYSTEMD_ARTIFACT`]'s own
+/// doc for the full caveat.
+///
+/// Alert content carries the unit name from both `event.meta.comm` and
+/// `event.path` (journald's job-completion record has no image-path equivalent
+/// to Windows' 7045, so there is no second field to distinguish them).
+#[must_use]
+pub(crate) fn check_systemd_service_persistence(event: &FileOpenEvent) -> Option<Alert> {
+    if event.flags & FLAG_PERSISTENCE_SYSTEMD_ARTIFACT == 0 {
+        return None;
+    }
+    Some(Alert {
+        technique: "T1543.002",
+        message: format!(
+            "unit={} pid={}: systemd service first seen starting — unit: {}",
+            event.meta.comm, event.meta.pid, event.path,
+        ),
+    })
+}
+
+/// T1543.001/.004, T1547.015 — Create or Modify System Process: Launch
+/// Agent/Daemon, and Boot or Logon Autostart: Login Items. macOS Background
+/// Task Management just registered a launch item (`EndpointSecurity`'s
+/// `BTM_LAUNCH_ITEM_ADD`, `sensor-macos`, issue #32) — the macOS sibling of
+/// `check_service_install_persistence`'s Windows 7045. Flows through
+/// `FileOpenEvent` with `FLAG_PERSISTENCE_BTM_ARTIFACT` (distinct bit, so this
+/// never cross-fires with the other persistence techniques off a single
+/// event).
+///
+/// Like the Windows signal (and unlike the Linux systemd approximation), this
+/// is a registration-time fact from the OS: BTM emits it when the item is
+/// added, whatever the path taken (plist drop, `SMAppService`, MDM). The flag
+/// **is** the signal — no path heuristic here; a raw plist write into a
+/// launchd directory is the separate, complementary
+/// [`check_persistence_write`] signal (see the flag's doc in `schema` for why
+/// the two are not duplicates).
+///
+/// Alert content carries the persistence payload (`event.path` — the
+/// executable resolved from the launchd plist when BTM provides it, else the
+/// item URL) and the instigating process (`event.meta.comm`), so an analyst
+/// can jump straight to triage via `sfltool dumpbtm` / removal in System
+/// Settings → Login Items.
+#[must_use]
+pub(crate) fn check_btm_launch_item_persistence(event: &FileOpenEvent) -> Option<Alert> {
+    if event.flags & FLAG_PERSISTENCE_BTM_ARTIFACT == 0 {
+        return None;
+    }
+    Some(Alert {
+        technique: "T1543.001/T1547.015",
+        message: format!(
+            "instigator={} pid={}: macOS launch item registered — payload: {}",
             event.meta.comm, event.meta.pid, event.path,
         ),
     })
@@ -269,5 +351,197 @@ pub fn evaluate_file_open(event: &FileOpenEvent) -> Vec<Alert> {
         .chain(check_scheduled_task_persistence(event))
         .chain(check_service_install_persistence(event))
         .chain(check_account_creation_persistence(event))
+        .chain(check_systemd_service_persistence(event))
+        .chain(check_btm_launch_item_persistence(event))
         .collect()
+}
+
+/// System-binary names an attacker impersonates, with the directory prefixes
+/// the real binary lives under. Unix side (Linux + macOS — both checked, a
+/// path matching either platform's legitimate home is fine; the *mismatch*
+/// is the signal, not the platform).
+const MASQUERADE_UNIX: &[(&str, &[&str])] = &[
+    ("bash", &["/bin/", "/usr/bin/", "/usr/local/bin/"]),
+    ("sh", &["/bin/", "/usr/bin/"]),
+    ("zsh", &["/bin/", "/usr/bin/"]),
+    (
+        "sshd",
+        &[
+            "/usr/sbin/",
+            "/usr/libexec/",
+            "/usr/lib/ssh/",
+            "/usr/lib/openssh/",
+        ],
+    ),
+    ("sudo", &["/usr/bin/", "/bin/"]),
+    ("systemd", &["/usr/lib/systemd/", "/lib/systemd/"]),
+    ("launchd", &["/sbin/"]),
+    ("cron", &["/usr/sbin/", "/usr/bin/"]),
+    ("login", &["/usr/bin/", "/bin/"]),
+];
+
+/// Windows side — compared case-insensitively (NTFS is), against lowercase
+/// prefixes.
+const MASQUERADE_WINDOWS: &[(&str, &[&str])] = &[
+    (
+        "svchost.exe",
+        &["c:\\windows\\system32\\", "c:\\windows\\syswow64\\"],
+    ),
+    ("lsass.exe", &["c:\\windows\\system32\\"]),
+    ("services.exe", &["c:\\windows\\system32\\"]),
+    ("csrss.exe", &["c:\\windows\\system32\\"]),
+    ("winlogon.exe", &["c:\\windows\\system32\\"]),
+    ("smss.exe", &["c:\\windows\\system32\\"]),
+    (
+        "explorer.exe",
+        &["c:\\windows\\", "c:\\windows\\syswow64\\"],
+    ),
+    (
+        "powershell.exe",
+        &[
+            "c:\\windows\\system32\\windowspowershell\\",
+            "c:\\windows\\syswow64\\windowspowershell\\",
+        ],
+    ),
+    (
+        "rundll32.exe",
+        &["c:\\windows\\system32\\", "c:\\windows\\syswow64\\"],
+    ),
+];
+
+/// T1036.005 — Masquerading: Match Legitimate Name or Location. A binary
+/// *named* like a core system process executing from outside that binary's
+/// legitimate directories (`svchost.exe` in a temp dir, `bash` in
+/// `/tmp`). The name lists are deliberately short and high-value: every
+/// entry is a binary attackers actually impersonate, and the allowed-prefix
+/// sets are the platform's real install locations — no heuristics, so the
+/// only false-positive surface is a user legitimately naming their own
+/// binary `lsass.exe`, which is itself worth an alert.
+///
+/// Relative or truncated paths (the Linux `dfd` limitation
+/// [`check_persistence_write`] documents) are skipped, not guessed: a
+/// masquerade verdict needs the real absolute location.
+#[must_use]
+pub(crate) fn check_masquerading(event: &ExecEvent) -> Option<Alert> {
+    let path = &event.image_path;
+    let name = path.rsplit(['/', '\\']).next().unwrap_or("");
+    if name.is_empty() {
+        return None;
+    }
+
+    let (matched, allowed): (&str, &[&str]) = if path.starts_with('/') {
+        let entry = MASQUERADE_UNIX.iter().find(|(n, _)| *n == name)?;
+        (entry.0, entry.1)
+    } else {
+        // Windows paths only — anything else (relative, dfd-truncated) is
+        // skipped per the doc above.
+        let lower_name = name.to_ascii_lowercase();
+        let drive_absolute = path.as_bytes().get(1) == Some(&b':');
+        if !drive_absolute {
+            return None;
+        }
+        let entry = MASQUERADE_WINDOWS.iter().find(|(n, _)| *n == lower_name)?;
+        (entry.0, entry.1)
+    };
+
+    let lower_path = path.to_ascii_lowercase();
+    let legitimate = allowed.iter().any(|prefix| lower_path.starts_with(prefix));
+    if legitimate {
+        return None;
+    }
+    Some(Alert {
+        technique: "T1036.005",
+        message: format!(
+            "pid={} comm={}: system-binary name `{matched}` executing from outside its \
+             legitimate location: {path}",
+            event.meta.pid, event.meta.comm,
+        ),
+    })
+}
+
+/// T1490 — Inhibit System Recovery. The commands that destroy a host's
+/// ability to roll back before encryption: shadow-copy deletion, backup
+/// catalog wipes, recovery-boot disabling, and Time Machine local-snapshot
+/// destruction. Deterministic multi-token matches on the command line — each
+/// pattern requires every listed token, so `vssadmin list shadows` never
+/// fires.
+#[must_use]
+pub(crate) fn check_recovery_inhibit(event: &ExecEvent) -> Option<Alert> {
+    const PATTERNS: &[(&str, &[&str])] = &[
+        ("shadow-copy deletion", &["vssadmin", "delete", "shadows"]),
+        ("shadow-copy deletion", &["wmic", "shadowcopy", "delete"]),
+        ("backup catalog wipe", &["wbadmin", "delete", "catalog"]),
+        (
+            "recovery boot disabled",
+            &["bcdedit", "recoveryenabled", "no"],
+        ),
+        (
+            "local snapshot destruction",
+            &["tmutil", "deletelocalsnapshots"],
+        ),
+    ];
+    let cmdline = event.cmdline.to_ascii_lowercase();
+    let (label, _) = PATTERNS
+        .iter()
+        .find(|(_, tokens)| tokens.iter().all(|t| cmdline.contains(t)))?;
+    Some(Alert {
+        technique: "T1490",
+        message: format!(
+            "pid={} comm={}: {label} — the pre-encryption tell: {}",
+            event.meta.pid, event.meta.comm, event.cmdline,
+        ),
+    })
+}
+
+/// T1070.002 — Indicator Removal: Clear Logs (the exec-side half; the
+/// file-deletion half is [`check_log_file_delete`]). Platform log-wipe
+/// commands: Windows event-log clearing, the macOS unified-log erase, and
+/// journald vacuuming to nothing.
+#[must_use]
+pub(crate) fn check_log_clear_exec(event: &ExecEvent) -> Option<Alert> {
+    const PATTERNS: &[&[&str]] = &[
+        &["wevtutil", "cl"],
+        &["wevtutil", "clear-log"],
+        &["clear-eventlog"],
+        &["log", "erase"],
+        &["journalctl", "--vacuum"],
+    ];
+    let cmdline = event.cmdline.to_ascii_lowercase();
+    PATTERNS
+        .iter()
+        .find(|tokens| tokens.iter().all(|t| cmdline.contains(t)))?;
+    Some(Alert {
+        technique: "T1070.002",
+        message: format!(
+            "pid={} comm={}: log-clearing command: {}",
+            event.meta.pid, event.meta.comm, event.cmdline,
+        ),
+    })
+}
+
+/// Log locations whose deletion is the anti-forensics signal
+/// ([`check_log_file_delete`]). Substring/prefix matches, same tolerance as
+/// [`check_persistence_write`]'s patterns.
+const LOG_PATH_PATTERNS: &[&str] = &["/var/log/", "/private/var/log/", "/log/journal/", ".evtx"];
+
+/// T1070.002 — the file-deletion half: a log file removed outright. Consumes
+/// [`schema::FileDeleteEvent`]s (Linux unlink tracing, macOS ES `UNLINK`;
+/// Windows deletions arrive with the minifilter, #136).
+#[must_use]
+pub(crate) fn check_log_file_delete(event: &schema::FileDeleteEvent) -> Option<Alert> {
+    let path = &event.path;
+    let matched = LOG_PATH_PATTERNS.iter().find(|p| path.contains(*p))?;
+    Some(Alert {
+        technique: "T1070.002",
+        message: format!(
+            "pid={} comm={}: log file deleted ({matched}): {path}",
+            event.meta.pid, event.meta.comm,
+        ),
+    })
+}
+
+/// Evaluates all stateless rules applicable to a `FileDeleteEvent`.
+#[must_use]
+pub fn evaluate_file_delete(event: &schema::FileDeleteEvent) -> Vec<Alert> {
+    check_log_file_delete(event).into_iter().collect()
 }

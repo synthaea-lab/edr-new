@@ -10,9 +10,7 @@
 //! Linux only for now. Windows service-ACL hardening and macOS's Endpoint Security
 //! system-extension path are tracked in the issue but not implemented here.
 
-use std::fs::File;
-use std::io::Read as _;
-use std::path::Path;
+use std::{fs::File, io::Read as _, path::Path};
 
 /// Hashes a file's contents with SHA-256. Same buffered-read shape as
 /// `enrich::hash_file` (`sha2` 0.11 dropped `impl Write for Sha256`, so
@@ -43,7 +41,7 @@ pub(crate) fn sha256_file(path: &Path) -> std::io::Result<[u8; 32]> {
 ///
 /// # Errors
 /// Returns an error if `dir`'s metadata cannot be read, or if it is world-writable.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn refuse_world_writable_dir(dir: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     let mode = std::fs::metadata(dir)
@@ -65,10 +63,24 @@ pub(crate) fn refuse_world_writable_dir(dir: &Path) -> anyhow::Result<()> {
 ///
 /// # Errors
 /// Propagates any I/O error reading or setting `path`'s permissions.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 pub(crate) fn harden_permissions(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt as _;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+/// Sets `path`'s owner and group to root (uid/gid 0) — mode bits alone
+/// (`harden_permissions`) still leave a non-root-owned install artifact one
+/// `chmod` away from being writable by its own (non-root) owner again.
+/// `install`/`uninstall` already require root to write these paths at all
+/// (`/etc/systemd/system`, the resolved binary paths), so this is normalizing
+/// ownership on a path this process could already write, not an escalation.
+///
+/// # Errors
+/// Propagates any I/O error setting `path`'s owner.
+#[cfg(unix)]
+pub(crate) fn harden_ownership(path: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::chown(path, Some(0), Some(0))
 }
 
 /// A binary's SHA-256, pinned at one point in time (watchdog startup) so every
@@ -105,8 +117,9 @@ impl BinaryPin {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write as _;
+
+    use super::*;
 
     /// A path under the OS temp dir unique to this test process+call, so
     /// concurrent test runs never collide on the same file.
@@ -154,7 +167,7 @@ mod tests {
         assert!(!pin.verify());
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn refuse_world_writable_dir_rejects_a_world_writable_directory() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -165,7 +178,7 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn refuse_world_writable_dir_accepts_a_normal_directory() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -176,7 +189,7 @@ mod tests {
         std::fs::remove_dir(&dir).ok();
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     #[test]
     fn harden_permissions_clears_the_world_write_bit() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -186,6 +199,24 @@ mod tests {
         harden_permissions(&path, 0o644).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o644);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn harden_ownership_sets_root_when_running_as_root() {
+        // SAFETY: geteuid takes no arguments and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            eprintln!("skipping: chown(2) to root requires root — not running as root here");
+            return;
+        }
+        use std::os::unix::fs::MetadataExt as _;
+        let path = temp_path("ownership");
+        std::fs::write(&path, b"x").unwrap();
+        harden_ownership(&path).unwrap();
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.uid(), 0);
+        assert_eq!(meta.gid(), 0);
         std::fs::remove_file(&path).ok();
     }
 }

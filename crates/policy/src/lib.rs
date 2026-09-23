@@ -4,6 +4,44 @@
 //! permitted, thresholds, per-host overrides. Policies are versioned and signed;
 //! distributed by the control plane, enforced by the agent — this crate holds the
 //! shared types and evaluation logic so both sides agree by construction.
+//!
+//! ## Two coexisting shapes (v1)
+//!
+//! - **Pre-ADR-0010 pure functions and flat structs** — the masquerade
+//!   helpers ([`is_trusted_system_path`], [`name_exclusion_applies`],
+//!   [`expected_parents`], [`parent_exclusion_applies`]) and the two flat
+//!   policy structs ([`EventLogPolicy`], [`ResponsePolicy`]) shipped before
+//!   there was a shared policy document. They stay: masquerade helpers are
+//!   compile-time truth (not distributed configuration), and the two flat
+//!   structs are the concrete state the agent's binaries consume today, kept
+//!   as-is per ADR-0010 §Consequences as a stepping stone.
+//! - **Post-ADR-0010 signed policy document** — [`Policy`],
+//!   [`PolicyMetadata`], [`PolicyPayload`] and the sections in [`document`],
+//!   with canonical JSON via [`to_canonical_bytes`], signature verification
+//!   via [`verify`], and layered override merge via [`apply_overrides`].
+//!   This is the on-the-wire format the (future) control plane and the
+//!   agent will exchange.
+//!
+//! Wiring `PolicyPayload.sensors.windows_eventlog` into the sensor's own
+//! `EventLogConfig` (replacing the `EventLogPolicy` glue in
+//! `agent/src/commands/windows.rs`) is a follow-up per ADR-0010
+//! §Consequences.
+
+pub mod canonical;
+pub mod document;
+pub mod error;
+pub mod merge;
+pub mod signature;
+
+pub use canonical::to_canonical_bytes;
+pub use document::{
+    ComplianceMode, ModelsSection, Policy, PolicyMetadata, PolicyPayload, RedactionPolicy,
+    ResponseSection, RulesSection, SCHEMA_VERSION, SensorSection, ThresholdsSection,
+    WindowsEventlogSensorPolicy,
+};
+pub use error::PolicyError;
+pub use merge::{SAFETY_CRITICAL_PATHS, apply_overrides};
+pub use signature::{PUBLIC_KEY_LEN_BYTES, SIGNATURE_LEN_BYTES, sign, verify};
 
 /// Directories only privileged installers write to — the gate for name-keyed
 /// detection exclusions. An exclusion list of process NAMES (`svchost.exe`,
@@ -15,7 +53,7 @@
 /// and expected-parent verification (tracked as a dedicated issue). Writable
 /// subtrees of C:\Windows (Temp, Tasks, tracing) are explicitly untrusted.
 #[must_use]
-pub fn is_trusted_system_path(path: &str) -> bool {
+pub(crate) fn is_trusted_system_path(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     // Windows drive-letter grammar.
     if lower.as_bytes().get(1) == Some(&b':') {
@@ -64,7 +102,7 @@ pub fn name_exclusion_applies(image_path: Option<&str>) -> bool {
 /// Note: the `System` pseudo-process (pid=4) is the implicit parent of `smss.exe`
 /// at boot — represented here as `"system"`.
 #[must_use]
-pub fn expected_parents(comm: &str) -> &'static [&'static str] {
+pub(crate) fn expected_parents(comm: &str) -> &'static [&'static str] {
     let name = comm.rsplit('\\').next().unwrap_or(comm);
     match name.to_ascii_lowercase().as_str() {
         // Session Manager → spawned by System at boot only.
@@ -166,6 +204,37 @@ impl Default for EventLogPolicy {
             account_creations_enabled: true,
             logon_events_enabled: true,
         }
+    }
+}
+
+/// Enablement for `response`'s automated, verdict-driven actions (issue #25).
+/// `response` is base-tier-only (`tools/check-deps.py`: leaf crates depend on
+/// `schema`+`policy` alone), so it cannot read a live config/loader either — same
+/// posture as [`EventLogPolicy`]: the `agent` binary owns/constructs this at
+/// startup and passes it into `response::kill_process`/`quarantine_file` on every
+/// call, rather than the response crate reaching for global state.
+///
+/// Defaults to **both disabled** — "policy off = observe-only" is issue #25's own
+/// acceptance criterion, and an EDR that starts acting on the endpoint the moment
+/// it's compiled in, before an operator opts in, is the wrong default for a kill
+/// switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResponsePolicy {
+    /// Automated process termination on a high-confidence correlated verdict.
+    pub kill_enabled: bool,
+    /// Automated quarantine of a payload a scan confirms malicious.
+    pub quarantine_enabled: bool,
+}
+
+#[cfg(test)]
+mod response_policy_tests {
+    use super::ResponsePolicy;
+
+    #[test]
+    fn default_is_observe_only() {
+        let policy = ResponsePolicy::default();
+        assert!(!policy.kill_enabled);
+        assert!(!policy.quarantine_enabled);
     }
 }
 

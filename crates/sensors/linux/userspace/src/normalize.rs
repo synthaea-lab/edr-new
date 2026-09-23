@@ -5,18 +5,45 @@
 //! clock the probes stamp events with (`bpf_ktime_get_ns`); the sensor computes it
 //! once at startup and passes it here so schema timestamps are epoch nanoseconds.
 
-use schema::{ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileOpenEvent, User};
+use schema::{
+    ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent,
+    FileDeleteEvent, FileOpenEvent, FileRenameEvent, FileWriteEvent, SocketAcceptEvent,
+    SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
+};
 use sensor_linux_wire as wire;
 
 /// Tripwire: bumping the wire ABI must come here to revisit the mappings below.
-const _: () = assert!(wire::WIRE_VERSION == 4);
-
-/// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a
-/// sensor property (reported by conformance), not a schema limit.
-fn comm_str(comm: &[u8; wire::TASK_COMM_LEN]) -> String {
-    let end = comm.iter().position(|&b| b == 0).unwrap_or(comm.len());
-    String::from_utf8_lossy(&comm[..end]).into_owned()
-}
+///
+/// v5 (#90) only added `TlsCaptureEvent`/`ReadlineInputEvent` — neither is imported
+/// here, and none of the structs this module maps (`EventMeta`, `ExecEvent`,
+/// `ConnectEvent`, `FileOpenEvent`, `ContainerContext`) changed shape, so the
+/// mappings below still hold; bumped straight to 5 after that audit.
+///
+/// v6 (#262) added `FileWriteEvent`, `FileDeleteEvent`, `FileRenameEvent` — new
+/// mapping functions `file_write`/`file_delete`/`file_rename` added below, same
+/// `meta()` helper reused; no existing mapping changed shape.
+///
+/// v7 (#263) added `SocketBindEvent` — new `socket_bind` mapping function below,
+/// same address-family logic as `connect`; no existing mapping changed shape.
+///
+/// v8 (#262 Phase 2) added `FileChmodEvent`/`FileChownEvent` — new mapping functions
+/// `file_chmod`/`file_chown` added below, same path-decoding shape as `file_delete`;
+/// no existing mapping changed shape.
+///
+/// v9 (#263 Phase 2) added `UdpSendEvent` — new `udp_send` mapping function below,
+/// same address-family logic as `connect`/`socket_bind`, reusing the schema type
+/// already shared with the Windows ETW UDP producer; no existing mapping changed
+/// shape.
+///
+/// v10 (#263 Phase 2) added `SocketListenEvent` — new `socket_listen` mapping
+/// function below, converting the wire struct's `addr_resolved` bool + zeroed
+/// fields into `Option<IpAddr>`/`Option<u16>` on the schema side; no existing
+/// mapping changed shape.
+///
+/// v11 (#263 Phase 2) added `SocketAcceptEvent` — new `socket_accept` mapping
+/// function below, same address-family logic as `connect`/`socket_bind`; no
+/// existing mapping changed shape.
+const _: () = assert!(wire::WIRE_VERSION == 11);
 
 /// Same, but an empty buffer means "not captured" rather than the empty string —
 /// the probe leaves `pcomm` zeroed when the fork-lineage map had no entry.
@@ -43,7 +70,7 @@ fn meta(
             gid: meta.gid,
         },
         timestamp_ns: meta.timestamp_ns.saturating_add(boot_epoch_offset_ns),
-        comm: comm_str(&meta.comm),
+        comm: wire::comm_str(&meta.comm),
         container,
     }
 }
@@ -99,6 +126,87 @@ pub fn file_open(
 }
 
 #[must_use]
+pub fn file_write(
+    event: &wire::FileWriteEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::FileWrite(FileWriteEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        fd: event.fd,
+        bytes_requested: event.bytes_requested,
+    })
+}
+
+#[must_use]
+pub fn file_delete(
+    event: &wire::FileDeleteEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let raw = &event.path[..(event.path_len as usize).min(wire::MAX_PATH_LEN)];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    Event::FileDelete(FileDeleteEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        path: String::from_utf8_lossy(&raw[..end]).into_owned(),
+    })
+}
+
+#[must_use]
+pub fn file_rename(
+    event: &wire::FileRenameEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let old_raw = &event.old_path[..(event.old_path_len as usize).min(wire::MAX_PATH_LEN)];
+    let old_end = old_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(old_raw.len());
+    let new_raw = &event.new_path[..(event.new_path_len as usize).min(wire::MAX_PATH_LEN)];
+    let new_end = new_raw
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(new_raw.len());
+    Event::FileRename(FileRenameEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        old_path: String::from_utf8_lossy(&old_raw[..old_end]).into_owned(),
+        new_path: String::from_utf8_lossy(&new_raw[..new_end]).into_owned(),
+    })
+}
+
+#[must_use]
+pub fn file_chmod(
+    event: &wire::FileChmodEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let raw = &event.path[..(event.path_len as usize).min(wire::MAX_PATH_LEN)];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    Event::FileChmod(FileChmodEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        path: String::from_utf8_lossy(&raw[..end]).into_owned(),
+        mode: event.mode,
+    })
+}
+
+#[must_use]
+pub fn file_chown(
+    event: &wire::FileChownEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let raw = &event.path[..(event.path_len as usize).min(wire::MAX_PATH_LEN)];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    Event::FileChown(FileChownEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        path: String::from_utf8_lossy(&raw[..end]).into_owned(),
+        uid: event.uid,
+        gid: event.gid,
+    })
+}
+
+#[must_use]
 pub fn connect(
     event: &wire::ConnectEvent,
     boot_epoch_offset_ns: u64,
@@ -113,6 +221,87 @@ pub fn connect(
         meta: meta(&event.meta, boot_epoch_offset_ns, container),
         daddr,
         dport: event.dport,
+    })
+}
+
+#[must_use]
+pub fn socket_bind(
+    event: &wire::SocketBindEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let laddr = if event.is_ipv6 {
+        std::net::IpAddr::V6(event.laddr_v6.into())
+    } else {
+        std::net::IpAddr::V4(event.laddr_v4.into())
+    };
+    Event::SocketBind(SocketBindEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        local_addr: laddr,
+        local_port: event.lport,
+    })
+}
+
+#[must_use]
+pub fn udp_send(
+    event: &wire::UdpSendEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let daddr = if event.is_ipv6 {
+        std::net::IpAddr::V6(event.daddr_v6.into())
+    } else {
+        std::net::IpAddr::V4(event.daddr_v4.into())
+    };
+    Event::UdpSend(UdpSendEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        daddr,
+        dport: event.dport,
+        size: event.size,
+    })
+}
+
+#[must_use]
+pub fn socket_listen(
+    event: &wire::SocketListenEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let (local_addr, local_port) = if event.addr_resolved {
+        let addr = if event.is_ipv6 {
+            std::net::IpAddr::V6(event.laddr_v6.into())
+        } else {
+            std::net::IpAddr::V4(event.laddr_v4.into())
+        };
+        (Some(addr), Some(event.lport))
+    } else {
+        (None, None)
+    };
+    Event::SocketListen(SocketListenEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        local_addr,
+        local_port,
+        backlog: event.backlog,
+    })
+}
+
+#[must_use]
+pub fn socket_accept(
+    event: &wire::SocketAcceptEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let peer_addr = if event.is_ipv6 {
+        std::net::IpAddr::V6(event.peer_addr_v6.into())
+    } else {
+        std::net::IpAddr::V4(event.peer_addr_v4.into())
+    };
+    Event::SocketAccept(SocketAcceptEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        listen_fd: event.listen_fd,
+        accepted_fd: event.accepted_fd,
+        peer_addr,
+        peer_port: event.peer_port,
     })
 }
 
@@ -316,5 +505,220 @@ mod tests {
             panic!("wrong variant")
         };
         assert!(e.meta.comm.contains('\u{fffd}'), "{:?}", e.meta.comm);
+    }
+
+    #[test]
+    fn file_write_carries_fd_and_requested_bytes_not_a_path() {
+        let event = wire::FileWriteEvent {
+            meta: wire_meta(b"tar"),
+            fd: 4,
+            bytes_requested: 65_536,
+        };
+        let Event::FileWrite(e) = file_write(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.fd, 4);
+        assert_eq!(e.bytes_requested, 65_536);
+        assert_eq!(e.meta.comm, "tar");
+    }
+
+    #[test]
+    fn file_delete_trims_nul_padding() {
+        let mut path = [0u8; wire::MAX_PATH_LEN];
+        let raw = b"/var/log/auth.log\0";
+        path[..raw.len()].copy_from_slice(raw);
+        let event = wire::FileDeleteEvent {
+            meta: wire_meta(b"rm"),
+            path,
+            path_len: raw.len() as u16,
+        };
+        let Event::FileDelete(e) = file_delete(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.path, "/var/log/auth.log");
+    }
+
+    #[test]
+    fn file_rename_keeps_old_and_new_path_distinct() {
+        let mut old_path = [0u8; wire::MAX_PATH_LEN];
+        let old_raw = b"/home/user/invoice.pdf\0";
+        old_path[..old_raw.len()].copy_from_slice(old_raw);
+        let mut new_path = [0u8; wire::MAX_PATH_LEN];
+        let new_raw = b"/home/user/invoice.pdf.locked\0";
+        new_path[..new_raw.len()].copy_from_slice(new_raw);
+        let event = wire::FileRenameEvent {
+            meta: wire_meta(b"encryptor"),
+            old_path,
+            old_path_len: old_raw.len() as u16,
+            new_path,
+            new_path_len: new_raw.len() as u16,
+        };
+        let Event::FileRename(e) = file_rename(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.old_path, "/home/user/invoice.pdf");
+        assert_eq!(e.new_path, "/home/user/invoice.pdf.locked");
+    }
+
+    #[test]
+    fn file_chmod_carries_mode_and_trims_nul_padding() {
+        let mut path = [0u8; wire::MAX_PATH_LEN];
+        let raw = b"/tmp/backdoor\0";
+        path[..raw.len()].copy_from_slice(raw);
+        let event = wire::FileChmodEvent {
+            meta: wire_meta(b"chmod"),
+            path,
+            path_len: raw.len() as u16,
+            mode: 0o4755,
+        };
+        let Event::FileChmod(e) = file_chmod(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.path, "/tmp/backdoor");
+        assert_eq!(e.mode, 0o4755);
+    }
+
+    #[test]
+    fn file_chown_carries_uid_and_gid_distinctly() {
+        let mut path = [0u8; wire::MAX_PATH_LEN];
+        let raw = b"/tmp/backdoor\0";
+        path[..raw.len()].copy_from_slice(raw);
+        let event = wire::FileChownEvent {
+            meta: wire_meta(b"chown"),
+            path,
+            path_len: raw.len() as u16,
+            uid: 0,
+            gid: 1000,
+        };
+        let Event::FileChown(e) = file_chown(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.path, "/tmp/backdoor");
+        assert_eq!(e.uid, 0);
+        assert_eq!(e.gid, 1000);
+    }
+
+    #[test]
+    fn socket_bind_maps_both_families() {
+        let v4 = wire::SocketBindEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [0, 0, 0, 0],
+            laddr_v6: [0; 16],
+            lport: 4444,
+            is_ipv6: false,
+        };
+        let Event::SocketBind(e) = socket_bind(&v4, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr.to_string(), "0.0.0.0");
+        assert_eq!(e.local_port, 4444);
+
+        let mut l6 = [0u8; 16];
+        l6[15] = 0x01;
+        let v6 = wire::SocketBindEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [0; 4],
+            laddr_v6: l6,
+            lport: 8443,
+            is_ipv6: true,
+        };
+        let Event::SocketBind(e) = socket_bind(&v6, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr.to_string(), "::1");
+    }
+
+    #[test]
+    fn udp_send_carries_size_and_maps_both_families() {
+        let v4 = wire::UdpSendEvent {
+            meta: wire_meta(b"dig"),
+            daddr_v4: [8, 8, 8, 8],
+            daddr_v6: [0; 16],
+            dport: 53,
+            is_ipv6: false,
+            size: 42,
+        };
+        let Event::UdpSend(e) = udp_send(&v4, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.daddr.to_string(), "8.8.8.8");
+        assert_eq!(e.dport, 53);
+        assert_eq!(e.size, 42);
+
+        let mut d6 = [0u8; 16];
+        d6[15] = 0x01;
+        let v6 = wire::UdpSendEvent {
+            meta: wire_meta(b"dig"),
+            daddr_v4: [0; 4],
+            daddr_v6: d6,
+            dport: 53,
+            is_ipv6: true,
+            size: 512,
+        };
+        let Event::UdpSend(e) = udp_send(&v6, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.daddr.to_string(), "::1");
+        assert_eq!(e.size, 512);
+    }
+
+    #[test]
+    fn socket_listen_resolved_carries_correlated_address() {
+        let event = wire::SocketListenEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [0, 0, 0, 0],
+            laddr_v6: [0; 16],
+            lport: 4444,
+            is_ipv6: false,
+            addr_resolved: true,
+            backlog: 1,
+        };
+        let Event::SocketListen(e) = socket_listen(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr.unwrap().to_string(), "0.0.0.0");
+        assert_eq!(e.local_port, Some(4444));
+        assert_eq!(e.backlog, 1);
+    }
+
+    #[test]
+    fn socket_listen_unresolved_carries_no_address() {
+        // Probe attached after bind(), or the kernel implicit-bound at listen()
+        // time — this sensor never saw a matching bind() for this (pid, fd).
+        let event = wire::SocketListenEvent {
+            meta: wire_meta(b"nc"),
+            laddr_v4: [9, 9, 9, 9], // garbage: must be ignored when unresolved
+            laddr_v6: [0; 16],
+            lport: 9999,
+            is_ipv6: false,
+            addr_resolved: false,
+            backlog: 128,
+        };
+        let Event::SocketListen(e) = socket_listen(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.local_addr, None);
+        assert_eq!(e.local_port, None);
+        assert_eq!(e.backlog, 128);
+    }
+
+    #[test]
+    fn socket_accept_carries_peer_not_local_address() {
+        let event = wire::SocketAcceptEvent {
+            meta: wire_meta(b"sshd"),
+            listen_fd: 3,
+            accepted_fd: 7,
+            peer_addr_v4: [203, 0, 113, 42],
+            peer_addr_v6: [0; 16],
+            peer_port: 54321,
+            is_ipv6: false,
+        };
+        let Event::SocketAccept(e) = socket_accept(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.listen_fd, 3);
+        assert_eq!(e.accepted_fd, 7);
+        assert_eq!(e.peer_addr.to_string(), "203.0.113.42");
+        assert_eq!(e.peer_port, 54321);
     }
 }

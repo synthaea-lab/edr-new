@@ -30,6 +30,7 @@ members = [
     "crates/sensors/macos/unifiedlog",
     "crates/sensors/windows/etw",
     "crates/sensors/macos/endpoint-security",
+    "crates/sensors/macos/sockets",
     "crates/sensors/macos/network-extension",
     "crates/rules",
     "crates/sigma",
@@ -50,6 +51,11 @@ members = [
     "crates/device-control",
     "crates/inventory",
 ]
+# The fuzz crate is fully excluded (not even a non-default member): it needs
+# nightly + libFuzzer instrumentation and is run explicitly —
+#   cargo +nightly fuzz run audit_parse
+# from the repo root (see fuzz/Cargo.toml).
+exclude = ["fuzz"]
 # The eBPF probe crate is a member (aya-build resolves it by package id in the
 # workspace) but not a default member: it targets bpfel-unknown-none and only builds
 # via sensor-linux's build.rs with the eBPF toolchain present. Plain cargo commands
@@ -66,6 +72,7 @@ default-members = [
     "crates/sensors/linux/userspace",
     "crates/sensors/windows/etw",
     "crates/sensors/macos/endpoint-security",
+    "crates/sensors/macos/sockets",
     "crates/sensors/macos/network-extension",
     "crates/rules",
     "crates/sigma",
@@ -108,15 +115,44 @@ missing_errors_doc = "warn"
 missing_panics_doc = "warn"
 semicolon_if_nothing_returned = "warn"
 
+[workspace.lints.rustdoc]
+# The doc style here deliberately cross-references private modules and items
+# (`see [`wire`]`, error-enum links from public fns) — every crate is
+# unpublished (publish = false) and the rustdoc audience is workspace
+# developers, who can build with --document-private-items. The public-view
+# docs job (RUSTDOCFLAGS=-D warnings) would otherwise reject every such link.
+# broken_intra_doc_links stays enforced: a link to something that exists
+# nowhere is a typo, not a style choice.
+private_intra_doc_links = "allow"
+
 [workspace.dependencies]
 # Shared dependency versions are declared here as crates gain real code.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# TOML parser used by `crates/config` (ADR-0013: TOML for on-disk agent
+# config, strict types, no silent coercion). Also usable by any future
+# crate that reads a TOML-shaped input.
+toml = "0.8"
 thiserror = "2"
 tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Async runtime for the local IPC server (crates/ipc, issue #26). Features
+# picked minimal: multi-thread runtime for the server (many concurrent
+# clients), `net` for named-pipe/UDS listeners, `io-util` for line-based
+# framing, `sync` for shutdown signaling, `macros` for `#[tokio::main]` /
+# `#[tokio::test]`.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "macros"] }
+# Ed25519 signature verification for signed policy documents (ADR-0010) and
+# updater manifests (ADR-0015). `ring` chosen over `ed25519-dalek` because it
+# is already a transitive dep via `rustls`, avoiding a second signature
+# implementation in the workspace.
+ring = "0.17"
 # ONNX Runtime for on-device inference (ADR-0002). Pinned RC — ort 2.0 is the first
 # line to support the ai.onnx.ml tree ops our models use; used only by `crates/ml`.
-ort = "=2.0.0-rc.13"
+# Workspace config: default-features = false (no auto-download).
+# The ml crate's default "dynamic-onnx" feature re-enables download-binaries for dev builds.
+# Production builds: cargo build --no-default-features (static linking per ADR-0002).
+ort = { version = "=2.0.0-rc.13", default-features = false }
 
 [workspace.metadata.deb]
 # Shared .deb packaging configuration (issue #36)

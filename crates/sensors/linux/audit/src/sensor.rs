@@ -1,8 +1,10 @@
 //! `AuditSensor`: `schema::sensor::Sensor` implementation.
 
 use std::sync::Arc;
-use schema::sensor::{Sensor, SensorError, Capabilities, EventSink};
+
+use schema::sensor::{Capabilities, EventSink, Sensor, SensorError};
 use tokio::sync::Notify;
+
 use crate::{AuditSocket, classify, normalize, parse};
 
 pub struct AuditSensor {
@@ -12,19 +14,19 @@ pub struct AuditSensor {
 impl AuditSensor {
     #[must_use]
     pub fn new() -> Self {
-        Self { stop: Arc::new(Notify::new()) }
+        Self {
+            stop: Arc::new(Notify::new()),
+        }
     }
 
     async fn run_async(&mut self, sink: Box<dyn EventSink>) -> Result<(), SensorError> {
-        let socket = AuditSocket::open()
-            .map_err(|e| format!("audit socket open: {e}"))?;
+        let socket = AuditSocket::open().map_err(|e| format!("audit socket open: {e}"))?;
 
-        let mut async_socket = tokio::io::unix::AsyncFd::with_interest(
-            socket,
-            tokio::io::Interest::READABLE,
-        ).map_err(|e| format!("AsyncFd: {e}"))?;
+        let mut async_socket =
+            tokio::io::unix::AsyncFd::with_interest(socket, tokio::io::Interest::READABLE)
+                .map_err(|e| format!("AsyncFd: {e}"))?;
 
-        log::info!("sensor-linux-audit: listening for exec/connect");
+        tracing::info!("sensor-linux-audit: listening for exec/connect");
 
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
@@ -38,23 +40,51 @@ impl AuditSensor {
                     let mut guard = guard.map_err(|e| format!("poll: {e}"))?;
                     let socket = guard.get_inner_mut();
 
-                    let n = socket.recv(&mut buf).map_err(|e| format!("recv: {e}"))?;
+                    match socket.recv(&mut buf) {
+                        Ok(n) => {
+                            let record = parse::parse_audit_message(&buf[..n])
+                                .map_err(|e| format!("parse: {e}"))?;
 
-                    let record = parse::parse_audit_message(&buf[..n])
-                        .map_err(|e| format!("parse: {e}"))?;
+                            if let Some(event) = classify::classify(&record) {
+                                let timestamp_ns = audit_ts_to_epoch_ns(
+                                    record.timestamp_sec,
+                                    record.timestamp_ms,
+                                );
 
-                    if let Some(event) = classify::classify(&record) {
-                        let timestamp_ns = audit_ts_to_epoch_ns(
-                            record.timestamp_sec,
-                            record.timestamp_ms,
-                        );
+                                let schema_event = match &event {
+                                    crate::AuditEvent::Exec { .. } => Some(normalize::exec_event(&event, timestamp_ns)),
+                                    crate::AuditEvent::Connect { .. } => Some(normalize::connect_event(&event, timestamp_ns)),
+                                    // No schema::Event variant yet — same posture as the
+                                    // journal sensor's unit-lifecycle events (issue #93):
+                                    // a Linux-only "policy denial" shape would preempt a
+                                    // cross-platform decision (Windows AppLocker/WDAC,
+                                    // macOS TCC/Gatekeeper denials are the same concept)
+                                    // that hasn't been made yet. Traced instead of
+                                    // dropped silently, unlike before this classifier
+                                    // arm existed at all.
+                                    crate::AuditEvent::PolicyDenial { comm, scontext, tcontext, tclass, permissive } => {
+                                        tracing::info!(
+                                            comm = ?comm, scontext = ?scontext, tcontext = ?tcontext,
+                                            tclass = ?tclass, permissive = *permissive,
+                                            "sensor-linux-audit: SELinux policy denial (not yet wired to schema::Event)"
+                                        );
+                                        None
+                                    }
+                                };
 
-                        let schema_event = match event {
-                            crate::AuditEvent::Exec { .. } => normalize::exec_event(&event, timestamp_ns),
-                            crate::AuditEvent::Connect { .. } => normalize::connect_event(&event, timestamp_ns),
-                        };
-
-                        sink.on_event(schema_event);
+                                if let Some(schema_event) = schema_event {
+                                    sink.on_event(schema_event);
+                                }
+                            }
+                        }
+                        Err(crate::AuditError::Netlink(errno))
+                            if errno == libc::EAGAIN || errno == libc::EWOULDBLOCK =>
+                        {
+                            // Spurious wakeup - no data available. Clear ready and continue.
+                        }
+                        Err(e) => {
+                            return Err(format!("recv: {e}").into());
+                        }
                     }
 
                     guard.clear_ready();
@@ -62,7 +92,7 @@ impl AuditSensor {
             }
         }
 
-        log::info!("sensor-linux-audit: exiting");
+        tracing::info!("sensor-linux-audit: exiting");
         Ok(())
     }
 }
@@ -81,11 +111,11 @@ impl Sensor for AuditSensor {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             exec_events: true,
-            file_events: false,      // Phase 2: fanotify
+            file_events: false, // Phase 2: fanotify
             connect_events: true,
-            auth_events: false,      // journal sensor's domain
+            auth_events: false, // journal sensor's domain
             user_attribution: true,
-            parent_lineage: false,   // HONEST: auditd doesn't track ppid
+            parent_lineage: false, // HONEST: auditd doesn't track ppid
         }
     }
 
@@ -113,7 +143,7 @@ mod tests {
     #[test]
     fn timestamp_conversion() {
         let ns = audit_ts_to_epoch_ns(1234567890, 123);
-        assert_eq!(ns, 1234567890_123_000_000);
+        assert_eq!(ns, 1_234_567_890_123_000_000);
     }
 
     #[test]
@@ -123,8 +153,8 @@ mod tests {
         assert!(caps.exec_events);
         assert!(caps.connect_events);
         assert!(caps.user_attribution);
-        assert!(!caps.parent_lineage);  // Honest: audit doesn't provide ppid
-        assert!(!caps.file_events);     // Phase 2
-        assert!(!caps.auth_events);     // journal owns this
+        assert!(!caps.parent_lineage); // Honest: audit doesn't provide ppid
+        assert!(!caps.file_events); // Phase 2
+        assert!(!caps.auth_events); // journal owns this
     }
 }

@@ -6,7 +6,7 @@ the **endpoint** (the agent pipeline) and the **control plane** (the server) —
 stack of layers, plus a parallel ML track. Issue numbers are the source of truth for
 scope; this file only orders them.
 
-Last reviewed 2026-09-04.
+Last reviewed 2026-09-22.
 
 ## Product philosophy: collect first, everywhere — on every platform at once
 
@@ -56,7 +56,7 @@ CONTROL PLANE ──────────────────────
 | M1 | Linux walking skeleton | proof: one event end to end | ✅ done |
 | M2 | Collection · Linux | endpoint · sensor fabric (track A) | in progress |
 | M3 | Collection · Windows | endpoint · sensor fabric (track B) | ETW landed; expansion open |
-| M4 | Collection · macOS | endpoint · sensor fabric (track C) | not started |
+| M4 | Collection · macOS | endpoint · sensor fabric (track C) | sensors built (PRs #324/#327/#329/#330); entitled-lab validation open |
 | M5 | On-device detection | endpoint · enrich/store/engines/correlator | engines shipped; content open |
 | M6 | On-device response & resilience | endpoint · response/tamper/updater/mesh | primitives shipped; wiring open |
 | M7 | Agent edge & interfaces | endpoint · transport/ipc/ui/cli/policy/pkg | sinks shipped; rest open |
@@ -99,7 +99,15 @@ its own lab.
 
 - **Linux (M2):** eBPF sources #90 uprobes · #91 lsm (also the inline-block path #25 uses) · #92 netlink · #93 journal; audit fallback #34; container #80; JA4/SNI #86; device-control telemetry #84; inventory #87; collection quality #53 portable lineage · #111 probe filename; provisioning + musl/rolling-kernel labs #113/#123/#124.
 - **Windows (M3):** ETW #20 ✅ + P2–P8 expansion #21 · eventlog #94 · DotNET/SMB #97; the x86 lab #22; conformance matrix #35.
-- **macOS (M4):** EndpointSecurity #32 + widening #96; NetworkExtension #33; unified-log #95.
+- **macOS (M4):** all four issues implemented 2026-09-22 as a stacked PR chain
+  (#324 ← #327 ← #329 ← #330, merge bottom-up): EndpointSecurity #32 (C shim against
+  the SDK headers, exec/file/BTM) + catalog widening #96 (sessions, quarantine
+  provenance, mount, signal, XPC; schema v20); unified-log #95 (sudo/TCC/Gatekeeper,
+  schema v19 — live-validated end to end on a real Mac); NetworkExtension #33 (agent
+  seam + typed Swift extension scaffold, no schema change). Remaining: the Apple
+  entitlement grant (ES request submitted 2026-09-22; the NE content-filter/dns-proxy
+  request is a separate form, still to file) and the entitled-lab scenario passes —
+  see `packaging/macos/README.md` and `docs/sensors/macos.md`.
 
 ### M5 — On-device detection
 

@@ -101,6 +101,16 @@ not to hope.
 - Tests go through the public API; reaching into internals is a smell that the
   contract is missing something.
 - Float comparisons in tests use an explicit epsilon, never `==`.
+- Event literals in tests come from `schema::fixtures` (feature `test-fixtures`)
+  via struct-update syntax — the baselines are deliberately neutral (zeros, empty,
+  `Unknown`, TEST-NET-1 addresses) so a test asserting on a field it didn't set is
+  visibly asserting on nothing. A new schema field is then one edit, not twelve.
+  The golden suite spells every field on purpose and is the one exception.
+- Byte parsers carry a **never-panic robustness suite** (deterministic seeded
+  corpus, truncations, length-lying inputs — see
+  `crates/sensors/linux/audit/tests/robustness.rs` for the shape) and, for the
+  kernel-socket decoders, a coverage-guided fuzz target in `fuzz/` (its README
+  documents the crash → `tmin` → pinned-regression-test workflow).
 
 ## File and module layout
 
@@ -201,13 +211,17 @@ this project holds as rules:
 | `// SAFETY:` on every unsafe block | `undocumented_unsafe_blocks` = deny |
 | Docs: backticks, `# Errors`, `# Panics`, `#[must_use]` | `doc_markdown`, `missing_errors_doc`, `missing_panics_doc`, `must_use_candidate` |
 | Dependency direction | `tools/check-deps.py` (CI) |
+| The whole matrix, locally | `tools/gauntlet.sh` (the enforcement while CI is billing-blocked — issue #318) |
 | License/advisory hygiene | `cargo deny` (CI) |
 | Shipped content compiles and fires | content suites (`sigma`, `yara` tests, CI) |
 
 Cross-target note: local clippy only lints the code compiled for the host — a
 macOS-only check misses every `cfg(windows)`/`cfg(linux)` item (it caught a real
-Windows compile break, and doc-lint misses in Linux-only code). The full matrix
-runs locally:
+Windows compile break, and doc-lint misses in Linux-only code). **`tools/gauntlet.sh`
+runs the whole matrix below plus fmt/tests/deny/docs in one command** (and
+`tools/hooks/pre-push` gates pushes on its fast slice — opt in with
+`git config core.hooksPath tools/hooks`); the raw commands, for running a slice by
+hand:
 
 ```bash
 rustup target add x86_64-pc-windows-msvc x86_64-unknown-linux-gnu

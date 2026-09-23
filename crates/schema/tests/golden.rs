@@ -10,8 +10,12 @@ use std::net::IpAddr;
 
 use schema::{
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, Event,
-    EventMeta, ExecEvent, FileOpenEvent, ImageLoadEvent, ListenPortEvent, NetworkFlowEvent,
-    RegistrySetEvent, ScriptBlockEvent, SmbConnectEvent, UdpSendEvent, User, WmiActivityEvent,
+    EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
+    FileQuarantineEvent, FileRenameEvent, FileWriteEvent, GatekeeperVerdictEvent, ImageLoadEvent,
+    ListenPortEvent, MountEvent, NetworkFlowEvent, ReadlineInputEvent, RegistrySetEvent,
+    ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
+    SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
+    UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
@@ -572,6 +576,388 @@ fn auth_logon_failure_golden() {
 }
 
 #[test]
+fn tls_capture_golden() {
+    // v14 (#90): uprobes TLS plaintext tap. `data` is raw bytes, not a string —
+    // it serializes as a JSON number array, and the fixture pins that (captured
+    // plaintext may be non-UTF-8, so a string encoding would be lossy).
+    assert_golden(
+        &Event::TlsCapture(TlsCaptureEvent {
+            meta: EventMeta {
+                pid: 5150,
+                ppid: 5100,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_008_000_000_000,
+                comm: "curl".into(),
+                container: None,
+            },
+            direction: TlsDirection::Write,
+            lib_type: TlsLibraryType::OpenSsl,
+            data: b"GET /beacon HTTP/1.1\r\nHost: c2.example.test\r\n\r\n".to_vec(),
+        }),
+        "tls_capture",
+    );
+}
+
+#[test]
+fn readline_input_golden() {
+    // v14 (#90): shell readline capture — a builtin (`export`) that never execs,
+    // exactly the visibility gap the variant exists for.
+    assert_golden(
+        &Event::ReadlineInput(ReadlineInputEvent {
+            meta: EventMeta {
+                pid: 6001,
+                ppid: 6000,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_009_000_000_000,
+                comm: "bash".into(),
+                container: None,
+            },
+            shell_type: ShellType::Bash,
+            input: "export PATH=/tmp/.hidden:$PATH".into(),
+        }),
+        "readline_input",
+    );
+}
+
+#[test]
+fn file_write_golden() {
+    // v15 (#262): burst-write signal, no path — see FileWriteEvent's doc.
+    assert_golden(
+        &Event::FileWrite(FileWriteEvent {
+            meta: EventMeta {
+                pid: 7001,
+                ppid: 7000,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_010_000_000_000,
+                comm: "encryptor".into(),
+                container: None,
+            },
+            fd: 4,
+            bytes_requested: 4096,
+        }),
+        "file_write",
+    );
+}
+
+#[test]
+fn file_delete_golden() {
+    // v15 (#262): log-tampering shape — deleting an audit trail.
+    assert_golden(
+        &Event::FileDelete(FileDeleteEvent {
+            meta: EventMeta {
+                pid: 7002,
+                ppid: 7000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_011_000_000_000,
+                comm: "rm".into(),
+                container: None,
+            },
+            path: "/var/log/auth.log".into(),
+        }),
+        "file_delete",
+    );
+}
+
+#[test]
+fn file_rename_golden() {
+    // v15 (#262): the ransomware signal — new_path's suffix relative to old_path's.
+    assert_golden(
+        &Event::FileRename(FileRenameEvent {
+            meta: EventMeta {
+                pid: 7003,
+                ppid: 7000,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_012_000_000_000,
+                comm: "encryptor".into(),
+                container: None,
+            },
+            old_path: "/home/user/invoice.pdf".into(),
+            new_path: "/home/user/invoice.pdf.locked".into(),
+        }),
+        "file_rename",
+    );
+}
+
+#[test]
+fn socket_bind_golden() {
+    // v16 (#263): discrete real-time bind(2) trace — distinct from ListenPort's
+    // periodic-poll semantics, see SocketBindEvent's doc.
+    assert_golden(
+        &Event::SocketBind(SocketBindEvent {
+            meta: EventMeta {
+                pid: 8001,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_013_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            local_addr: "0.0.0.0".parse().unwrap(),
+            local_port: 4444,
+        }),
+        "socket_bind",
+    );
+}
+
+#[test]
+fn file_chmod_golden() {
+    // v17 (#262 Phase 2): chmod +s on a world-writable binary — T1222.002.
+    assert_golden(
+        &Event::FileChmod(FileChmodEvent {
+            meta: EventMeta {
+                pid: 9001,
+                ppid: 9000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_014_000_000_000,
+                comm: "chmod".into(),
+                container: None,
+            },
+            path: "/tmp/backdoor".into(),
+            mode: 0o4755,
+        }),
+        "file_chmod",
+    );
+}
+
+#[test]
+fn file_chown_golden() {
+    // v17 (#262 Phase 2): ownership handed to root — privilege-escalation shape.
+    assert_golden(
+        &Event::FileChown(FileChownEvent {
+            meta: EventMeta {
+                pid: 9002,
+                ppid: 9000,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                timestamp_ns: 1_756_900_015_000_000_000,
+                comm: "chown".into(),
+                container: None,
+            },
+            path: "/tmp/backdoor".into(),
+            uid: 0,
+            gid: 0,
+        }),
+        "file_chown",
+    );
+}
+
+#[test]
+fn socket_listen_golden() {
+    // v18 (#263 Phase 2): listen(2) with a correlated bind() address — the common
+    // case (backdoor bind-then-listen), addr_resolved: true on the wire side.
+    assert_golden(
+        &Event::SocketListen(SocketListenEvent {
+            meta: EventMeta {
+                pid: 8002,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_016_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            local_addr: Some("0.0.0.0".parse().unwrap()),
+            local_port: Some(4444),
+            backlog: 1,
+        }),
+        "socket_listen",
+    );
+}
+
+#[test]
+fn socket_listen_unresolved_golden() {
+    // v18 (#263 Phase 2): listen() with no correlated bind() — probe attached
+    // after bind(), or the kernel implicit-bound at listen() time.
+    assert_golden(
+        &Event::SocketListen(SocketListenEvent {
+            meta: EventMeta {
+                pid: 8003,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_017_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            local_addr: None,
+            local_port: None,
+            backlog: 128,
+        }),
+        "socket_listen_unresolved",
+    );
+}
+
+#[test]
+fn tcc_decision_golden() {
+    // v20 (#95): a TCC grant as joined from tccd's AUTHREQ_CTX + AUTHREQ_RESULT
+    // unified-log pair — screen capture granted to an unsigned payload.
+    assert_golden(
+        &Event::TccDecision(TccDecisionEvent {
+            meta: EventMeta {
+                pid: 427,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "tccd".into(),
+                container: None,
+            },
+            service: "kTCCServiceScreenCapture".into(),
+            allowed: true,
+            auth_value: 2,
+            auth_reason: Some(11),
+            client: Some("/Users/mal/.hidden/payload".into()),
+        }),
+        "tcc_decision",
+    );
+}
+
+#[test]
+fn gatekeeper_verdict_golden() {
+    // v20 (#95): a syspolicyd `GK evaluateScanResult` record. `result_code` is
+    // deliberately raw/uninterpreted — see the type's doc.
+    assert_golden(
+        &Event::GatekeeperVerdict(GatekeeperVerdictEvent {
+            meta: EventMeta {
+                pid: 672,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "syspolicyd".into(),
+                container: None,
+            },
+            target: "com.evil.dropper".into(),
+            team_id: Some("ABCDE12345".into()),
+            signing_id: Some("com.evil.dropper".into()),
+            result_code: 2,
+        }),
+        "gatekeeper_verdict",
+    );
+}
+
+#[test]
+fn file_quarantine_golden() {
+    // v21 (#96): the quarantine xattr landed on a download, with the origin
+    // URLs read back from kMDItemWhereFroms — the network→file link.
+    assert_golden(
+        &Event::FileQuarantine(FileQuarantineEvent {
+            meta: EventMeta {
+                pid: 812,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "Safari".into(),
+                container: None,
+            },
+            path: "/Users/mal/Downloads/invoice.app.zip".into(),
+            agent: Some("Safari".into()),
+            origin_url: Some("https://example.test/invoice.app.zip".into()),
+            referrer_url: Some("https://example.test/downloads".into()),
+        }),
+        "file_quarantine",
+    );
+}
+
+#[test]
+fn mount_golden() {
+    // v21 (#96): a read-only disk-image mount — the classic DMG delivery step.
+    assert_golden(
+        &Event::Mount(MountEvent {
+            meta: EventMeta {
+                pid: 941,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "diskimagesiod".into(),
+                container: None,
+            },
+            mount_point: "/Volumes/Installer".into(),
+            source: Some("/dev/disk4s1".into()),
+            fs_type: Some("hfs".into()),
+            readonly: true,
+            mounted: true,
+        }),
+        "mount",
+    );
+}
+
+#[test]
+fn signal_golden() {
+    // v21 (#96): SIGKILL aimed at an ES-client process — the tamper subset the
+    // sensor forwards; meta is the sender.
+    assert_golden(
+        &Event::Signal(SignalEvent {
+            meta: EventMeta {
+                pid: 6001,
+                ppid: 6000,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "bash".into(),
+                container: None,
+            },
+            signal: 9,
+            target_pid: 400,
+            target_image_path: Some("/usr/local/bin/synthaea-agent".into()),
+        }),
+        "signal",
+    );
+}
+
+#[test]
+fn xpc_connect_golden() {
+    // v21 (#96): a process connecting to tccd's XPC service by name.
+    assert_golden(
+        &Event::XpcConnect(XpcConnectEvent {
+            meta: EventMeta {
+                pid: 7001,
+                ppid: 1,
+                user: User::Unix { uid: 501, gid: 20 },
+                timestamp_ns: 1_756_900_000_123_456_789,
+                comm: "payload".into(),
+                container: None,
+            },
+            service_name: "com.apple.tccd".into(),
+            domain_type: 1,
+        }),
+        "xpc_connect",
+    );
+}
+
+#[test]
+fn socket_accept_golden() {
+    // v19 (#263 Phase 2): peer address of a newly accepted connection — an
+    // attacker's IP connecting to a listening backdoor.
+    assert_golden(
+        &Event::SocketAccept(SocketAcceptEvent {
+            meta: EventMeta {
+                pid: 8004,
+                ppid: 8000,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_018_000_000_000,
+                comm: "nc".into(),
+                container: None,
+            },
+            listen_fd: 3,
+            accepted_fd: 4,
+            peer_addr: "203.0.113.42".parse().unwrap(),
+            peer_port: 54321,
+        }),
+        "socket_accept",
+    );
+}
+
+#[test]
 fn unbounded_cmdline_survives() {
     // Audit F-4: multi-kilobyte encoded command lines must round-trip untouched.
     let long = format!("powershell.exe -EncodedCommand {}", "A".repeat(8 * 1024));
@@ -751,6 +1137,101 @@ fn meta_accessor_covers_all_variants() {
             bytes_received: None,
             packets_sent: None,
             packets_received: None,
+        }),
+        Event::TlsCapture(TlsCaptureEvent {
+            meta: meta.clone(),
+            direction: TlsDirection::Read,
+            lib_type: TlsLibraryType::GnuTls,
+            data: vec![],
+        }),
+        Event::ReadlineInput(ReadlineInputEvent {
+            meta: meta.clone(),
+            shell_type: ShellType::Zsh,
+            input: String::new(),
+        }),
+        Event::FileWrite(FileWriteEvent {
+            meta: meta.clone(),
+            fd: 3,
+            bytes_requested: 0,
+        }),
+        Event::FileDelete(FileDeleteEvent {
+            meta: meta.clone(),
+            path: String::new(),
+        }),
+        Event::FileRename(FileRenameEvent {
+            meta: meta.clone(),
+            old_path: String::new(),
+            new_path: String::new(),
+        }),
+        Event::SocketBind(SocketBindEvent {
+            meta: meta.clone(),
+            local_addr: "0.0.0.0".parse::<IpAddr>().unwrap(),
+            local_port: 0,
+        }),
+        Event::FileChmod(FileChmodEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            mode: 0,
+        }),
+        Event::FileChown(FileChownEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            uid: 0,
+            gid: 0,
+        }),
+        Event::SocketListen(SocketListenEvent {
+            meta: meta.clone(),
+            local_addr: None,
+            local_port: None,
+            backlog: 0,
+        }),
+        Event::TccDecision(TccDecisionEvent {
+            meta: meta.clone(),
+            service: String::new(),
+            allowed: false,
+            auth_value: 0,
+            auth_reason: None,
+            client: None,
+        }),
+        Event::GatekeeperVerdict(GatekeeperVerdictEvent {
+            meta: meta.clone(),
+            target: String::new(),
+            team_id: None,
+            signing_id: None,
+            result_code: 0,
+        }),
+        Event::FileQuarantine(FileQuarantineEvent {
+            meta: meta.clone(),
+            path: String::new(),
+            agent: None,
+            origin_url: None,
+            referrer_url: None,
+        }),
+        Event::Mount(MountEvent {
+            meta: meta.clone(),
+            mount_point: String::new(),
+            source: None,
+            fs_type: None,
+            readonly: false,
+            mounted: true,
+        }),
+        Event::Signal(SignalEvent {
+            meta: meta.clone(),
+            signal: 0,
+            target_pid: 0,
+            target_image_path: None,
+        }),
+        Event::XpcConnect(XpcConnectEvent {
+            meta: meta.clone(),
+            service_name: String::new(),
+            domain_type: 0,
+        }),
+        Event::SocketAccept(SocketAcceptEvent {
+            meta: meta.clone(),
+            listen_fd: 0,
+            accepted_fd: 0,
+            peer_addr: "0.0.0.0".parse::<IpAddr>().unwrap(),
+            peer_port: 0,
         }),
     ];
     for e in &events {

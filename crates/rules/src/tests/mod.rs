@@ -9,9 +9,10 @@ use schema::{
 
 use crate::{
     O_CREAT, O_WRONLY, RuleState, check_account_creation_persistence, check_base64_decode,
-    check_encoded_powershell, check_persistence_write, check_proc_root_escape,
-    check_scheduled_task_persistence, check_service_install_persistence,
-    exclusions::{BEACON_THRESHOLD, SELF_SPAWN_THRESHOLD},
+    check_btm_launch_item_persistence, check_encoded_powershell, check_persistence_write,
+    check_proc_root_escape, check_scheduled_task_persistence, check_service_install_persistence,
+    check_systemd_service_persistence,
+    exclusions::{AUTH_FAILURE_THRESHOLD, BEACON_THRESHOLD, SELF_SPAWN_THRESHOLD},
 };
 
 const O_RDONLY: u32 = 0;
@@ -24,22 +25,15 @@ fn meta() -> EventMeta {
             uid: 1000,
             gid: 1000,
         },
-        timestamp_ns: 0,
-        comm: String::new(),
-        container: None,
+        ..schema::fixtures::meta()
     }
 }
 
 fn exec_event(cmdline: &str) -> ExecEvent {
     ExecEvent {
         meta: meta(),
-        image_path: String::new(),
         cmdline: cmdline.to_string(),
-        argv: vec![],
-        parent_comm: None,
-        parent_image_path: None,
-        sha256: None,
-        signature: None,
+        ..schema::fixtures::exec()
     }
 }
 
@@ -126,6 +120,17 @@ fn file_open_event_account_created(account_name: &str, sid: &str) -> FileOpenEve
     event
 }
 
+/// A `FileOpenEvent` shaped like what `sensor-linux-journal`'s
+/// `persistence::UnitPersistenceTracker` pushes on a unit's first observed
+/// start: the `flags` field carries the `FLAG_PERSISTENCE_SYSTEMD_ARTIFACT`
+/// bit, and both `path` and `comm` are the unit name (no separate image-path
+/// field exists on this side, unlike the Windows 7045 shape).
+fn file_open_event_systemd_unit(unit_name: &str) -> FileOpenEvent {
+    let mut event = file_open_event(unit_name, schema::FLAG_PERSISTENCE_SYSTEMD_ARTIFACT);
+    event.meta.comm = unit_name.to_string();
+    event
+}
+
 fn connect_event_full(
     pid: u32,
     comm: &str,
@@ -162,10 +167,7 @@ fn network_flow_event_full(
         daddr: std::net::IpAddr::V4(daddr_v4.into()),
         dport,
         protocol: 6, // IPPROTO_TCP
-        bytes_sent: None,
-        bytes_received: None,
-        packets_sent: None,
-        packets_received: None,
+        ..schema::fixtures::network_flow()
     }
 }
 
@@ -187,6 +189,7 @@ fn listen_port_event_full(
     }
 }
 
+mod coverage;
 mod linux;
 mod persistence;
 mod windows;

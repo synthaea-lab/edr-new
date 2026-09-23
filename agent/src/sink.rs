@@ -4,13 +4,34 @@
 //! scorer plug in here as their crates are migrated (M2), each addition a new field
 //! and a few lines in `on_event`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
+use policy::ResponsePolicy;
 use schema::{Event, sensor::EventSink};
 use sinks::{AlertRecord, JsonlWriter};
 
 use crate::enrich_queue::EnrichQueue;
+
+/// Wires issue #25's automated response into the sink once `enable_response` sets it
+/// (Linux only for this pass — see `commands::linux::cmd_run`). Held behind
+/// `Arc<Mutex<Option<_>>>` rather than a constructor parameter because the YARA scan
+/// queue's callback closure is created inside `DetectionSink::new` itself, before a
+/// caller has a `&DetectionSink` to configure — the shared cell lets both `correlate`
+/// and that closure read whatever was set (or nothing, on a platform that never
+/// calls `enable_response`) without restructuring construction order.
+struct ResponseHooks {
+    policy: ResponsePolicy,
+    /// The actual OS-level kill call, injected by the caller: `response` is
+    /// base-tier-only and platform dispatch belongs to the binary (CLAUDE.md).
+    terminate: Box<dyn Fn(u32) -> std::io::Result<()> + Send + Sync>,
+    quarantine_dir: PathBuf,
+}
 
 /// Dispatches every event to the detection engines and the output sinks. `Mutex`
 /// around the mutable state (`RuleState`) rather than no synchronization: the
@@ -37,32 +58,70 @@ pub(crate) struct DetectionSink {
     /// "the process is scheduled" — to `watchdog::supervise::HeartbeatMonitor`.
     /// See `progress_handle`.
     progress: Arc<AtomicU64>,
+    /// Issue #25's automated response, `None` until (if ever) `enable_response` sets
+    /// it — see [`ResponseHooks`].
+    response: Arc<Mutex<Option<ResponseHooks>>>,
 }
 
 impl DetectionSink {
     /// `rule_state` arrives already seeded by the caller (from /proc or the
-    /// platform's process list — see `commands`).
+    /// platform's process list — see `commands`). `spool` is the transport
+    /// spool (`run --server`), `None` when the agent runs standalone.
     pub(crate) fn new(
         rule_state: rules::RuleState,
         alerts_path: &std::path::Path,
         events_path: &std::path::Path,
+        spool: Option<Arc<Mutex<store::EventSpool>>>,
     ) -> std::io::Result<Self> {
         let alert_log = Arc::new(JsonlWriter::open(alerts_path)?);
         // The raw event log is written by the enrichment worker, not the drain
-        // thread — shared behind an Arc so the worker owns a handle.
+        // thread — shared behind an Arc so the worker owns a handle. The spool
+        // append rides the same worker for the same #126 reason: it is file
+        // I/O that must never stall the capture thread.
         let events_log = Arc::new(JsonlWriter::open(events_path)?);
         let enrich_queue = EnrichQueue::start(enrich::Enricher::new(), move |event| {
             events_log.write(&event);
+            if let Some(spool) = &spool
+                && let Err(e) = spool.lock().unwrap().push(&event)
+            {
+                // Spool full is handled inside push (shed-oldest, counted);
+                // reaching here is a real I/O failure — degrade to local-only.
+                tracing::warn!(error = %e, "spool append failed — event stays local-only");
+            }
         });
+        let response: Arc<Mutex<Option<ResponseHooks>>> = Arc::new(Mutex::new(None));
         Ok(Self {
             rule_state: Mutex::new(rule_state),
             correlator: Mutex::new(correlator::CorrelationEngine::new()),
             sigma: load_sigma_rules(),
-            yara: start_yara(alert_log.clone()),
+            yara: start_yara(alert_log.clone(), response.clone()),
             alert_log,
             enrich_queue,
             progress: Arc::new(AtomicU64::new(0)),
+            response,
         })
+    }
+
+    /// Activates issue #25's automated response — process kill on a high-confidence
+    /// correlated (`BAYES`) verdict, quarantine on a confirmed YARA match. Not called
+    /// at all on a platform that doesn't wire it (Windows, for this pass), so
+    /// `response` stays `None` and every action reports
+    /// [`response::KillOutcome::ObserveOnly`]/[`response::QuarantineOutcome::ObserveOnly`]
+    /// regardless of `policy` — the same as if this were never called, which is
+    /// deliberate: not opting in and opting in with policy fully disabled must look
+    /// identical to an audit consumer.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn enable_response(
+        &self,
+        policy: ResponsePolicy,
+        terminate: impl Fn(u32) -> std::io::Result<()> + Send + Sync + 'static,
+        quarantine_dir: PathBuf,
+    ) {
+        *self.response.lock().unwrap() = Some(ResponseHooks {
+            policy,
+            terminate: Box::new(terminate),
+            quarantine_dir,
+        });
     }
 
     /// Returns a reference to the enrichment queue for health telemetry.
@@ -80,10 +139,46 @@ impl DetectionSink {
     }
 
     /// Cross-event correlation (co-occurrence rules + Bayesian belief).
+    ///
+    /// `BAYES` is today's only correlator output with a real number behind it (the
+    /// belief engine's `log_odds`, gated by its own threshold before it ever fires —
+    /// see `correlator::bayes`); the co-occurrence rules carry no confidence field.
+    /// Issue #131 (verdict fusion) will give this a principled score to key off
+    /// instead of a technique-name check.
     fn correlate(&self, event: &Event) {
-        for alert in self.correlator.lock().unwrap().on_event(event.clone()) {
+        let alerts = self.correlator.lock().unwrap().on_event(event.clone());
+        let is_high_confidence = alerts.iter().any(|alert| alert.technique == "BAYES");
+        for alert in &alerts {
             self.emit(alert.technique, &alert.message);
         }
+        if is_high_confidence {
+            self.maybe_kill(event.meta().pid);
+        }
+    }
+
+    /// Issue #25: policy-gates killing the process behind a high-confidence
+    /// correlated verdict. A no-op whenever `enable_response` was never called.
+    fn maybe_kill(&self, pid: u32) {
+        let guard = self.response.lock().unwrap();
+        let Some(hooks) = guard.as_ref() else {
+            return;
+        };
+        let outcome = response::kill_process(pid, &hooks.policy, |p| (hooks.terminate)(p));
+        drop(guard);
+        let message = match outcome {
+            response::KillOutcome::Killed { pid } => {
+                format!("killed pid {pid} on a high-confidence correlated verdict")
+            }
+            response::KillOutcome::ObserveOnly { pid } => {
+                format!(
+                    "pid {pid} would have been killed on a high-confidence correlated verdict (observe-only)"
+                )
+            }
+            response::KillOutcome::Failed { pid, error } => {
+                format!("failed to kill pid {pid} on a high-confidence correlated verdict: {error}")
+            }
+        };
+        self.emit("RESPONSE-KILL", &message);
     }
 
     /// Exec events: stateless rules, stateful rules, then Sigma.
@@ -143,6 +238,20 @@ impl DetectionSink {
         }
     }
 
+    /// `Auth` events: brute-force/spray burst detection (T1110, pack #377).
+    fn detect_auth(&self, event: &schema::AuthEvent) {
+        for alert in self.rule_state.lock().unwrap().on_auth(event) {
+            self.emit(alert.technique, &alert.message);
+        }
+    }
+
+    /// `FileDelete` events: log-tamper detection (T1070.002, pack #379).
+    fn detect_file_delete(&self, event: &schema::FileDeleteEvent) {
+        for alert in rules::evaluate_file_delete(event) {
+            self.emit(alert.technique, &alert.message);
+        }
+    }
+
     /// Writes one alert to the shared log and highlighted stderr. `pub(crate)`
     /// rather than private: `silence::spawn_monitor` (#71) emits a sensor-silence
     /// verdict through the exact same path as a rule/correlator/Sigma finding —
@@ -153,7 +262,7 @@ impl DetectionSink {
         // terminal noise.
         eprintln!("\x1b[1;31m[ALERT] {technique} — {message}\x1b[0m");
         self.alert_log.write(&AlertRecord {
-            timestamp_ns: crate::time::now_ns(),
+            timestamp_ns: schema::time::now_ns(),
             technique: technique.to_string(),
             message: message.to_string(),
         });
@@ -183,40 +292,99 @@ fn load_sigma_rules() -> Option<sigma::SigmaEngine> {
     let rules_dir = content_dir("rules/sigma")?;
     match sigma::SigmaEngine::load_dir(&rules_dir) {
         Ok(engine) => {
-            log::info!("sigma: {} rules loaded", engine.rule_count());
+            tracing::info!(rules = engine.rule_count(), "sigma: rules loaded");
             Some(engine)
         }
         Err(e) => {
-            log::error!("sigma: load error: {e}");
+            tracing::error!(error = %e, "sigma: load error");
             None
         }
     }
 }
 
 /// Loads rules/yara when present and starts the scan worker; matches are emitted as
-/// alerts by the worker thread through the shared alert log.
-fn start_yara(alert_log: Arc<JsonlWriter>) -> Option<yara::ScanQueue> {
+/// alerts by the worker thread through the shared alert log, and — issue #25 —
+/// trigger quarantine of the matched file through `response`, whenever
+/// `enable_response` set it.
+fn start_yara(
+    alert_log: Arc<JsonlWriter>,
+    response: Arc<Mutex<Option<ResponseHooks>>>,
+) -> Option<yara::ScanQueue> {
     let dir = content_dir("rules/yara")?;
     match yara::RuleSet::load_dir(&dir) {
         Ok(rules) => {
-            log::info!("yara: {} rules loaded", rules.rule_count());
+            tracing::info!(rules = rules.rule_count(), "yara: rules loaded");
             Some(yara::ScanQueue::start(rules, move |outcome| {
+                let matched = !outcome.matches.is_empty();
                 for rule in &outcome.matches {
                     let message = format!("yara rule {rule} matched {}", outcome.path.display());
                     eprintln!("\x1b[1;31m[ALERT] YARA — {message}\x1b[0m");
                     alert_log.write(&AlertRecord {
-                        timestamp_ns: crate::time::now_ns(),
+                        timestamp_ns: schema::time::now_ns(),
                         technique: "YARA".to_string(),
                         message,
                     });
                 }
+                if matched {
+                    quarantine_matched_payload(&response, &outcome.path, &alert_log);
+                }
             }))
         }
         Err(e) => {
-            log::error!("yara: load error: {e}");
+            tracing::error!(error = %e, "yara: load error");
             None
         }
     }
+}
+
+/// Issue #25: policy-gates quarantining a YARA-confirmed payload. A no-op whenever
+/// `enable_response` was never called — same posture as `DetectionSink::maybe_kill`.
+fn quarantine_matched_payload(
+    response: &Mutex<Option<ResponseHooks>>,
+    path: &std::path::Path,
+    alert_log: &JsonlWriter,
+) {
+    let guard = response.lock().unwrap();
+    let Some(hooks) = guard.as_ref() else {
+        return;
+    };
+    // A quarantined file is written under `quarantine_dir` — that write is itself a
+    // FileOpen the sensor sees, which would otherwise re-match and re-"quarantine"
+    // the file into itself, overwriting its own `.origin` sidecar with the wrong
+    // "original" path (real behavior observed on the lab VM). Once a payload is
+    // already there, leave it alone.
+    if path.starts_with(&hooks.quarantine_dir) {
+        return;
+    }
+    let outcome = response::quarantine_file(path, &hooks.quarantine_dir, &hooks.policy);
+    drop(guard);
+    let message = match outcome {
+        response::QuarantineOutcome::Quarantined {
+            original,
+            quarantined_at,
+            sha256_hex,
+        } => format!(
+            "quarantined {} ({sha256_hex}) to {} on a confirmed YARA match",
+            original.display(),
+            quarantined_at.display()
+        ),
+        response::QuarantineOutcome::ObserveOnly { path } => format!(
+            "{} would have been quarantined on a confirmed YARA match (observe-only)",
+            path.display()
+        ),
+        response::QuarantineOutcome::Failed { path, error } => {
+            format!(
+                "failed to quarantine {} on a confirmed YARA match: {error}",
+                path.display()
+            )
+        }
+    };
+    eprintln!("\x1b[1;31m[ALERT] RESPONSE-QUARANTINE — {message}\x1b[0m");
+    alert_log.write(&AlertRecord {
+        timestamp_ns: schema::time::now_ns(),
+        technique: "RESPONSE-QUARANTINE".to_string(),
+        message,
+    });
 }
 
 impl EventSink for DetectionSink {
@@ -230,6 +398,8 @@ impl EventSink for DetectionSink {
             Event::Connect(e) => self.detect_connect(e),
             Event::NetworkFlow(e) => self.detect_network_flow(e),
             Event::ListenPort(e) => self.detect_listen_port(e),
+            Event::Auth(e) => self.detect_auth(e),
+            Event::FileDelete(e) => self.detect_file_delete(e),
             // New telemetry categories reach the engines as they land; until a rule
             // consumes them, logging below is the whole treatment.
             _ => {}
@@ -309,5 +479,233 @@ impl EventSink for BaselineSink {
             Event::FileOpen(e) => self.rule_state.lock().unwrap().on_file_open(e),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex, atomic::Ordering};
+
+    use schema::{ConnectEvent, Event, EventMeta, ExecEvent, User, sensor::EventSink as _};
+
+    use super::DetectionSink;
+
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("sink-test-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn sink_in(dir: &std::path::Path) -> Arc<DetectionSink> {
+        Arc::new(
+            DetectionSink::new(
+                rules::RuleState::new(),
+                &dir.join("alerts.ndjson"),
+                &dir.join("events.jsonl"),
+                None,
+            )
+            .unwrap(),
+        )
+    }
+
+    fn alerts_in(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("alerts.ndjson")).unwrap_or_default()
+    }
+
+    fn exec(pid: u32, cmdline: &str, image_path: &str) -> Event {
+        Event::Exec(ExecEvent {
+            meta: EventMeta {
+                pid,
+                ppid: 1,
+                user: User::Unix {
+                    uid: 1000,
+                    gid: 1000,
+                },
+                comm: "bash".into(),
+                ..schema::fixtures::meta()
+            },
+            image_path: image_path.into(),
+            cmdline: cmdline.into(),
+            ..schema::fixtures::exec()
+        })
+    }
+
+    /// The BAYES recipe from `correlator`'s own tests: a suspicious-path exec
+    /// plus repeated connects to a public address crosses the belief threshold.
+    fn drive_bayes_crossing(sink: &DetectionSink, pid: u32) {
+        sink.on_event(exec(
+            pid,
+            "malware.exe",
+            "C:\\Users\\solka\\AppData\\Roaming\\malware.exe",
+        ));
+        for i in 0..25u64 {
+            sink.on_event(Event::Connect(ConnectEvent {
+                meta: EventMeta {
+                    pid,
+                    timestamp_ns: (i + 1) * 100_000_000,
+                    ..schema::fixtures::meta()
+                },
+                daddr: std::net::IpAddr::V4(std::net::Ipv4Addr::new(185, 220, 101, 1)),
+                dport: 4444,
+            }));
+        }
+    }
+
+    #[test]
+    fn exec_rule_alert_reaches_the_alert_log() {
+        let dir = tmp("rule-alert");
+        let sink = sink_in(&dir);
+        sink.on_event(exec(
+            42,
+            "bash -c echo cGF5bG9hZAo= | base64 -d | sh",
+            "/bin/bash",
+        ));
+        let alerts = alerts_in(&dir);
+        assert!(
+            alerts.contains("T1059.004"),
+            "base64-decode rule must land in alerts.ndjson, got: {alerts}"
+        );
+    }
+
+    #[test]
+    fn progress_advances_once_per_fully_processed_event() {
+        let dir = tmp("progress");
+        let sink = sink_in(&dir);
+        let progress = sink.progress_handle();
+        assert_eq!(progress.load(Ordering::Relaxed), 0);
+        for i in 0..5 {
+            sink.on_event(exec(100 + i, "ls", "/bin/ls"));
+        }
+        assert_eq!(
+            progress.load(Ordering::Relaxed),
+            5,
+            "#102: real progress, one per event"
+        );
+    }
+
+    #[test]
+    fn bayes_crossing_without_response_hooks_alerts_but_never_kills() {
+        let dir = tmp("bayes-observe");
+        let sink = sink_in(&dir);
+        drive_bayes_crossing(&sink, 4242);
+        let alerts = alerts_in(&dir);
+        assert!(
+            alerts.contains("BAYES"),
+            "belief crossing must alert: {alerts}"
+        );
+        assert!(
+            !alerts.contains("RESPONSE-KILL"),
+            "no enable_response call means response stays entirely silent"
+        );
+    }
+
+    #[test]
+    fn bayes_crossing_with_kill_disabled_reports_observe_only() {
+        let dir = tmp("bayes-disabled");
+        let sink = sink_in(&dir);
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let killed_rec = Arc::clone(&killed);
+        sink.enable_response(
+            policy::ResponsePolicy {
+                kill_enabled: false,
+                quarantine_enabled: false,
+            },
+            move |pid| {
+                killed_rec.lock().unwrap().push(pid);
+                Ok(())
+            },
+            dir.join("quarantine"),
+        );
+        drive_bayes_crossing(&sink, 4243);
+        let alerts = alerts_in(&dir);
+        assert!(
+            alerts.contains("RESPONSE-KILL"),
+            "response path must report: {alerts}"
+        );
+        assert!(
+            alerts.contains("observe-only"),
+            "policy-off means observe-only: {alerts}"
+        );
+        assert!(
+            killed.lock().unwrap().is_empty(),
+            "terminate must never run with kill disabled"
+        );
+    }
+
+    #[test]
+    fn bayes_crossing_with_kill_enabled_calls_terminate_on_the_verdict_pid() {
+        let dir = tmp("bayes-kill");
+        let sink = sink_in(&dir);
+        let killed = Arc::new(Mutex::new(Vec::new()));
+        let killed_rec = Arc::clone(&killed);
+        sink.enable_response(
+            policy::ResponsePolicy {
+                kill_enabled: true,
+                quarantine_enabled: false,
+            },
+            move |pid| {
+                killed_rec.lock().unwrap().push(pid);
+                Ok(())
+            },
+            dir.join("quarantine"),
+        );
+        drive_bayes_crossing(&sink, 4244);
+        let alerts = alerts_in(&dir);
+        assert!(
+            alerts.contains("killed pid 4244"),
+            "kill outcome must be recorded in alerts: {alerts}"
+        );
+        assert_eq!(
+            *killed.lock().unwrap(),
+            vec![4244],
+            "the injected terminate runs, exactly once"
+        );
+    }
+
+    #[test]
+    fn events_and_spool_receive_the_raw_event_via_the_enrich_worker() {
+        let dir = tmp("spool");
+        let spool_dir = dir.join("spool");
+        let spool = Arc::new(Mutex::new(
+            store::EventSpool::open(&spool_dir, u64::MAX).unwrap(),
+        ));
+        let sink = Arc::new(
+            DetectionSink::new(
+                rules::RuleState::new(),
+                &dir.join("alerts.ndjson"),
+                &dir.join("events.jsonl"),
+                Some(Arc::clone(&spool)),
+            )
+            .unwrap(),
+        );
+        sink.on_event(exec(7, "ls", "/bin/ls"));
+
+        // The raw write and the spool append run on the enrich worker — wait.
+        let mut spooled: Vec<Event> = Vec::new();
+        for _ in 0..200 {
+            spooled = spool.lock().unwrap().drain_oldest().unwrap();
+            if !spooled.is_empty() {
+                break;
+            }
+            // Segment may be in-flight from the empty drain — put it back.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(spooled.len(), 1, "the event must reach the transport spool");
+        let events_log = std::fs::read_to_string(dir.join("events.jsonl")).unwrap_or_default();
+        assert!(
+            events_log.contains("/bin/ls"),
+            "raw event log written off-thread"
+        );
+    }
+
+    /// A counting sink for wiring tests elsewhere would go through `EventSink`;
+    /// this pins that `DetectionSink` is object-safe behind the same trait the
+    /// sensors use (compile-time check, the assertion is incidental).
+    #[test]
+    fn detection_sink_is_usable_as_a_trait_object() {
+        let dir = tmp("dyn");
+        let sink: Arc<dyn schema::sensor::EventSink> = sink_in(&dir);
+        sink.on_event(exec(9, "true", "/bin/true"));
     }
 }
