@@ -26,6 +26,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({
         status: "already_enrolled",
         agentId: existing.id,
+        ring: existing.ring,
       });
     }
 
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       status: "enrolled",
       agentId: agent.id,
+      ring: agent.ring,
     });
   } catch (error) {
     console.error("Enrollment error:", error);

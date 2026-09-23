@@ -32,6 +32,7 @@ model Agent {
   enrollmentId String   @unique @map("enrollment_id") // mTLS cert subject CN
   hostname     String?
   version      String?
+  ring         String   @default("prod") // Canary ring: canary_0, canary_1, canary_2, prod
   lastSeen     DateTime @map("last_seen")
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -39,6 +40,8 @@ model Agent {
 
   @@map("agents")
   @@index([tenantId, lastSeen])
+  @@index([tenantId, ring])
+  @@index([tenantId, ring, lastSeen])
   @@index([enrollmentId])
 }
 
