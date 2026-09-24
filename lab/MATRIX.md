@@ -16,10 +16,10 @@ regenerate any more.
 
 | Machine | Family | Kernel | Proves |
 | --- | --- | --- | --- |
-| ubuntu-24.04 (primary) | Debian | 6.8 | primary dev/validation target |
+| ubuntu-24.04 (primary) | Debian | 6.8 | primary dev/validation target — validated 2026-09-24 on `vagrant-hyperv/` (26/26 programs, argv + lineage with #416); inline-comm `sched_process_fork` |
 | ubuntu-22.04 | Debian | 5.15 | oldest supported LTS kernel |
 | debian-12 | Debian | 6.1 | Debian stable |
-| debian-13 | Debian | 6.12 | newest kernel drift |
+| debian-13 | Debian | 6.12 | newest kernel drift — validated 2026-09-24 on `vagrant-hyperv/` (26/26 programs, argv + lineage with #416); still inline-comm `sched_process_fork` (`__data_loc` first seen on alpine 6.18, #415) |
 | fedora-41 | RPM | 6.11 | RPM family; replay-only where LLVM too old for eBPF builds |
 | rocky-9 | RPM (RHEL) | 5.14 | enterprise RHEL-clone baseline; replay-only |
 | arch (rolling) | pacman | 7.2 (validated 2026-09-21; moves) | rolling kernel/LLVM drift target for #53 CO-RE (#124) — beacon.sh end-to-end confirmed (T1071/T1041 fired), previously blocked on #199 |
