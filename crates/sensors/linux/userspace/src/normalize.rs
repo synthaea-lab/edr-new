@@ -6,11 +6,11 @@
 //! once at startup and passes it here so schema timestamps are epoch nanoseconds.
 
 use schema::{
-    MemfdCreateEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent,
     BpfEvent, ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileChmodEvent,
     FileChownEvent, FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent, FileRenameEvent,
-    FileSetxattrEvent, FileWriteEvent, KernelModuleAction, KernelModuleEvent, MountEvent,
-    SignalEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
+    FileSetxattrEvent, FileWriteEvent, KernelModuleAction, KernelModuleEvent, MemfdCreateEvent,
+    MountEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, SignalEvent,
+    SocketAcceptEvent, SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
 };
 use sensor_linux_wire as wire;
 

@@ -13,11 +13,12 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{info, warn};
 use sensor_linux_wire::{
-    MemfdCreateEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent,
-    BpfEvent, ConnectEvent, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent, LineageEntry,
-    KernelModuleEvent, MAX_TLS_CAPTURE, MountEvent, ReadlineInputEvent, SignalEvent, SocketAcceptEvent,
-    SocketBindEvent, SocketListenEvent, TASK_COMM_LEN, TlsCaptureEvent, UdpSendEvent,
+    BpfEvent, ConnectEvent, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent,
+    FileOpenEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
+    KernelModuleEvent, LineageEntry, MAX_TLS_CAPTURE, MemfdCreateEvent, MountEvent,
+    ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, SignalEvent,
+    SocketAcceptEvent, SocketBindEvent, SocketListenEvent, TASK_COMM_LEN, TlsCaptureEvent,
+    UdpSendEvent,
 };
 
 // This probe reads NO `task_struct`/`mm_struct` frozen offset: parent lineage (ppid +
@@ -2071,8 +2072,10 @@ fn try_sys_enter_ptrace(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let request: u64 = unsafe { ctx.read_at(PTRACE_REQUEST_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let request: u64 =
-        unsafe { ctx.read_at::<u32>(PTRACE_REQUEST_OFFSET).map_err(|_| 1u32)? as u64 };
+    let request: u64 = unsafe {
+        ctx.read_at::<u32>(PTRACE_REQUEST_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let target_pid: u64 = unsafe { ctx.read_at(PTRACE_PID_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
@@ -2081,13 +2084,11 @@ fn try_sys_enter_ptrace(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let addr: u64 = unsafe { ctx.read_at(PTRACE_ADDR_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let addr: u64 =
-        unsafe { ctx.read_at::<u32>(PTRACE_ADDR_OFFSET).map_err(|_| 1u32)? as u64 };
+    let addr: u64 = unsafe { ctx.read_at::<u32>(PTRACE_ADDR_OFFSET).map_err(|_| 1u32)? as u64 };
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let data: u64 = unsafe { ctx.read_at(PTRACE_DATA_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let data: u64 =
-        unsafe { ctx.read_at::<u32>(PTRACE_DATA_OFFSET).map_err(|_| 1u32)? as u64 };
+    let data: u64 = unsafe { ctx.read_at::<u32>(PTRACE_DATA_OFFSET).map_err(|_| 1u32)? as u64 };
 
     let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
     let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
@@ -2196,13 +2197,12 @@ fn try_sys_enter_process_vm_readv(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let target_pid: u64 = unsafe { ctx.read_at(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let target_pid: u64 =
-        unsafe { ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? as u64 };
-    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-    let local_iov_count: u64 = unsafe {
-        ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET)
-            .map_err(|_| 1u32)?
+    let target_pid: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET)
+            .map_err(|_| 1u32)? as u64
     };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+    let local_iov_count: u64 = unsafe { ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let local_iov_count: u64 = unsafe {
         ctx.read_at::<u32>(PROCESS_VM_LIOVCNT_OFFSET)
@@ -2219,10 +2219,8 @@ fn try_sys_enter_process_vm_readv(ctx: TracePointContext) -> Result<u32, u32> {
             .map_err(|_| 1u32)? as u64
     };
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-    let remote_iov_count: u64 = unsafe {
-        ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET)
-            .map_err(|_| 1u32)?
-    };
+    let remote_iov_count: u64 =
+        unsafe { ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let remote_iov_count: u64 = unsafe {
         ctx.read_at::<u32>(PROCESS_VM_RIOVCNT_OFFSET)
@@ -2278,13 +2276,12 @@ fn try_sys_enter_process_vm_writev(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let target_pid: u64 = unsafe { ctx.read_at(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let target_pid: u64 =
-        unsafe { ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET).map_err(|_| 1u32)? as u64 };
-    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-    let local_iov_count: u64 = unsafe {
-        ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET)
-            .map_err(|_| 1u32)?
+    let target_pid: u64 = unsafe {
+        ctx.read_at::<u32>(PROCESS_VM_PID_OFFSET)
+            .map_err(|_| 1u32)? as u64
     };
+    #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
+    let local_iov_count: u64 = unsafe { ctx.read_at(PROCESS_VM_LIOVCNT_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let local_iov_count: u64 = unsafe {
         ctx.read_at::<u32>(PROCESS_VM_LIOVCNT_OFFSET)
@@ -2301,10 +2298,8 @@ fn try_sys_enter_process_vm_writev(ctx: TracePointContext) -> Result<u32, u32> {
             .map_err(|_| 1u32)? as u64
     };
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
-    let remote_iov_count: u64 = unsafe {
-        ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET)
-            .map_err(|_| 1u32)?
-    };
+    let remote_iov_count: u64 =
+        unsafe { ctx.read_at(PROCESS_VM_RIOVCNT_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
     let remote_iov_count: u64 = unsafe {
         ctx.read_at::<u32>(PROCESS_VM_RIOVCNT_OFFSET)
@@ -2391,8 +2386,10 @@ fn try_sys_enter_memfd_create(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let flags: u64 = unsafe { ctx.read_at(MEMFD_CREATE_FLAGS_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let flags: u64 =
-        unsafe { ctx.read_at::<u32>(MEMFD_CREATE_FLAGS_OFFSET).map_err(|_| 1u32)? as u64 };
+    let flags: u64 = unsafe {
+        ctx.read_at::<u32>(MEMFD_CREATE_FLAGS_OFFSET)
+            .map_err(|_| 1u32)? as u64
+    };
 
     let comm = bpf_get_current_comm().map_err(|_| 1u32)?;
     let uid_gid = aya_ebpf::helpers::bpf_get_current_uid_gid();
@@ -2413,8 +2410,7 @@ fn try_sys_enter_memfd_create(ctx: TracePointContext) -> Result<u32, u32> {
         }
 
         if name_ptr != 0 {
-            if let Ok(name) = bpf_probe_read_user_str_bytes(name_ptr as *const u8, &mut (*e).name)
-            {
+            if let Ok(name) = bpf_probe_read_user_str_bytes(name_ptr as *const u8, &mut (*e).name) {
                 (*e).name_len = name.len() as u16;
             }
         }
@@ -2591,8 +2587,7 @@ fn try_sys_enter_mount(ctx: TracePointContext) -> Result<u32, u32> {
     #[cfg(any(bpf_target_arch = "x86_64", bpf_target_arch = "aarch64"))]
     let flags: u64 = unsafe { ctx.read_at(MOUNT_FLAGS_OFFSET).map_err(|_| 1u32)? };
     #[cfg(bpf_target_arch = "x86")]
-    let flags: u64 =
-        unsafe { ctx.read_at::<u32>(MOUNT_FLAGS_OFFSET).map_err(|_| 1u32)? as u64 };
+    let flags: u64 = unsafe { ctx.read_at::<u32>(MOUNT_FLAGS_OFFSET).map_err(|_| 1u32)? as u64 };
 
     emit_mount_event(&ctx, target_ptr, source_ptr, fstype_ptr, flags, true)
 }
@@ -2661,8 +2656,7 @@ fn emit_mount_event(
             }
         }
         if fstype_ptr != 0 {
-            if let Ok(s) =
-                bpf_probe_read_user_str_bytes(fstype_ptr as *const u8, &mut (*e).fs_type)
+            if let Ok(s) = bpf_probe_read_user_str_bytes(fstype_ptr as *const u8, &mut (*e).fs_type)
             {
                 (*e).fs_type_len = s.len() as u8;
             }
@@ -2823,7 +2817,6 @@ fn emit_signal_event(ctx: &TracePointContext, target_pid: u32, sig: u32) -> Resu
 
     Ok(0)
 }
-
 
 // --- Kernel module load/unload (issue #264) -------------------------------------
 
@@ -3101,7 +3094,6 @@ fn try_sys_enter_bpf(ctx: TracePointContext) -> Result<u32, u32> {
 
     Ok(0)
 }
-
 
 // --- Uprobes: TLS plaintext capture (issue #90) ------------------------------------
 //

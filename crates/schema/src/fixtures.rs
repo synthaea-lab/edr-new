@@ -28,14 +28,14 @@
 use core::net::{IpAddr, Ipv4Addr};
 
 use crate::{
-    MemfdCreateEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent,
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, ConnectEvent, DnsQueryEvent,
     EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
     FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent, ImageLoadEvent,
-    KernelModuleAction, KernelModuleEvent, ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent,
-    RegistrySetEvent, ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent,
-    SocketBindEvent, SocketListenEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
-    UdpSendEvent, User, WmiActivityEvent,
+    KernelModuleAction, KernelModuleEvent, ListenPortEvent, MemfdCreateEvent, NetworkFlowEvent,
+    ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, RegistrySetEvent,
+    ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
+    SocketListenEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User,
+    WmiActivityEvent,
 };
 
 /// The TEST-NET-1 address every address-carrying fixture defaults to.

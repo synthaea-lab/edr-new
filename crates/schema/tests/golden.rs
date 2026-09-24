@@ -9,15 +9,15 @@
 use std::net::IpAddr;
 
 use schema::{
-    MemfdCreateEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent,
     AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, ConnectEvent, DnsQueryEvent,
     Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
     FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
     GatekeeperVerdictEvent, ImageLoadEvent, KernelModuleAction, KernelModuleEvent, ListenPortEvent,
-    MountEvent, NetworkFlowEvent, POLICY_MECHANISM_SELINUX, PolicyDenialEvent, ReadlineInputEvent,
-    RegistrySetEvent, ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent,
-    SocketBindEvent, SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection,
-    TlsLibraryType, UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
+    MemfdCreateEvent, MountEvent, NetworkFlowEvent, POLICY_MECHANISM_SELINUX, PolicyDenialEvent,
+    ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, RegistrySetEvent,
+    ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
+    SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
+    UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
