@@ -88,13 +88,22 @@ fn stop_all_orphaned_sessions() {
     let out = std::process::Command::new("logman")
         .args(["query", "-ets"])
         .output();
+    // A failed `logman` (access denied, ETW service trouble) prints no session
+    // table, so without the status check it parses as "no orphans" and cleanup is
+    // silently skipped — orphans accumulate, which is exactly #408 (same class as
+    // the failed-`wevtutil`-reads-as-empty bug in #391).
     match out {
-        Ok(o) => {
+        Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
             for name in normalize::parse_orphaned_sessions(&stdout) {
                 stop_orphaned_session(&name);
             }
         }
+        Ok(o) => tracing::warn!(
+            status = %o.status,
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "logman query -ets failed — ETW orphan enumeration skipped"
+        ),
         Err(e) => tracing::warn!(error = %e, "logman unavailable — ETW orphan enumeration skipped"),
     }
 }
