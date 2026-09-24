@@ -83,4 +83,12 @@ pub const DEFAULT_MAX_DRAIN_ATTEMPTS: u32 = 5;
 /// with a brief blip (VPN reconnect, DNS hiccup, a routine ingest restart) as
 /// with a real outage. At the capped 60s backoff, 20 attempts is roughly a
 /// 15-minute allowance before the segment is given up on.
+///
+/// During a genuine extended outage, skipping doesn't restore forward
+/// progress the way it does for a poison segment — the next segment fails
+/// exactly the same way — so this budget mainly guards against a segment
+/// that is itself the cause of the network error (e.g. one large enough to
+/// always time out). In the ordinary long-outage case, expect the uploader
+/// to drop one segment roughly every 15 minutes by design; don't read that
+/// as "the server rejected data" (Jean's #414 review).
 pub const DEFAULT_MAX_NETWORK_DRAIN_ATTEMPTS: u32 = 20;
