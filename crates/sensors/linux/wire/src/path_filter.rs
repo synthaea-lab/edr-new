@@ -11,9 +11,20 @@
 //! library, `cat`-ing a file — is the noise #325 was written to cut; a write-intent
 //! open (`O_WRONLY`/`O_RDWR`/`O_CREAT`/`O_TRUNC`) or any of
 //! delete/rename/chmod/chown/setxattr/removexattr is the payload lifecycle itself,
-//! and is never dropped there. `/proc/` stays fully dropped except
-//! `/proc/<pid>/root` (the T1611 procfs container-escape path); `/dev/` (minus
-//! `/dev/shm/`, handled above) and `/sys/` are unconditional, unchanged from #325.
+//! and is never dropped there. `/dev/` (minus `/dev/shm/`, handled above) and
+//! `/sys/` are unconditional, unchanged from #325.
+//!
+//! `/proc/` gets the same intent rule as the tmp family, not the unconditional
+//! drop #429 originally gave it (review on #429/#426): `/proc/<pid>/root/...` is
+//! not the only way to reach a real file through procfs — `/proc/self/root/...`
+//! and `/proc/self/cwd/...` resolve through the kernel exactly the same way
+//! (`/proc/self/root/etc/cron.d/x` *is* `/etc/cron.d/x`), and `self` isn't
+//! numeric, so [`is_proc_pid_root`]'s pid check never recognises it. Special-casing
+//! `self` (and `cwd`) would only chase the next alias; conditioning the whole
+//! `/proc/` prefix on write intent, like `/tmp/`, closes the class instead: a
+//! write/mutation reaching a real path through *any* procfs alias now always
+//! passes, and plain reads of procfs pseudo-files (`/proc/self/status`,
+//! `/proc/sys/...`) — the volume #325 was written to cut — stay filtered.
 //!
 //! [`is_filtered_path`] takes plain `(flags: i64, is_mutation: bool)` rather than a
 //! payload-carrying `enum` — an earlier version used `enum PathAccess { Open(i64),
@@ -34,6 +45,17 @@ fn is_write_intent(flags: i64) -> bool {
     flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC) != 0
 }
 
+/// Index of the first byte at or after `i` that isn't `/` — the kernel collapses
+/// repeated slashes when it resolves a path, so a parser matching path *segments*
+/// has to as well, or an attacker-inserted `//` desyncs it from what actually gets
+/// opened. `.get()`-based, matching this module's no-panic style.
+fn skip_slashes(path: &[u8], mut i: usize) -> usize {
+    while matches!(path.get(i), Some(&b'/')) {
+        i += 1;
+    }
+    i
+}
+
 /// Whether `path` is `/proc/<pid>/root` or anything under it — a numeric pid
 /// segment, nothing else. `no_std`-safe: byte-slice parsing only, no allocation.
 ///
@@ -47,15 +69,18 @@ fn is_write_intent(flags: i64) -> bool {
 /// verified so slowly probe load never finished within 15s+ on any of this
 /// function's 7 call sites — replaced for that, unrelated, reason.)
 fn is_proc_pid_root(path: &[u8]) -> bool {
-    const PREFIX: &[u8] = b"/proc/";
-    let Some(prefix) = path.get(..PREFIX.len()) else {
+    const PROC: &[u8] = b"/proc";
+    let Some(prefix) = path.get(..PROC.len()) else {
         return false;
     };
-    if prefix != PREFIX {
+    if prefix != PROC || !matches!(path.get(PROC.len()), Some(&b'/')) {
         return false;
     }
 
-    let mut i = PREFIX.len();
+    // `/proc//1//root/etc/shadow` resolves to the same file as
+    // `/proc/1/root/etc/shadow` (#429 review) — skip repeated separators
+    // wherever the kernel would, not just a single expected `/`.
+    let mut i = skip_slashes(path, PROC.len());
     let pid_start = i;
     loop {
         let Some(&b) = path.get(i) else {
@@ -72,17 +97,16 @@ fn is_proc_pid_root(path: &[u8]) -> bool {
     if i == pid_start {
         return false;
     }
-    // path[i] == b'/' here — the pid/root separator.
 
+    i = skip_slashes(path, i);
     const ROOT: &[u8] = b"root";
-    let root_start = i + 1;
-    let Some(root_slice) = path.get(root_start..root_start + ROOT.len()) else {
+    let Some(root_slice) = path.get(i..i + ROOT.len()) else {
         return false;
     };
     if root_slice != ROOT {
         return false;
     }
-    matches!(path.get(root_start + ROOT.len()), None | Some(&b'/'))
+    matches!(path.get(i + ROOT.len()), None | Some(&b'/'))
 }
 
 /// Whether a file event on `path` should be dropped before it reaches the ring
@@ -96,7 +120,10 @@ pub fn is_filtered_path(path: &[u8], flags: i64, is_mutation: bool) -> bool {
     if is_proc_pid_root(path) {
         return false;
     }
-    if path.starts_with(b"/proc/") || path.starts_with(b"/sys/") {
+    if path.starts_with(b"/proc/") {
+        return !(is_mutation || is_write_intent(flags));
+    }
+    if path.starts_with(b"/sys/") {
         return true;
     }
     if path.starts_with(b"/dev/shm/")
@@ -130,14 +157,56 @@ mod tests {
     }
 
     #[test]
-    fn proc_pid_without_root_stays_filtered() {
+    fn proc_pid_without_root_read_only_stays_filtered() {
         assert!(is_filtered_path(b"/proc/1/cmdline", 0, false));
-        assert!(is_filtered_path(b"/proc/1/status", 0, true));
+        assert!(is_filtered_path(b"/proc/1/status", 0, false));
     }
 
     #[test]
-    fn proc_non_numeric_segment_stays_filtered() {
+    fn proc_write_intent_open_passes() {
+        assert!(!is_filtered_path(b"/proc/1/attr/current", O_WRONLY, false));
+    }
+
+    #[test]
+    fn proc_mutation_always_passes() {
+        assert!(!is_filtered_path(b"/proc/1/status", 0, true));
+    }
+
+    #[test]
+    fn proc_non_numeric_segment_read_only_stays_filtered() {
         assert!(is_filtered_path(b"/proc/self/root", 0, false));
+    }
+
+    #[test]
+    fn proc_self_root_write_intent_escape_passes() {
+        // #429 review: `/proc/self/root/etc/cron.d/x` *is* `/etc/cron.d/x` to the
+        // kernel, but `self` isn't numeric so `is_proc_pid_root` never matches it —
+        // the write-intent exception (not a `self`-specific carve-out) is what
+        // catches this, and the same reasoning covers `/proc/self/cwd/...`.
+        assert!(!is_filtered_path(
+            b"/proc/self/root/etc/cron.d/evade429",
+            O_CREAT | O_TRUNC,
+            false
+        ));
+        assert!(!is_filtered_path(
+            b"/proc/self/cwd/evade429",
+            O_CREAT | O_TRUNC,
+            false
+        ));
+    }
+
+    #[test]
+    fn proc_self_root_mutation_escape_passes() {
+        assert!(!is_filtered_path(b"/proc/self/root/etc/cron.d/evade429", 0, true));
+    }
+
+    #[test]
+    fn proc_pid_root_double_slash_is_not_mistaken_for_filtered() {
+        // #429 review: the kernel collapses repeated `/`, so
+        // `/proc//1//root/etc/shadow` resolves the same as `/proc/1/root/etc/shadow`
+        // — `is_proc_pid_root` has to recognise it too, or `check_proc_root_escape`
+        // never sees the event the filter already let through unfiltered anyway.
+        assert!(!is_filtered_path(b"/proc//1//root/etc/shadow", 0, false));
     }
 
     #[test]
