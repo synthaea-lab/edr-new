@@ -28,11 +28,11 @@
 use core::net::{IpAddr, Ipv4Addr};
 
 use crate::{
-    CapSetEvent, IdentityChangeEvent, IdentityChangeKind, NamespaceEvent, NamespaceSyscall,
-    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, ConnectEvent, DnsQueryEvent,
-    EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent, ImageLoadEvent,
-    KernelModuleAction, KernelModuleEvent, ListenPortEvent, MemfdCreateEvent, NetworkFlowEvent,
+    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, CapSetEvent, ConnectEvent,
+    DnsQueryEvent, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent,
+    FileOpenEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
+    IdentityChangeEvent, IdentityChangeKind, ImageLoadEvent, KernelModuleAction, KernelModuleEvent,
+    ListenPortEvent, MemfdCreateEvent, NamespaceEvent, NamespaceSyscall, NetworkFlowEvent,
     ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, RegistrySetEvent,
     ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
     SocketListenEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User,

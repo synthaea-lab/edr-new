@@ -9,16 +9,16 @@
 use std::net::IpAddr;
 
 use schema::{
-    CapSetEvent, IdentityChangeEvent, IdentityChangeKind, NamespaceEvent, NamespaceSyscall,
-    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, ConnectEvent, DnsQueryEvent,
-    Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
-    GatekeeperVerdictEvent, ImageLoadEvent, KernelModuleAction, KernelModuleEvent, ListenPortEvent,
-    MemfdCreateEvent, MountEvent, NetworkFlowEvent, POLICY_MECHANISM_SELINUX, PolicyDenialEvent,
-    ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, RegistrySetEvent,
-    ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
-    SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
-    UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
+    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, CapSetEvent, ConnectEvent,
+    DnsQueryEvent, Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent,
+    FileOpenEvent, FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent,
+    FileWriteEvent, GatekeeperVerdictEvent, IdentityChangeEvent, IdentityChangeKind,
+    ImageLoadEvent, KernelModuleAction, KernelModuleEvent, ListenPortEvent, MemfdCreateEvent,
+    MountEvent, NamespaceEvent, NamespaceSyscall, NetworkFlowEvent, POLICY_MECHANISM_SELINUX,
+    PolicyDenialEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent,
+    RegistrySetEvent, ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent,
+    SocketAcceptEvent, SocketBindEvent, SocketListenEvent, TccDecisionEvent, TlsCaptureEvent,
+    TlsDirection, TlsLibraryType, UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
