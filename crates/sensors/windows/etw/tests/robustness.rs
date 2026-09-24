@@ -43,6 +43,49 @@ fn never_panics_on_arbitrary_bytes_behind_each_bom() {
     }
 }
 
+/// What a parsed URL must never carry raw: it reaches plain-text alert
+/// consumers, where these forge lines or reorder text.
+fn is_unsafe_in_text(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{2028}'
+                | '\u{2029}'
+                | '\u{061C}'
+                | '\u{200E}'
+                | '\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2066}'..='\u{2069}'
+        )
+}
+
+#[test]
+fn parsed_urls_never_carry_control_separator_or_bidi_chars() {
+    let mut state = 0x2028_202E_u64;
+    // Draw from a pool dense in the dangerous characters, so most values
+    // contain several — uniform random chars would almost never hit them.
+    let pool: Vec<char> =
+        "\r\n\t\0\u{7}\u{1b}\u{85}\u{2028}\u{2029}\u{202E}\u{2066}\u{200F}=[]aZ:/é"
+            .chars()
+            .collect();
+    for _ in 0..2_000 {
+        let len = (lcg(&mut state) % 80) as usize;
+        let noise: String = (0..len)
+            .map(|_| pool[(lcg(&mut state) >> 33) as usize % pool.len()])
+            .collect();
+        let stream = format!("[ZoneTransfer]\nHostUrl={noise}\nReferrerUrl=h{noise}\n");
+        let mut utf16 = vec![0xFF, 0xFE];
+        for unit in stream.encode_utf16() {
+            utf16.extend_from_slice(&unit.to_le_bytes());
+        }
+        for zone in [parse(stream.as_bytes()), parse(&utf16)] {
+            for url in [zone.host_url, zone.referrer_url].into_iter().flatten() {
+                assert!(!url.chars().any(is_unsafe_in_text), "{url:?}");
+            }
+        }
+    }
+}
+
 #[test]
 fn never_panics_on_every_truncation_of_a_valid_stream() {
     assert_eq!(parse(VALID).zone_id, Some(3), "baseline must parse");

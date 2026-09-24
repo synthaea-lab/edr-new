@@ -292,6 +292,11 @@ pub(crate) fn file_provider(sink: Arc<dyn EventSink>, state: Arc<SharedState>) -
 /// loses the race (empty stream, sharing violation) still reports the mark
 /// alone. `agent` is the writing process — Windows records no downloader
 /// name in the stream, and the writer is exactly that.
+///
+/// Every record is read, dedup included (it compares content): the read is
+/// synchronous on the Kernel-File callback thread. Bounded (8 KiB of a stream
+/// just written, so cache-hot) and download-rate, but a mark on a slow share
+/// stalls the callback — moving the read-back off-thread is #439.
 fn quarantine_event(
     state: &SharedState,
     pid: u32,
@@ -300,20 +305,14 @@ fn quarantine_event(
     host: &str,
     timestamp_ns: u64,
 ) -> Option<Event> {
-    if state
+    let read = read_stream(stream_path)
+        .map(|bytes| zone_identifier::parse(&bytes))
+        .unwrap_or_default();
+    let zone = state
         .quarantine_dedup
         .lock()
         .unwrap()
-        .is_duplicate(host, timestamp_ns)
-    {
-        return None;
-    }
-    let zone = read_stream(stream_path)
-        .map(|bytes| zone_identifier::parse(&bytes))
-        .unwrap_or_default();
-    if !zone.is_external() {
-        return None;
-    }
+        .admit(host, read, timestamp_ns)?;
     Some(Event::FileQuarantine(FileQuarantineEvent {
         meta: meta(pid, 0, comm.to_string(), timestamp_ns),
         path: host.to_string(),
