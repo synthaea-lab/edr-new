@@ -551,6 +551,8 @@ def load_training_record(model_dir: Path) -> TrainingRecord:
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     schema_version = payload.get("schema_version")
+    # Accept v2 and v3: robustness_cards (v3) is additive with default=[],
+    # so v2 records load cleanly (PR #405 review fix)
     if schema_version not in (2, SCHEMA_VERSION):
         raise ValueError(
             f"unsupported {MODEL_RECORD_FILENAME} schema_version: {schema_version!r} "

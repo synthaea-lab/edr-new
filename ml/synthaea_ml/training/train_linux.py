@@ -257,7 +257,10 @@ def main() -> None:
                     f"median_degradation={card.median_score_degradation:+.3f}"
                 )
             except Exception as e:
-                print(f"  WARNING: robustness evaluation failed for {scenario_path}: {e}")
+                print(f"ERROR: robustness evaluation failed for {scenario_path}: {e}")
+                # Re-raise to fail fast - a crashed evaluation should not produce
+                # a model_record.json with empty robustness_cards and exit 0
+                raise
 
     write_training_record(
         args.output_dir,

@@ -42,7 +42,7 @@ def _score_cmdline(model: Any, cmdline: str, threshold: float) -> float:
         threshold: Model threshold for detection.
 
     Returns:
-        Anomaly score (higher = more anomalous, negative = benign).
+        Anomaly score (IsolationForest: negative = more anomalous, positive = benign).
     """
     features = extract_features(cmdline)
     # IsolationForest.decision_function returns negative for anomalies
@@ -116,12 +116,14 @@ def run_robustness_evaluation(
     rng = LCG(seed=mutation_seed)
     results: list[MutationTestResult] = []
 
-    # Load events from source or generate synthetic events
+    # Load events from source or generate synthetic malicious events
+    # IMPORTANT: events_source should contain MALICIOUS events matching the
+    # scenario's expected_detections, NOT benign baseline events. Escape rate
+    # is only meaningful when computed on originally-detected samples.
     if events_source and events_source.exists():
         source_events = _load_events_from_source(events_source)
-        # Sample events for testing (limit to avoid excessive mutations)
-        max_events_per_detection = 3
-        events_to_test = source_events[:max_events_per_detection] if source_events else []
+        # Use all loaded events (no arbitrary limit)
+        events_to_test = source_events if source_events else []
 
         if not events_to_test:
             # No events loaded, fall back to synthetic
@@ -129,7 +131,9 @@ def run_robustness_evaluation(
                 _create_synthetic_event_for_detection(d.technique) for d in expected
             ]
     else:
-        # Generate synthetic sample events for each expected detection
+        # Generate synthetic malicious events for each expected detection
+        # This is the default path - synthetic events are guaranteed to be
+        # anomalous (score < threshold), making escape_rate meaningful
         events_to_test = [
             _create_synthetic_event_for_detection(d.technique) for d in expected
         ]
@@ -169,10 +173,27 @@ def run_robustness_evaluation(
         raise ValueError(f"no mutation results for scenario {scenario_name!r}")
 
     # Compute aggregate metrics
-    escape_rate = sum(r.escaped for r in results) / len(results)
+    # CRITICAL: escape_rate is only meaningful on originally-detected samples
+    # (original_score <= threshold). Filter to those before computing.
+    originally_detected = [r for r in results if r.original_score <= threshold]
+
+    if not originally_detected:
+        # No originally-detected samples means escape_rate is undefined
+        # This can happen if events_source contains only benign events
+        raise ValueError(
+            f"no originally-detected samples for scenario {scenario_name!r} "
+            f"(all {len(results)} samples had original_score > {threshold}). "
+            f"Are you using malicious events, not benign baseline?"
+        )
+
+    escape_rate = sum(r.escaped for r in originally_detected) / len(originally_detected)
+
+    # Score degradations: positive delta means mutation moved toward benign (worse)
+    # Compute on all results, not just originally-detected
     score_deltas = [r.score_delta for r in results]
     median_degradation = statistics.median(score_deltas)
-    worst_case_degradation = min(score_deltas)
+    # FIXED: worst case is MAX (most degradation toward benign), not MIN
+    worst_case_degradation = max(score_deltas)
 
     return RobustnessCard(
         scenario_name=scenario_name,

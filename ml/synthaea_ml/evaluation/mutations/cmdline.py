@@ -8,6 +8,20 @@ Five mutation classes, each with light/medium/heavy intensity:
 - PaddingMutator: add whitespace/comments
 
 All mutators operate on argv-style lists (null-separated when serialized).
+
+LIMITATION (PR #405 review): Three of these mutators (Base64EncodeMutator,
+TokenSplittingMutator, PaddingMutator) apply shell-syntax evasions directly
+to argv, but Linux sensors capture argv AFTER shell parsing (execve). These
+mutations produce argv values that cannot occur in practice:
+- ba""se64 (shell input) → argv becomes "base64" (quotes stripped)
+- # comment (shell input) → ignored by shell, not argv element
+- base64-encoded token without decode wrapper → changes what runs
+
+PathSubstitutionMutator and ArgumentReorderMutator (light/medium) are valid
+argv-level evasions. The others belong to a future shell-payload mutator
+that targets `sh -c` strings, not argv.
+
+See https://github.com/synthaea-lab/edr-new/pull/405#issuecomment-5808683319
 """
 
 import base64
@@ -259,10 +273,20 @@ class PaddingMutator(Mutator):
 
 
 # Registry of all T0 mutators
+# NOTE (PR #405 review): Filtered to only argv-valid mutations.
+# Base64EncodeMutator, TokenSplittingMutator, and PaddingMutator apply
+# shell-syntax evasions that don't survive exec() and are disabled until
+# moved to a shell-payload mutator. PathSubstitutionMutator is the primary
+# realistic argv-level evasion.
 ALL_T0_MUTATORS = [
-    Base64EncodeMutator(),
-    ArgumentReorderMutator(),
     PathSubstitutionMutator(),
-    TokenSplittingMutator(),
-    PaddingMutator(),
+    # ArgumentReorderMutator light/medium are valid (skip argv[0]),
+    # but heavy reorders argv[0] which changes the executable
+    ArgumentReorderMutator(),
 ]
+
+# Disabled mutators (apply shell-syntax to argv, unrealistic):
+# Base64EncodeMutator(),
+# TokenSplittingMutator(),
+# PaddingMutator(),
+
