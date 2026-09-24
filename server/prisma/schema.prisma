@@ -1,0 +1,102 @@
+// Synthaea Control Plane - PostgreSQL Schema
+// Tenant-first architecture with Row-Level Security
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tenancy foundation - organization = tenant
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  agents     Agent[]
+  detections Detection[]
+  cases      Case[]
+  auditLogs  AuditLog[]  @relation("TenantAuditLogs")
+
+  @@map("tenants")
+}
+
+// Agent enrollment and heartbeat tracking
+model Agent {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  enrollmentId String   @unique @map("enrollment_id") // mTLS cert subject CN
+  hostname     String?
+  version      String?
+  lastSeen     DateTime @map("last_seen")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("agents")
+  @@index([tenantId, lastSeen])
+  @@index([enrollmentId])
+}
+
+// Detection storage - events that triggered rules
+model Detection {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  agentId   String   @map("agent_id")
+  timestamp DateTime
+  technique String   // MITRE ATT&CK technique (e.g., T1059.001)
+  severity  String   // low/medium/high/critical
+
+  // Event data (JSON) - normalized schema::Event
+  event     Json
+  meta      Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("detections")
+  @@index([tenantId, timestamp])
+  @@index([agentId, timestamp])
+  @@index([technique])
+}
+
+// Case management - analyst triage workflow
+model Case {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  title       String
+  description String?
+  severity    String   // low/medium/high/critical
+  status      String   // open/investigating/resolved/false_positive
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("cases")
+  @@index([tenantId, status, createdAt])
+  @@index([severity])
+}
+
+// Audit log - all control plane actions
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  action    String   // enrollment.create, case.update, policy.deploy, etc.
+  resource  String   // cases/123, agents/456
+  details   Json?
+  timestamp DateTime @default(now())
+
+  tenant Tenant @relation("TenantAuditLogs", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("audit_logs")
+  @@index([tenantId, timestamp])
+  @@index([userId, timestamp])
+  @@index([action])
+}
