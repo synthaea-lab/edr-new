@@ -4,13 +4,17 @@
 # check_ld_preload_hijack (crates/rules/src/stateless.rs) fires when an ExecEvent's
 # captured LD_PRELOAD/LD_AUDIT value (issue #363: parse_proc_environ_security reads
 # /proc/<pid>/environ for a fixed allowlist — presence only, never the full
-# environment) points outside the dynamic linker's own trust set (LD_TRUST_PREFIXES:
-# /lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib). This scenario is that shape
-# with no payload beyond proving the hook actually loaded: the "hijack" library's
-# constructor writes one line to a file and does nothing else — no hooked libc
-# symbols, no hiding, no backdoor. What a real LD_PRELOAD rootkit (Azazel, Jynx2,
-# vlany, ...) does with that same loaded-constructor moment is out of scope here by
-# design; this scenario asserts the detection surface, not a live implant.
+# environment) points outside the dynamic linker's own trust set. That trust set
+# (crates/rules/src/ld_trust.rs) is two layers, not just LD_TRUST_PREFIXES: the
+# built-in baseline (/lib, /lib64, /usr/lib, /usr/lib64, /usr/local/lib) plus
+# whatever /etc/ld.so.conf (and its `include`s) declares on the host — except
+# /tmp, /var/tmp, and /dev/shm, which are never trusted even if ld.so.conf lists
+# them. This scenario is that shape with no payload beyond proving the hook
+# actually loaded: the "hijack" library's constructor writes one line to a file
+# and does nothing else — no hooked libc symbols, no hiding, no backdoor. What a
+# real LD_PRELOAD rootkit (Azazel, Jynx2, vlany, ...) does with that same
+# loaded-constructor moment is out of scope here by design; this scenario asserts
+# the detection surface, not a live implant.
 #
 # Usage:
 #   1) terminal A: sudo target/release/agent run
@@ -27,6 +31,11 @@ MARKER=/tmp/edr-test-preload.marker
 
 cleanup() { rm -f "$SRC" "$LIB" "$MARKER"; }
 trap cleanup EXIT
+
+command -v cc >/dev/null 2>&1 || {
+    echo "cc not found — install a C compiler (Alpine: apk add build-base; Debian: apt install build-essential) and retry." >&2
+    exit 1
+}
 
 cat > "$SRC" <<'C'
 /* Proves the LD_PRELOAD constructor ran — nothing else. No hooked symbols,
@@ -46,7 +55,12 @@ echo "Compiling the benign preload library ($LIB, outside the linker trust set).
 cc -fPIC -shared -o "$LIB" "$SRC"
 
 echo "Running 'ls' with LD_PRELOAD=$LIB (untrusted path)..."
-LD_PRELOAD="$LIB" ls >/dev/null
+# env_security (the captured LD_PRELOAD value) is read from /proc/<pid>/environ at
+# drain time, same path as the argv read — a bare `ls` can exit before the drain
+# runs, leaving env_security empty and no alert (argv.sh hit this on 6.1 under
+# load, see argv.yaml's notes). The `sh -c` wrapper plus `sleep 0.3` keeps the
+# process alive long enough without changing what the scenario asserts.
+LD_PRELOAD="$LIB" sh -c 'ls >/dev/null; sleep 0.3'
 
 if [ -f "$MARKER" ]; then
     echo "Constructor ran (marker file present) — the preload actually loaded."
