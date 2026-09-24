@@ -27,12 +27,21 @@ const SHELL_COMMS: &[&str] = &[
 ];
 
 /// See `lineage.py::WEBSERVER_COMMS` — keep in sync.
+// One entry per line so each comment stays on its own name; rustfmt would pack
+// these short strings and pull the comments onto the wrong entries.
+#[rustfmt::skip]
 const WEBSERVER_COMMS: &[&str] = &[
-    "httpd", "nginx", "apache2", "w3wp.exe", // IIS worker process
-    "w3wp", "node",   // Node.js web servers
-    "java",   // Tomcat, Spring Boot, etc.
-    "dotnet", // .NET web apps
-    "uwsgi", "gunicorn", "php-fpm",
+    "httpd",
+    "nginx",
+    "apache2",
+    "w3wp.exe", // IIS worker process
+    "w3wp",
+    "node",     // Node.js web servers
+    "java",     // Tomcat, Spring Boot, etc.
+    "dotnet",   // .NET web apps
+    "uwsgi",
+    "gunicorn",
+    "php-fpm",
 ];
 
 /// See `lineage.py::OFFICE_COMMS` — keep in sync.
