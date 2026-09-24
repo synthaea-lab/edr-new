@@ -25,6 +25,9 @@ CASES = [
     # NUL-separated cmdline, no argv (a raw eBPF capture stored that way).
     ({"cmdline": "ls\0-la\0"}, ["ls", "-la"], "ls\0-la\0"),
     ({}, [], ""),
+    # `env_security` (#363) is rule evidence, never an ML input: it must not leak into
+    # the canonical string (mirror of the `preloaded` case in the Rust test).
+    ({"argv": ["ls"], "env_security": [["LD_PRELOAD", "/tmp/x.so"]]}, ["ls"], "ls\0"),
 ]
 
 
