@@ -16,7 +16,7 @@
 #   1) terminal A: sudo target/release/agent run
 #   2) terminal B: ./lab/scenarios/ransomware-rename-burst.sh
 #   3) expected in terminal A:
-#      T1486 — pid=...: 20 files renamed with an appended suffix in 5s
+#      T1486 — pid=... comm=python3: 20 files renamed with an appended suffix in 5s
 #      (e.g. .../file19.docx -> .../file19.docx.locked) — suspected ransomware
 #      encryption pass
 
@@ -37,9 +37,16 @@ for i in $(seq 0 $((COUNT - 1))); do
     : > "$DIR/file${i}.docx"
 done
 
-echo "Renaming all $COUNT files, appending .locked, in a tight loop..."
-for i in $(seq 0 $((COUNT - 1))); do
-    mv "$DIR/file${i}.docx" "$DIR/file${i}.docx.locked"
-done
+# One process for every rename: the rule counts per pid (tgid), like a real
+# encryptor's single binary. A `mv` loop would spread the burst across COUNT
+# short-lived pids and never reach the threshold.
+echo "Renaming all $COUNT files, appending .locked, from a single process..."
+python3 - "$DIR" "$COUNT" <<'EOF'
+import os, sys
+d, n = sys.argv[1], int(sys.argv[2])
+for i in range(n):
+    src = os.path.join(d, f"file{i}.docx")
+    os.rename(src, src + ".locked")
+EOF
 
 echo "Done. Check the agent terminal for the T1486 alert."

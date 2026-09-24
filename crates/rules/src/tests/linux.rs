@@ -681,15 +681,52 @@ fn rename_outside_the_window_does_not_accumulate() {
     let mut state = RuleState::new();
     let mut alerts = Vec::new();
     for i in 0..RANSOMWARE_RENAME_THRESHOLD {
-        // 1s apart — each batch of a few stays under threshold within any 5s
-        // window once the front of the sliding window has evicted the oldest.
+        // 2s apart: any 5s window holds at most 3 renames, far under threshold.
         alerts.extend(state.on_file_rename(&file_rename_event_full(
             9004,
             "encryptor",
             &format!("/home/u/b{i}.docx"),
             &format!("/home/u/b{i}.docx.locked"),
-            u64::from(i) * 2_000_000_000, // 2s apart — spread over 2 * threshold seconds
+            u64::from(i) * 2_000_000_000,
         )));
     }
     assert!(alerts.is_empty());
+}
+
+#[test]
+fn log_rotation_burst_does_not_alert() {
+    // logrotate renames every log it handles within the same second, with a
+    // numeric (`app.log.1`) or dateext (`app.log-20260924`) suffix — the exact
+    // prefix-preserving shape, but no letter in the suffix.
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD * 2 {
+        let suffix = if i % 2 == 0 { ".1" } else { "-20260924" };
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9005,
+            "logrotate",
+            &format!("/var/log/app{i}.log"),
+            &format!("/var/log/app{i}.log{suffix}"),
+            u64::from(i) * 10_000_000,
+        )));
+    }
+    assert!(alerts.is_empty());
+}
+
+#[test]
+fn mass_rename_with_random_hex_suffix_triggers() {
+    // Families that append a per-victim id rather than a fixed word still match.
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9006,
+            "encryptor",
+            &format!("/srv/share/r{i}.xlsx"),
+            &format!("/srv/share/r{i}.xlsx.id-3fa9c1e0"),
+            u64::from(i) * 100_000_000,
+        )));
+    }
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1486");
 }

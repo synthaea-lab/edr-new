@@ -726,10 +726,12 @@ impl RuleState {
     /// intermediate files) write many files quickly, but essentially none rename
     /// hundreds of pre-existing files to append a shared new suffix in seconds —
     /// see `RANSOMWARE_RENAME_THRESHOLD`'s doc for the calibration reasoning.
+    /// Log rotation is the one benign mass producer of this shape (`app.log` →
+    /// `app.log.1`, `app.log-20260924`), so a suffix with no letter in it never
+    /// counts — see [`is_rotation_suffix`].
     fn check_mass_rename_pattern(&mut self, event: &FileRenameEvent) -> Option<Alert> {
-        if !(event.new_path.starts_with(event.old_path.as_str())
-            && event.new_path.len() > event.old_path.len())
-        {
+        let suffix = event.new_path.strip_prefix(event.old_path.as_str())?;
+        if suffix.is_empty() || is_rotation_suffix(suffix) {
             return None;
         }
         let ts = event.meta.timestamp_ns;
@@ -759,6 +761,14 @@ impl RuleState {
     pub fn on_file_rename(&mut self, event: &FileRenameEvent) -> Vec<Alert> {
         self.check_mass_rename_pattern(event).into_iter().collect()
     }
+}
+
+/// Suffixes logrotate and similar rotators append (`.1`, `-20260924`, `.1.2`, `~`
+/// backups): no ASCII letter at all. Ransomware markers carry letters (`.locked`,
+/// `.WNCRY`, `.id-<hex>.[mail]`); an all-digit random suffix is the one blind spot,
+/// accepted over alerting on every rotation run.
+fn is_rotation_suffix(suffix: &str) -> bool {
+    !suffix.bytes().any(|b| b.is_ascii_alphabetic())
 }
 
 fn format_delta(delta_ns: u64) -> String {
