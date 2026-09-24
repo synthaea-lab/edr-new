@@ -11,6 +11,7 @@
 //! dated lab observations — treat them as data with provenance, not tunable noise.
 
 mod exclusions;
+mod ld_trust;
 mod sliding;
 mod state;
 mod stateless;

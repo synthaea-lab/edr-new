@@ -1345,6 +1345,12 @@ fn ml_cmdline_is_the_canonical_nul_joined_form() {
         mk("", &["sh", "-c", "chmod +x x"]).ml_cmdline(),
         "sh\0-c\0chmod +x x\0",
     );
+    // `env_security` (#363) never reaches the ML input: the captured linker
+    // environment is rule evidence, not a model feature, and must not leak into
+    // what the scorer tokenizes (or into training data exported from it).
+    let mut preloaded = mk("ls", &["ls"]);
+    preloaded.env_security = vec![("LD_PRELOAD".into(), "/tmp/x.so".into())];
+    assert_eq!(preloaded.ml_cmdline(), "ls\0");
 }
 
 #[test]
