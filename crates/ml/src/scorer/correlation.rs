@@ -44,7 +44,8 @@ pub struct CorrelationScorer {
     session: Session,
     forest: Forest,
     bounds: Option<FeatureBounds>,
-    #[allow(dead_code)] // TODO: use threshold in future phase when correlator integration lands
+    /// Conformal threshold: anomaly if score < threshold (issue #46).
+    /// `None` for legacy models without calibration.
     threshold: Option<f32>,
 }
 
@@ -118,10 +119,13 @@ impl CorrelationScorer {
 
     /// The anomaly score of `pid`'s behaviour over the bus's current window, or
     /// `None` when the window holds fewer than [`MIN_EVENT_COUNT`] events for the pid
-    /// (nothing to score yet).
+    /// (nothing to score yet), or when the score is below the conformal threshold
+    /// (normal behaviour, FP budget enforcement).
     ///
     /// `IsolationForest.decision_function`: negative = anomalous, positive = normal.
-    /// No threshold is imposed here — T2 feeds the belief state, it does not alert.
+    /// When a conformal threshold is available (issue #46), only scores below it
+    /// (anomalous, meeting the FP budget) are returned; normal scores return `None`
+    /// to avoid contributing to the belief state.
     ///
     /// # Errors
     ///
@@ -139,7 +143,18 @@ impl CorrelationScorer {
             bounds.validate(&features)?;
         }
 
-        self.run(&features).map(Some)
+        let score = self.run(&features)?;
+
+        // Conformal threshold: anomaly if score < threshold (issue #46).
+        // Normal scores (>= threshold) return None — they don't contribute to
+        // the belief state, enforcing the FP budget.
+        if let Some(threshold) = self.threshold
+            && score >= threshold
+        {
+            return Ok(None);
+        }
+
+        Ok(Some(score))
     }
 
     /// The anomaly score plus its top-`k` feature attributions — for a pid whose
@@ -169,6 +184,14 @@ impl CorrelationScorer {
         }
 
         let value = self.run(&features)?;
+
+        // Conformal threshold: anomaly if score < threshold (issue #46).
+        if let Some(threshold) = self.threshold
+            && value >= threshold
+        {
+            return Ok(None);
+        }
+
         let attribution = self.forest.attribute(&features)?;
         let names: Vec<&str> = FEATURE_NAMES.to_vec();
         Ok(Some(Score {
