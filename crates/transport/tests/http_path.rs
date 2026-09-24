@@ -16,6 +16,9 @@
 //!   `max_network_drain_attempts` budget, not `max_drain_attempts` (issue
 //!   #394): never having reached the server is weaker poison-segment
 //!   evidence than a 5xx it actually sent.
+//! - 200 with an unparseable body → retryable, but gated on `max_drain_attempts`
+//!   like a 5xx, not `max_network_drain_attempts` — the server was reached and
+//!   answered, so this isn't a connectivity blip (issue #414 follow-up).
 
 use std::{
     io::{Read as _, Write as _},
@@ -248,6 +251,46 @@ fn connection_refused_repeated_is_skipped_only_at_the_larger_network_budget() {
         skipped.load(Ordering::SeqCst),
         1,
         "network budget exhausted — forward progress restored"
+    );
+    assert_eq!(acked.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unparseable_200_body_repeated_is_skipped_at_the_shorter_server_budget() {
+    // Issue #414 follow-up: a 2xx with a body that fails to parse (e.g. a
+    // misconfigured reverse proxy answering 200 with an HTML error page) used
+    // to be classified as `Network`, getting the long connectivity budget —
+    // and being retried, and potentially ingested, up to
+    // `max_network_drain_attempts` times — even though the server was
+    // reached and answered. It must behave like a 5xx: retryable, but gated
+    // on the shorter `max_drain_attempts`.
+    let max_attempts = transport::DEFAULT_MAX_DRAIN_ATTEMPTS;
+    let max_network_attempts = transport::DEFAULT_MAX_NETWORK_DRAIN_ATTEMPTS;
+
+    let url = canned_server(200, "not valid json", max_attempts as usize);
+    let (mut uploader, acked, skipped) = uploader_against(&url, events(2));
+
+    for attempt in 1..max_attempts {
+        let err = uploader.upload_once().expect_err("bad body must surface");
+        assert!(err.is_retryable(), "an unparseable body is transient");
+        assert!(
+            !err.is_network_error(),
+            "the server was reached and answered — not a connectivity blip"
+        );
+        assert_eq!(
+            skipped.load(Ordering::SeqCst),
+            0,
+            "must not skip before max_drain_attempts (attempt {attempt})"
+        );
+    }
+    let err = uploader.upload_once().expect_err("bad body must surface");
+    assert!(err.is_retryable(), "an unparseable body is transient");
+    assert!(!err.is_network_error());
+    assert_eq!(
+        skipped.load(Ordering::SeqCst),
+        1,
+        "must skip at the shorter server budget ({max_attempts}), not the \
+         much larger network one ({max_network_attempts})"
     );
     assert_eq!(acked.load(Ordering::SeqCst), 0);
 }
