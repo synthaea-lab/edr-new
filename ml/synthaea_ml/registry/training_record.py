@@ -54,12 +54,16 @@ from synthaea_ml.data.manifest import (
     verify_manifest,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Bumped only when a field changes in a way that breaks readers.
 
 Bumped 1 → 2 in ADR-0009 for the addition of ``scenario_replays`` on
 ``TrainingRecord`` and the rename of the on-disk file to
 ``model_record.json``.
+
+Bumped 2 → 3 for issue #46: added optional ``conformal_calibration`` and
+``feature_bounds`` fields for FP-budget thresholds and OOD guards. Backward
+compatible (optional fields with None defaults).
 """
 
 MODEL_RECORD_FILENAME = "model_record.json"
@@ -81,6 +85,39 @@ class DatasetVersion:
     name: str
     baseline_sha256: str
     sample_count: int
+
+
+# ── Conformal calibration binding (issue #46, schema v3) ────────────────────
+
+
+@dataclass(frozen=True)
+class ConformalCalibration:
+    """Conformal prediction calibration metadata (issue #46).
+
+    Records the threshold computed from a calibration set to meet a stated FP
+    budget (e.g., ≤5 false positives per endpoint per day). See
+    ``synthaea_ml.calibration.calibrate_conformal`` for the computation.
+    """
+
+    fp_budget_per_endpoint_day: float
+    threshold: float
+    calibration_set_size: int
+    benign_baseline_rate: float
+    calibrated_at: str  # ISO 8601 UTC
+
+
+@dataclass(frozen=True)
+class FeatureBounds:
+    """Per-feature [min, max] bounds for out-of-distribution detection (issue #46).
+
+    Computed from the training set with a margin to avoid false OOD rejections
+    on legitimate edge cases. The Rust scorer validates feature vectors against
+    these bounds before inference.
+    """
+
+    feature_names: list[str]
+    min_values: list[float]
+    max_values: list[float]
 
 
 # ── Scenario replay binding (ADR-0009, schema v2) ───────────────────────────
@@ -180,13 +217,15 @@ class TrainingRecord:
     scenario_replays: list[ScenarioReplayResult] = field(default_factory=list)
     hyperparameters: dict[str, object] = field(default_factory=dict)
     extra: dict[str, str] = field(default_factory=dict)
+    conformal_calibration: ConformalCalibration | None = None
+    feature_bounds: FeatureBounds | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Deterministic dict serialisation. Uses explicit per-field packing
         so a nested frozen dataclass with mutable-typed fields (list, dict)
         cannot leak a dataclass-internal representation into the JSON.
         """
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "trained_at": self.trained_at,
             "training_script": self.training_script,
@@ -195,6 +234,11 @@ class TrainingRecord:
             "hyperparameters": dict(self.hyperparameters),
             "extra": dict(self.extra),
         }
+        if self.conformal_calibration is not None:
+            result["conformal_calibration"] = asdict(self.conformal_calibration)
+        if self.feature_bounds is not None:
+            result["feature_bounds"] = asdict(self.feature_bounds)
+        return result
 
 
 def _scenario_replay_to_dict(r: ScenarioReplayResult) -> dict[str, object]:
@@ -346,6 +390,8 @@ def write_training_record(
     hyperparameters: dict[str, object] | None = None,
     trained_at: datetime | None = None,
     extra: dict[str, str] | None = None,
+    conformal_calibration: ConformalCalibration | None = None,
+    feature_bounds: FeatureBounds | None = None,
 ) -> TrainingRecord:
     """Write ``model_dir/model_record.json``.
 
@@ -370,6 +416,10 @@ def write_training_record(
             to ``datetime.now(UTC)``.
         extra: Optional ``str`` → ``str`` metadata, namespaced under ``extra``
             so a future typed field cannot collide.
+        conformal_calibration: Optional conformal prediction calibration metadata
+            (issue #46). See ``synthaea_ml.calibration.calibrate_conformal``.
+        feature_bounds: Optional per-feature bounds for OOD detection (issue #46).
+            See ``synthaea_ml.calibration.compute_feature_bounds``.
 
     Returns:
         The ``TrainingRecord`` that was just written.
@@ -396,6 +446,8 @@ def write_training_record(
         scenario_replays=list(scenario_replays) if scenario_replays else [],
         hyperparameters=dict(hyperparameters) if hyperparameters else {},
         extra=dict(extra) if extra else {},
+        conformal_calibration=conformal_calibration,
+        feature_bounds=feature_bounds,
     )
 
     (model_dir / MODEL_RECORD_FILENAME).write_text(
@@ -418,11 +470,20 @@ def load_training_record(model_dir: Path) -> TrainingRecord:
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     schema_version = payload.get("schema_version")
-    if schema_version != SCHEMA_VERSION:
+    if schema_version not in (2, SCHEMA_VERSION):
         raise ValueError(
             f"unsupported {MODEL_RECORD_FILENAME} schema_version: {schema_version!r} "
-            f"(this reader knows {SCHEMA_VERSION})"
+            f"(this reader knows 2 and {SCHEMA_VERSION})"
         )
+
+    # Schema v3 fields (backward compatible: None if absent)
+    conformal_cal = None
+    if "conformal_calibration" in payload:
+        conformal_cal = ConformalCalibration(**payload["conformal_calibration"])  # type: ignore[arg-type]
+
+    feature_bounds = None
+    if "feature_bounds" in payload:
+        feature_bounds = FeatureBounds(**payload["feature_bounds"])  # type: ignore[arg-type]
 
     return TrainingRecord(
         schema_version=schema_version,
@@ -434,6 +495,8 @@ def load_training_record(model_dir: Path) -> TrainingRecord:
         ],
         hyperparameters=dict(payload.get("hyperparameters", {})),
         extra=dict(payload.get("extra", {})),
+        conformal_calibration=conformal_cal,
+        feature_bounds=feature_bounds,
     )
 
 
