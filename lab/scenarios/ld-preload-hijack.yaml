@@ -14,7 +14,10 @@ expected_detections:
     min_count: 1
     tolerance: 0
 notes: >
-  Depends on issue #363's env_security capture (PR #401) — not on main yet at the
-  time this scenario was written. A bare filename (no leading /) in LD_PRELOAD is
-  trusted (resolved via the linker's own search path) and does NOT fire; only an
-  explicit path outside LD_TRUST_PREFIXES does, which is what this scenario uses.
+  Depends on issue #363's env_security capture (PR #401). A bare filename (no
+  leading /) in LD_PRELOAD is trusted (resolved via the linker's own search path)
+  and does NOT fire; only an explicit path outside the trust set does, which is
+  what this scenario uses. The trust set is two layers (crates/rules/src/ld_trust.rs):
+  the built-in LD_TRUST_PREFIXES baseline plus whatever /etc/ld.so.conf (and its
+  includes) declares — minus /tmp, /var/tmp and /dev/shm, never trusted even if
+  listed there. Exactly one alert: `sleep` is the only exec carrying LD_PRELOAD.

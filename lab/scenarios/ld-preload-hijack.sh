@@ -54,13 +54,15 @@ C
 echo "Compiling the benign preload library ($LIB, outside the linker trust set)..."
 cc -fPIC -shared -o "$LIB" "$SRC"
 
-echo "Running 'ls' with LD_PRELOAD=$LIB (untrusted path)..."
+echo "Running 'sleep' with LD_PRELOAD=$LIB (untrusted path)..."
 # env_security (the captured LD_PRELOAD value) is read from /proc/<pid>/environ at
-# drain time, same path as the argv read — a bare `ls` can exit before the drain
-# runs, leaving env_security empty and no alert (argv.sh hit this on 6.1 under
-# load, see argv.yaml's notes). The `sh -c` wrapper plus `sleep 0.3` keeps the
-# process alive long enough without changing what the scenario asserts.
-LD_PRELOAD="$LIB" sh -c 'ls >/dev/null; sleep 0.3'
+# drain time, same path as the argv read — a short-lived process can exit before
+# the drain runs, leaving env_security empty and no alert (argv.sh hit this on 6.1
+# under load, see argv.yaml's notes). `sleep 0.3` stays alive long enough, and it's
+# a single exec: a `sh -c '...; sleep'` wrapper would put LD_PRELOAD on two execs
+# (sh, and the child that inherits it), so the alert count would be 1 or 2
+# depending on which ones the drain catches (#419 review).
+LD_PRELOAD="$LIB" sleep 0.3
 
 if [ -f "$MARKER" ]; then
     echo "Constructor ran (marker file present) — the preload actually loaded."
