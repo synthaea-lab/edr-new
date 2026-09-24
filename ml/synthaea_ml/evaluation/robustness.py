@@ -24,6 +24,7 @@ from typing import Any
 from synthaea_ml.data.canonical import ml_cmdline_from_record
 from synthaea_ml.evaluation.mutations.base import Mutator
 from synthaea_ml.evaluation.mutations.cmdline import ALL_T0_MUTATORS
+from synthaea_ml.evaluation.mutations.lineage import ALL_LINEAGE_MUTATORS
 from synthaea_ml.evaluation.mutations.prng import LCG
 from synthaea_ml.evaluation.scenario_replay import _sha256_file, load_expected_detections
 from synthaea_ml.features.cmdline import extract_features
@@ -64,7 +65,8 @@ def _select_mutators_for_tier(tier: str) -> list[Mutator]:
     if tier == "T0":
         return ALL_T0_MUTATORS
     if tier == "T1":
-        raise NotImplementedError("T1 mutators not yet implemented")
+        # T1 tier: cmdline + lineage mutations (correlation features added in T2)
+        return ALL_T0_MUTATORS + ALL_LINEAGE_MUTATORS
     if tier == "T2":
         raise NotImplementedError("T2 mutators not yet implemented")
     raise ValueError(f"invalid tier: {tier}")
