@@ -15,8 +15,8 @@
 # name => [box, kernel it proves]. Hyper-V box availability is thin: generic/*
 # only covers 5.15 and 6.1, so the 6.8 and 6.12 rows use community boxes that
 # ship a Hyper-V provider, each with manual fix-ups (README.md "Community
-# boxes"). The SMB /vagrant
-# prompt that got boxen/ubuntu-24.04 rejected is neutralised below (rsync only).
+# boxes"). The SMB /vagrant prompt that got boxen/ubuntu-24.04 rejected is
+# neutralised below (rsync only).
 LINUX_MACHINES = {
   "ubuntu2204" => { box: "generic/ubuntu2204", primary: true }, # 5.15 — oldest LTS
   "debian12"   => { box: "generic/debian12" },                  # 6.1  — Debian stable
