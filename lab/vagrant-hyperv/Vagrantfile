@@ -12,14 +12,16 @@
 #   vagrant ssh ubuntu2204
 #   vagrant destroy -f ubuntu2204   # rollback = destroy + up
 
-# name => [box, kernel it proves]. Hyper-V box availability is thin: the
-# generic/* boxes only cover 5.15 and 6.1. ubuntu2404 (6.8) and debian13 (6.12)
-# have no usable Hyper-V box — boxen/ubuntu-24.04 was tried and rejected (SMB
-# /vagrant prompt + a root disk too small for the toolchain). See README.md
-# "Missing boxes"; a home-built box is the remaining option.
+# name => [box, kernel it proves]. Hyper-V box availability is thin: generic/*
+# only covers 5.15 and 6.1, so the 6.8 and 6.12 rows use community boxes that
+# ship a Hyper-V provider, each with manual fix-ups (README.md "Community
+# boxes"). The SMB /vagrant
+# prompt that got boxen/ubuntu-24.04 rejected is neutralised below (rsync only).
 LINUX_MACHINES = {
   "ubuntu2204" => { box: "generic/ubuntu2204", primary: true }, # 5.15 — oldest LTS
   "debian12"   => { box: "generic/debian12" },                  # 6.1  — Debian stable
+  "ubuntu2404" => { box: "jtarpley/ubuntu2404_base" },          # 6.8  — current LTS
+  "debian13"   => { box: "shekeriev/debian-13" },               # 6.12 — Debian trixie
   "arch"       => { box: "generic/arch", provision: "../provisioning/arch-toolchain.sh" }, # rolling — #124
 }.freeze
 
