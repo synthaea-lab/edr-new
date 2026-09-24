@@ -28,17 +28,11 @@ const SHELL_COMMS: &[&str] = &[
 
 /// See `lineage.py::WEBSERVER_COMMS` — keep in sync.
 const WEBSERVER_COMMS: &[&str] = &[
-    "httpd",
-    "nginx",
-    "apache2",
-    "w3wp.exe",      // IIS worker process
-    "w3wp",
-    "node",          // Node.js web servers
-    "java",          // Tomcat, Spring Boot, etc.
-    "dotnet",        // .NET web apps
-    "uwsgi",
-    "gunicorn",
-    "php-fpm",
+    "httpd", "nginx", "apache2", "w3wp.exe", // IIS worker process
+    "w3wp", "node",   // Node.js web servers
+    "java",   // Tomcat, Spring Boot, etc.
+    "dotnet", // .NET web apps
+    "uwsgi", "gunicorn", "php-fpm",
 ];
 
 /// See `lineage.py::OFFICE_COMMS` — keep in sync.
@@ -63,8 +57,8 @@ const SYSTEM_PATHS: &[&str] = &[
     "/sbin/",
     "/usr/sbin/",
     "/usr/local/bin/",
-    "/System/Library/",           // macOS system binaries
-    "/Library/Apple/",            // macOS Apple-signed binaries
+    "/System/Library/", // macOS system binaries
+    "/Library/Apple/",  // macOS Apple-signed binaries
     "\\Windows\\System32\\",
     "\\Windows\\SysWOW64\\",
     "\\Windows\\SystemApps\\",
@@ -160,8 +154,9 @@ pub fn extract_features(event: &ExecEvent) -> [f32; 6] {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use schema::fixtures::exec;
+
+    use super::*;
 
     #[test]
     fn no_parent_lineage_has_all_zeros() {
@@ -219,7 +214,9 @@ mod tests {
     #[test]
     fn suspicious_path_detected() {
         let event = ExecEvent {
-            parent_image_path: Some("C:\\Users\\Bob\\AppData\\Local\\Temp\\dropper.exe".to_string()),
+            parent_image_path: Some(
+                "C:\\Users\\Bob\\AppData\\Local\\Temp\\dropper.exe".to_string(),
+            ),
             ..exec()
         };
         let feats = extract_features(&event);
