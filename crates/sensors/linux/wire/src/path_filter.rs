@@ -35,6 +35,13 @@
 //! Harmless on a normal target (the discriminant gates which bytes are ever used);
 //! rejected outright by BPF's stricter "no reading uninitialised stack" rule. Two
 //! always-initialised primitives sidestep it entirely.
+//!
+//! No new loops in this file. Everything here is inlined into each of the 14 file
+//! programs, so every loop multiplies verifier state across all of them: two small
+//! `while`-skip-the-slashes loops (d2f48bc) were enough to push every file program
+//! past the 1M-instruction limit on 5.15 (12/26 programs loaded, #429 review). The
+//! one existing loop, the pid-digit scan in [`is_proc_pid_root`], was already there
+//! and verified; prefer a fail-open early return over another loop.
 
 const O_WRONLY: i64 = 0o1;
 const O_RDWR: i64 = 0o2;
@@ -43,17 +50,6 @@ const O_TRUNC: i64 = 0o1000;
 
 fn is_write_intent(flags: i64) -> bool {
     flags & (O_WRONLY | O_RDWR | O_CREAT | O_TRUNC) != 0
-}
-
-/// Index of the first byte at or after `i` that isn't `/` — the kernel collapses
-/// repeated slashes when it resolves a path, so a parser matching path *segments*
-/// has to as well, or an attacker-inserted `//` desyncs it from what actually gets
-/// opened. `.get()`-based, matching this module's no-panic style.
-fn skip_slashes(path: &[u8], mut i: usize) -> usize {
-    while matches!(path.get(i), Some(&b'/')) {
-        i += 1;
-    }
-    i
 }
 
 /// Whether `path` is `/proc/<pid>/root` or anything under it — a numeric pid
@@ -69,18 +65,25 @@ fn skip_slashes(path: &[u8], mut i: usize) -> usize {
 /// verified so slowly probe load never finished within 15s+ on any of this
 /// function's 7 call sites — replaced for that, unrelated, reason.)
 fn is_proc_pid_root(path: &[u8]) -> bool {
-    const PROC: &[u8] = b"/proc";
-    let Some(prefix) = path.get(..PROC.len()) else {
+    const PREFIX: &[u8] = b"/proc/";
+    let Some(prefix) = path.get(..PREFIX.len()) else {
         return false;
     };
-    if prefix != PROC || !matches!(path.get(PROC.len()), Some(&b'/')) {
+    if prefix != PREFIX {
         return false;
     }
 
-    // `/proc//1//root/etc/shadow` resolves to the same file as
-    // `/proc/1/root/etc/shadow` (#429 review) — skip repeated separators
-    // wherever the kernel would, not just a single expected `/`.
-    let mut i = skip_slashes(path, PROC.len());
+    // The kernel collapses repeated `/`, so `/proc//1//root/etc/shadow` opens the
+    // same file as `/proc/1/root/etc/shadow` (#429 review). Skipping the run of
+    // slashes takes a loop per separator, and those two loops pushed every file
+    // program over the 1M-instruction verifier limit on 5.15. So fail open: a
+    // doubled slash at either separator counts as a match. No legitimate program
+    // writes these paths, so it costs no volume, and the event reaches
+    // `check_proc_root_escape`, which already skips empty segments.
+    let mut i = PREFIX.len();
+    if matches!(path.get(i), Some(&b'/')) {
+        return true;
+    }
     let pid_start = i;
     loop {
         let Some(&b) = path.get(i) else {
@@ -97,16 +100,20 @@ fn is_proc_pid_root(path: &[u8]) -> bool {
     if i == pid_start {
         return false;
     }
+    // path[i] == b'/' here — the pid/root separator.
 
-    i = skip_slashes(path, i);
+    let root_start = i + 1;
+    if matches!(path.get(root_start), Some(&b'/')) {
+        return true;
+    }
     const ROOT: &[u8] = b"root";
-    let Some(root_slice) = path.get(i..i + ROOT.len()) else {
+    let Some(root_slice) = path.get(root_start..root_start + ROOT.len()) else {
         return false;
     };
     if root_slice != ROOT {
         return false;
     }
-    matches!(path.get(i + ROOT.len()), None | Some(&b'/'))
+    matches!(path.get(root_start + ROOT.len()), None | Some(&b'/'))
 }
 
 /// Whether a file event on `path` should be dropped before it reaches the ring
@@ -197,7 +204,11 @@ mod tests {
 
     #[test]
     fn proc_self_root_mutation_escape_passes() {
-        assert!(!is_filtered_path(b"/proc/self/root/etc/cron.d/evade429", 0, true));
+        assert!(!is_filtered_path(
+            b"/proc/self/root/etc/cron.d/evade429",
+            0,
+            true
+        ));
     }
 
     #[test]
@@ -207,6 +218,13 @@ mod tests {
         // — `is_proc_pid_root` has to recognise it too, or `check_proc_root_escape`
         // never sees the event the filter already let through unfiltered anyway.
         assert!(!is_filtered_path(b"/proc//1//root/etc/shadow", 0, false));
+    }
+
+    #[test]
+    fn proc_pid_double_slash_before_root_is_not_filtered() {
+        // The second fail-open branch: a single `/` after `/proc`, doubled only
+        // at the pid/root separator.
+        assert!(!is_filtered_path(b"/proc/1//root/etc/shadow", 0, false));
     }
 
     #[test]
@@ -255,6 +273,10 @@ mod tests {
     #[test]
     fn unrelated_paths_are_never_filtered() {
         assert!(!is_filtered_path(b"/etc/passwd", 0, false));
-        assert!(!is_filtered_path(b"/home/user/.ssh/authorized_keys", 0, true));
+        assert!(!is_filtered_path(
+            b"/home/user/.ssh/authorized_keys",
+            0,
+            true
+        ));
     }
 }
