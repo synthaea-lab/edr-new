@@ -98,7 +98,7 @@ def main() -> None:
             f.write(json.dumps(case) + "\n")
 
     print(f"Generated {len(golden)} test cases to {output}")
-    print(f"\nBreakdown:")
+    print("\nBreakdown:")
     from collections import Counter
     by_mutator = Counter(c["mutation_class"] for c in golden)
     for mutator, count in by_mutator.items():

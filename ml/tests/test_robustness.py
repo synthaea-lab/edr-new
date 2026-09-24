@@ -3,7 +3,6 @@
 Validates the evaluation flow and RobustnessCard generation.
 """
 
-import tempfile
 from pathlib import Path
 
 import numpy as np

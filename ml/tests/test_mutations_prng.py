@@ -21,17 +21,10 @@ def test_lcg_default_seed() -> None:
     rng = LCG()
     assert rng.state == 0x59417481
 
-    # First few values with default seed
-    expected = [
-        0x5941748159417481,
-        0xB282EA82B282EA82,
-        0x0BC4668E0BC4668E,
-    ]
-
-    # Advance and check (values computed from Rust implementation)
+    # Advance and check (exact parity test is in golden fixture)
     for _ in range(3):
         val = rng.next()
-        # Just check that it produces a value (exact parity test is in golden fixture)
+        # Just check that it produces a value
         assert isinstance(val, int)
         assert 0 <= val <= 0xFFFFFFFFFFFFFFFF
 

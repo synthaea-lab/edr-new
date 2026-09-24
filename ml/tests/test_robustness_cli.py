@@ -3,8 +3,6 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from synthaea_ml.evaluation.robustness_cli import _find_previous_version, verify_robustness
 from synthaea_ml.registry.training_record import (
     DatasetVersion,

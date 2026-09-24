@@ -15,14 +15,13 @@ Flow:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import statistics
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from synthaea_ml.data.canonical import cmdline_str, ml_cmdline_from_record
+from synthaea_ml.data.canonical import ml_cmdline_from_record
 from synthaea_ml.evaluation.mutations.base import Mutator
 from synthaea_ml.evaluation.mutations.cmdline import ALL_T0_MUTATORS
 from synthaea_ml.evaluation.mutations.prng import LCG
@@ -239,7 +238,7 @@ def _load_events_from_source(events_source: Path) -> list[dict[str, Any]]:
             # Normalize to baseline format (argv/cmdline at top level)
             if "argv" in record:
                 events.append({"argv": record["argv"], "cmdline": record.get("cmdline")})
-            elif "cmdline" in record and not record.get("cmdline", "").strip() == "":
+            elif "cmdline" in record and record.get("cmdline", "").strip() != "":
                 # Windows: cmdline without argv
                 events.append({"cmdline": record["cmdline"]})
 

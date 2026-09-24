@@ -60,7 +60,7 @@ def test_mutation_features_match_golden(row: dict) -> None:
     # Verify mutated record matches (structure, not necessarily exact values for non-deterministic parts)
     # For deterministic mutators with fixed seed, this should match exactly
     if "argv" in expected_mutated:
-        assert "argv" in mutated, f"mutated record missing argv field"
+        assert "argv" in mutated, "mutated record missing argv field"
         # Lengths should match
         assert len(mutated["argv"]) == len(expected_mutated["argv"]), \
             f"argv length mismatch: {len(mutated['argv'])} != {len(expected_mutated['argv'])}"
@@ -93,7 +93,7 @@ def test_golden_covers_all_mutators() -> None:
     rows = golden_rows()
     mutator_classes_in_golden = {r["mutation_class"] for r in rows}
 
-    for mutator_name in MUTATORS.keys():
+    for mutator_name in MUTATORS:
         assert mutator_name in mutator_classes_in_golden, \
             f"mutator {mutator_name!r} not covered by golden fixture"
 

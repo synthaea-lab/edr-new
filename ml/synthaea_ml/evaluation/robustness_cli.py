@@ -204,7 +204,7 @@ def generate_report(model_dir: Path, output: Path | None = None) -> None:
             )
 
         if len(card.mutation_results) > 10:
-            lines.append(f"| ... | ... | ... | ... | ... | ... |")
+            lines.append("| ... | ... | ... | ... | ... | ... |")
             lines.append(f"| ({len(card.mutation_results) - 10} more results) |")
 
         lines.append("")

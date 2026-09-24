@@ -26,7 +26,7 @@ See https://github.com/synthaea-lab/edr-new/pull/405#issuecomment-5808683319
 
 import base64
 import copy
-from typing import Any
+from typing import Any, ClassVar
 
 from .base import Mutator
 from .prng import LCG
@@ -77,9 +77,9 @@ class Base64EncodeMutator(Mutator):
 class ArgumentReorderMutator(Mutator):
     """Shuffle command-line arguments.
 
-    Light: swap 2 adjacent args
+    Light: swap 2 adjacent args (skip argv[0])
     Medium: shuffle non-positional args (skip argv[0])
-    Heavy: full permutation
+    Heavy: same as medium (argv[0] must stay fixed to preserve executable)
     """
 
     def mutation_class_name(self) -> str:
@@ -96,8 +96,10 @@ class ArgumentReorderMutator(Mutator):
             return mutated
 
         if intensity == "light":
-            # Swap 2 adjacent args
-            idx = rng.uniform(0, len(argv) - 1)
+            # Swap 2 adjacent args (skip argv[0] to preserve executable)
+            if len(argv) < 3:
+                return mutated
+            idx = rng.uniform(1, len(argv) - 1)
             argv[idx], argv[idx + 1] = argv[idx + 1], argv[idx]
         elif intensity == "medium":
             # Shuffle non-positional (keep argv[0] in place)
@@ -105,7 +107,8 @@ class ArgumentReorderMutator(Mutator):
                 tail = argv[1:]
                 argv[1:] = rng.shuffle(tail)
         elif intensity == "heavy":
-            # Full permutation of args (keep argv[0] fixed to preserve executable)
+            # Same as medium for now (argv[0] must stay fixed to preserve executable)
+            # Future: could add --opt=val ↔ --opt val rewriting on top of shuffle
             if len(argv) > 1:
                 tail = argv[1:]
                 argv[1:] = rng.shuffle(tail)
@@ -125,7 +128,7 @@ class PathSubstitutionMutator(Mutator):
     Heavy: substitute all paths
     """
 
-    PATH_SUBSTITUTIONS = [
+    PATH_SUBSTITUTIONS: ClassVar[list[tuple[str, str]]] = [
         ("/bin/", "/usr/bin/"),
         ("/usr/bin/", "/bin/"),
         ("/sbin/", "/usr/sbin/"),
@@ -226,7 +229,7 @@ class PaddingMutator(Mutator):
     Heavy: add extensive padding
     """
 
-    COMMENTS = [
+    COMMENTS: ClassVar[list[str]] = [
         "# padding",
         "# comment",
         "# ",
