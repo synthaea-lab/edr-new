@@ -37,10 +37,17 @@ LINUX_MACHINES = {
 BUILD_HOST_SETUP = <<~'SH'
   set -eu
   free_gb=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  # Built under a temporary name and renamed once mkswap succeeded, so an
+  # interrupted run never leaves a headerless /swapfile-synthaea behind. No
+  # `mkswap -q`: util-linux 2.37 (ubuntu2204) does not have it.
   if [ ! -f /swapfile-synthaea ] && [ "$free_gb" -ge 8 ]; then
-    fallocate -l 4G /swapfile-synthaea || dd if=/dev/zero of=/swapfile-synthaea bs=1M count=4096
-    chmod 600 /swapfile-synthaea
-    mkswap -q /swapfile-synthaea
+    rm -f /swapfile-synthaea.tmp
+    fallocate -l 4G /swapfile-synthaea.tmp || dd if=/dev/zero of=/swapfile-synthaea.tmp bs=1M count=4096
+    chmod 600 /swapfile-synthaea.tmp
+    mkswap /swapfile-synthaea.tmp > /dev/null
+    mv /swapfile-synthaea.tmp /swapfile-synthaea
+  fi
+  if [ -f /swapfile-synthaea ] && ! grep -q "^/swapfile-synthaea " /etc/fstab; then
     echo "/swapfile-synthaea none swap sw 0 0" >> /etc/fstab
   fi
   if [ -f /swapfile-synthaea ]; then
