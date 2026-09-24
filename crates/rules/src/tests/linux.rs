@@ -598,3 +598,98 @@ fn listen_port_two_distinct_new_ports_each_alert() {
     assert_eq!(first.len(), 1);
     assert_eq!(second.len(), 1);
 }
+
+#[test]
+fn mass_rename_with_appended_suffix_triggers_at_threshold() {
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9000,
+            "encryptor",
+            &format!("/home/u/file{i}.docx"),
+            &format!("/home/u/file{i}.docx.locked"),
+            u64::from(i) * 100_000_000, // 100ms apart, well inside the 5s window
+        )));
+    }
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1486");
+}
+
+#[test]
+fn mass_rename_below_threshold_does_not_alert() {
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD - 1 {
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9001,
+            "encryptor",
+            &format!("/home/u/file{i}.docx"),
+            &format!("/home/u/file{i}.docx.locked"),
+            u64::from(i) * 100_000_000,
+        )));
+    }
+    assert!(alerts.is_empty());
+}
+
+#[test]
+fn mass_rename_does_not_realert_within_the_same_window() {
+    let mut state = RuleState::new();
+    let mut first_batch = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        first_batch.extend(state.on_file_rename(&file_rename_event_full(
+            9002,
+            "encryptor",
+            &format!("/home/u/a{i}.docx"),
+            &format!("/home/u/a{i}.docx.locked"),
+            u64::from(i) * 100_000_000,
+        )));
+    }
+    assert_eq!(first_batch.len(), 1);
+    // One more rename immediately after, still inside the 5s window — the alert
+    // already fired for this window, so no second one.
+    let again = state.on_file_rename(&file_rename_event_full(
+        9002,
+        "encryptor",
+        "/home/u/more.docx",
+        "/home/u/more.docx.locked",
+        RANSOMWARE_RENAME_WINDOW_NS - 1,
+    ));
+    assert!(again.is_empty());
+}
+
+#[test]
+fn rename_without_a_preserved_prefix_is_never_counted() {
+    // A normal `mv a b` — new_path bears no relation to old_path — must never
+    // contribute to the ransomware counter, no matter how many happen in a burst.
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD * 2 {
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9003,
+            "mv",
+            &format!("/home/u/src{i}.txt"),
+            &format!("/home/u/dst{i}.txt"),
+            u64::from(i) * 100_000_000,
+        )));
+    }
+    assert!(alerts.is_empty());
+}
+
+#[test]
+fn rename_outside_the_window_does_not_accumulate() {
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        // 1s apart — each batch of a few stays under threshold within any 5s
+        // window once the front of the sliding window has evicted the oldest.
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9004,
+            "encryptor",
+            &format!("/home/u/b{i}.docx"),
+            &format!("/home/u/b{i}.docx.locked"),
+            u64::from(i) * 2_000_000_000, // 2s apart — spread over 2 * threshold seconds
+        )));
+    }
+    assert!(alerts.is_empty());
+}

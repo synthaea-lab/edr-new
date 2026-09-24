@@ -40,6 +40,16 @@ pub(crate) const AUTH_FAILURE_WINDOW_NS: u64 = 60_000_000_000; // 60s
 pub(crate) const BEACON_THRESHOLD: u32 = 3;
 pub(crate) const BEACON_WINDOW_NS: u64 = 60_000_000_000; // 60s
 
+/// RANSOMWARE-RENAME threshold and window (T1486): N renames by the same pid, each
+/// adding a new suffix onto its own old path (`document.docx` →
+/// `document.docx.locked`), in X seconds. 20-in-5s clears any plausible benign bulk
+/// rename (a script tagging a handful of its own output files) while staying well
+/// under what a real encryptor manages on modern storage — issue #262's own example
+/// ("100+ files modified in 10s") is a full order of magnitude higher than this
+/// threshold, so this alerts well before that volume is reached.
+pub(crate) const RANSOMWARE_RENAME_THRESHOLD: u32 = 20;
+pub(crate) const RANSOMWARE_RENAME_WINDOW_NS: u64 = 5_000_000_000; // 5s
+
 /// Processes excluded from SELF-SPAWN (child side) — frequent legitimate self-spawn
 /// confirmed in lab.
 /// MpCmdRun.exe (Defender): false positive observed during the 2026-08-24 tests.

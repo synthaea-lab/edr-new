@@ -6,7 +6,7 @@ use std::{collections::HashMap, net::IpAddr};
 
 use schema::{
     AuthEvent, AuthOutcome, ConnectEvent, ExecEvent, FileOpenEvent, FileQuarantineEvent,
-    ListenPortEvent, NetworkFlowEvent, User,
+    FileRenameEvent, ListenPortEvent, NetworkFlowEvent, User,
 };
 use store::BoundedMap;
 
@@ -15,9 +15,10 @@ use crate::{
     exclusions::{
         AGENT_CHILD_EXCLUSIONS, AUTH_FAILURE_THRESHOLD, AUTH_FAILURE_WINDOW_NS, BEACON_THRESHOLD,
         BEACON_WINDOW_NS, BROWSERS, DOWNLOAD_EXEC_WINDOW_NS, DOWNLOADER_COMMS,
-        LOLBIN_LEGIT_PARENTS, LOLBINS, QUARANTINE_EXEC_WINDOW_NS, SELF_SPAWN_EXCLUSIONS,
-        SELF_SPAWN_PARENT_EXCLUSIONS, SELF_SPAWN_THRESHOLD, SELF_SPAWN_WINDOW_NS, SHELL_COMMS,
-        STANDARD_PORTS, SUSPECT_CHILDREN_WIN, SUSPECT_PARENTS_WIN, WEB_SERVER_COMMS,
+        LOLBIN_LEGIT_PARENTS, LOLBINS, QUARANTINE_EXEC_WINDOW_NS, RANSOMWARE_RENAME_THRESHOLD,
+        RANSOMWARE_RENAME_WINDOW_NS, SELF_SPAWN_EXCLUSIONS, SELF_SPAWN_PARENT_EXCLUSIONS,
+        SELF_SPAWN_THRESHOLD, SELF_SPAWN_WINDOW_NS, SHELL_COMMS, STANDARD_PORTS,
+        SUSPECT_CHILDREN_WIN, SUSPECT_PARENTS_WIN, WEB_SERVER_COMMS,
     },
     has_write_intent,
     sliding::{FlowPortDedup, SlidingCounter},
@@ -81,6 +82,11 @@ pub struct RuleState {
     /// LRU-bounded like every other counter: a spray across many fabricated
     /// usernames must not grow this without limit.
     auth_failures: BoundedMap<(String, String), SlidingCounter>,
+    /// pid → sliding counter for RANSOMWARE-RENAME (T1486, issue #262): renames by
+    /// this pid where `new_path` is `old_path` plus an appended suffix. LRU-bounded:
+    /// a hostile process renaming under many different pids (unusual, but not
+    /// impossible) must not grow this without limit either.
+    ransomware_rename: BoundedMap<u32, SlidingCounter>,
     /// The agent's own pid, for [`Self::check_self_spawn`]'s narrow exclusion of
     /// its own known children (issue #403). `None` until [`Self::seed_own_pid`] is
     /// called — `sensor-*` crates stay `schema`-only (`tools/check-deps.py`), so
@@ -118,6 +124,7 @@ impl RuleState {
             beacon_flow_dedup: BoundedMap::new(COUNTER_CAP),
             known_listeners: BoundedMap::new(COUNTER_CAP),
             auth_failures: BoundedMap::new(COUNTER_CAP),
+            ransomware_rename: BoundedMap::new(COUNTER_CAP),
             own_pid: None,
             ld_trust_extra: Vec::new(),
         }
@@ -703,6 +710,54 @@ impl RuleState {
                 timestamp_ns: event.meta.timestamp_ns,
             },
         );
+    }
+
+    /// T1486 — Data Encrypted for Impact. Ransomware's near-universal tell: a burst
+    /// of renames, each keeping the original filename intact and appending a new
+    /// suffix (`invoice.pdf` → `invoice.pdf.locked`), from the same pid, in a tight
+    /// window. Extension-agnostic by design — matching on "`old_path` is a strict
+    /// prefix of `new_path`" catches every real family's naming scheme (`.locked`,
+    /// `.encrypted`, `.WNCRY`, a random hex suffix, ...) without a list to keep
+    /// current against new strains, and without false-positiving on renames that
+    /// *don't* preserve the original name (a normal `mv a b` has no such relation).
+    ///
+    /// Deliberately keyed on rename shape alone, not `FileWriteEvent` volume: many
+    /// legitimate bulk operations (package installs, `tar` extraction, a compiler's
+    /// intermediate files) write many files quickly, but essentially none rename
+    /// hundreds of pre-existing files to append a shared new suffix in seconds —
+    /// see `RANSOMWARE_RENAME_THRESHOLD`'s doc for the calibration reasoning.
+    fn check_mass_rename_pattern(&mut self, event: &FileRenameEvent) -> Option<Alert> {
+        if !(event.new_path.starts_with(event.old_path.as_str())
+            && event.new_path.len() > event.old_path.len())
+        {
+            return None;
+        }
+        let ts = event.meta.timestamp_ns;
+        let entry = self
+            .ransomware_rename
+            .get_or_insert_with(event.meta.pid, SlidingCounter::default);
+        let count = entry.record(ts, RANSOMWARE_RENAME_WINDOW_NS);
+        if count >= RANSOMWARE_RENAME_THRESHOLD && entry.try_alert(ts, RANSOMWARE_RENAME_WINDOW_NS)
+        {
+            return Some(Alert {
+                technique: "T1486",
+                message: format!(
+                    "pid={} comm={}: {count} files renamed with an appended suffix in {}s \
+                     (e.g. {} → {}) — suspected ransomware encryption pass",
+                    event.meta.pid,
+                    event.meta.comm,
+                    RANSOMWARE_RENAME_WINDOW_NS / 1_000_000_000,
+                    event.old_path,
+                    event.new_path,
+                ),
+            });
+        }
+        None
+    }
+
+    /// To be called for every `FileRenameEvent` in the stream (T1486, issue #262).
+    pub fn on_file_rename(&mut self, event: &FileRenameEvent) -> Vec<Alert> {
+        self.check_mass_rename_pattern(event).into_iter().collect()
     }
 }
 
