@@ -88,19 +88,25 @@ SUSPICIOUS_PATHS = [
 ]
 
 
-def matches_any_ci(value: str | None, needles: list[str]) -> bool:
-    """Check if a string (case-insensitive) matches any item in a list.
+def matches_comm_ci(comm: str | None, needles: list[str]) -> bool:
+    """Check if a process comm (case-insensitive) matches any item in a list.
 
-    Returns True if value (lowercased) equals or contains any needle (lowercased).
-    Used for both exact comm matching and path substring matching.
+    Matches on basename only — "C:\\Windows\\System32\\cmd.exe" matches "cmd.exe", not "cmd".
     """
-    if not value:
+    if not comm:
         return False
-    value_lower = value.lower()
-    return any(
-        value_lower == needle.lower() or needle.lower() in value_lower
-        for needle in needles
-    )
+    # Extract basename (handle both Unix / and Windows \ separators)
+    basename = comm.split("/")[-1].split("\\")[-1]
+    basename_lower = basename.lower()
+    return any(basename_lower == needle.lower() for needle in needles)
+
+
+def matches_path_ci(path: str | None, needles: list[str]) -> bool:
+    """Check if a path (case-insensitive) contains any substring from a list."""
+    if not path:
+        return False
+    path_lower = path.lower()
+    return any(needle.lower() in path_lower for needle in needles)
 
 
 def extract_features(event: dict) -> list[float]:
@@ -120,11 +126,11 @@ def extract_features(event: dict) -> list[float]:
     parent_image_path = event.get("parent_image_path")
 
     has_parent = parent_comm is not None or parent_image_path is not None
-    parent_comm_is_shell = matches_any_ci(parent_comm, SHELL_COMMS)
-    parent_comm_is_webserver = matches_any_ci(parent_comm, WEBSERVER_COMMS)
-    parent_comm_is_office = matches_any_ci(parent_comm, OFFICE_COMMS)
-    parent_path_is_system = matches_any_ci(parent_image_path, SYSTEM_PATHS)
-    parent_path_is_suspicious = matches_any_ci(parent_image_path, SUSPICIOUS_PATHS)
+    parent_comm_is_shell = matches_comm_ci(parent_comm, SHELL_COMMS)
+    parent_comm_is_webserver = matches_comm_ci(parent_comm, WEBSERVER_COMMS)
+    parent_comm_is_office = matches_comm_ci(parent_comm, OFFICE_COMMS)
+    parent_path_is_system = matches_path_ci(parent_image_path, SYSTEM_PATHS)
+    parent_path_is_suspicious = matches_path_ci(parent_image_path, SUSPICIOUS_PATHS)
 
     return [
         1.0 if has_parent else 0.0,

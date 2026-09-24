@@ -26,7 +26,7 @@ fn close(got: f32, expected: f64) -> bool {
     (got - expected32).abs() <= 1e-4 * expected32.abs().max(1.0)
 }
 
-/// Construct an ExecEvent from a JSON event dict (from golden fixture).
+/// Construct an `ExecEvent` from a JSON event dict (from golden fixture).
 fn event_from_json(value: &Value) -> ExecEvent {
     let image_path = value["image_path"].as_str().unwrap_or("").to_string();
     let cmdline = value["cmdline"].as_str().unwrap_or("").to_string();

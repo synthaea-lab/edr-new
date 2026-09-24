@@ -2,8 +2,8 @@
 //! `ml/synthaea_ml/features/lineage.py`.
 //!
 //! This is a parity seam: a model trained on the Python vectors only scores consistently
-//! here if both sides produce the identical vector for the same ExecEvent (same parent_comm,
-//! parent_image_path values). The pairing is locked by `ml/tests/fixtures/lineage_golden.jsonl`,
+//! here if both sides produce the identical vector for the same `ExecEvent` (same `parent_comm`,
+//! `parent_image_path` values). The pairing is locked by `ml/tests/fixtures/lineage_golden.jsonl`,
 //! checked from Rust (this crate's golden test) and Python (`ml/tests/test_lineage_golden.py`).
 //!
 //! These features raise evasion cost: an attacker can rewrite any single command line cheaply,
@@ -100,14 +100,18 @@ pub const FEATURE_NAMES: [&str; 6] = [
     "parent_path_is_suspicious",
 ];
 
-/// Check if a string (case-insensitive) matches any item in a list.
-fn matches_any_ci(value: &str, needles: &[&str]) -> bool {
-    let lower = value.to_lowercase();
-    needles.iter().any(|&n| {
-        let needle_lower = n.to_lowercase();
-        // Match exact basename for comm, substring for paths
-        lower == needle_lower || lower.contains(&needle_lower)
-    })
+/// Check if a process comm (case-insensitive) matches any item in a list.
+/// Matches on basename only — "C:\Windows\System32\cmd.exe" matches "cmd.exe", not "cmd".
+fn matches_comm_ci(comm: &str, needles: &[&str]) -> bool {
+    let basename = comm.rsplit(['/', '\\']).next().unwrap_or(comm);
+    let lower = basename.to_lowercase();
+    needles.iter().any(|&n| lower == n.to_lowercase())
+}
+
+/// Check if a path (case-insensitive) contains any substring from a list.
+fn matches_path_ci(path: &str, needles: &[&str]) -> bool {
+    let lower = path.to_lowercase();
+    needles.iter().any(|&n| lower.contains(&n.to_lowercase()))
 }
 
 /// The 6-feature lineage vector, in [`FEATURE_NAMES`] order.
@@ -122,27 +126,27 @@ pub fn extract_features(event: &ExecEvent) -> [f32; 6] {
     let parent_comm_is_shell = event
         .parent_comm
         .as_ref()
-        .map_or(false, |comm| matches_any_ci(comm, SHELL_COMMS));
+        .is_some_and(|comm| matches_comm_ci(comm, SHELL_COMMS));
 
     let parent_comm_is_webserver = event
         .parent_comm
         .as_ref()
-        .map_or(false, |comm| matches_any_ci(comm, WEBSERVER_COMMS));
+        .is_some_and(|comm| matches_comm_ci(comm, WEBSERVER_COMMS));
 
     let parent_comm_is_office = event
         .parent_comm
         .as_ref()
-        .map_or(false, |comm| matches_any_ci(comm, OFFICE_COMMS));
+        .is_some_and(|comm| matches_comm_ci(comm, OFFICE_COMMS));
 
     let parent_path_is_system = event
         .parent_image_path
         .as_ref()
-        .map_or(false, |path| matches_any_ci(path, SYSTEM_PATHS));
+        .is_some_and(|path| matches_path_ci(path, SYSTEM_PATHS));
 
     let parent_path_is_suspicious = event
         .parent_image_path
         .as_ref()
-        .map_or(false, |path| matches_any_ci(path, SUSPICIOUS_PATHS));
+        .is_some_and(|path| matches_path_ci(path, SUSPICIOUS_PATHS));
 
     [
         if has_parent { 1.0 } else { 0.0 },
@@ -241,5 +245,49 @@ mod tests {
         };
         let feats = extract_features(&event);
         assert_eq!(feats[4], 1.0); // parent_path_is_system
+    }
+
+    #[test]
+    fn comm_with_shell_substring_is_not_shell() {
+        // Regression: "sh" in SHELL_COMMS should not match "photoshop.exe"
+        let event = ExecEvent {
+            parent_comm: Some("photoshop.exe".to_string()),
+            ..exec()
+        };
+        let feats = extract_features(&event);
+        assert_eq!(feats[1], 0.0); // parent_comm_is_shell should be false
+    }
+
+    #[test]
+    fn exact_shell_comm_still_matches() {
+        // "sh" itself should still match
+        let event = ExecEvent {
+            parent_comm: Some("sh".to_string()),
+            ..exec()
+        };
+        let feats = extract_features(&event);
+        assert_eq!(feats[1], 1.0); // parent_comm_is_shell should be true
+    }
+
+    #[test]
+    fn shell_comm_with_path_matches_basename() {
+        // "/usr/bin/bash" should match "bash" in SHELL_COMMS
+        let event = ExecEvent {
+            parent_comm: Some("/usr/bin/bash".to_string()),
+            ..exec()
+        };
+        let feats = extract_features(&event);
+        assert_eq!(feats[1], 1.0); // parent_comm_is_shell should be true
+    }
+
+    #[test]
+    fn comm_with_webserver_substring_is_not_webserver() {
+        // "java" in WEBSERVER_COMMS should not match "javac.exe"
+        let event = ExecEvent {
+            parent_comm: Some("javac.exe".to_string()),
+            ..exec()
+        };
+        let feats = extract_features(&event);
+        assert_eq!(feats[2], 0.0); // parent_comm_is_webserver should be false
     }
 }

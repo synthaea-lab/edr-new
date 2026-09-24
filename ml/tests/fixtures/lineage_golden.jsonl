@@ -18,3 +18,8 @@
 {"name": "node_webserver", "event": {"image_path": "/bin/sh", "cmdline": "sh -c env", "parent_comm": "node"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
 {"name": "java_webserver", "event": {"image_path": "/bin/bash", "cmdline": "bash -c whoami", "parent_comm": "java"}, "features": [1.0, 0.0, 1.0, 0.0, 0.0, 0.0]}
 {"name": "macos_system_path", "event": {"image_path": "/usr/bin/say", "cmdline": "say hello", "parent_image_path": "/System/Library/CoreServices/Finder.app/Contents/MacOS/Finder"}, "features": [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]}
+{"name": "photoshop_not_shell", "event": {"image_path": "C:\\Users\\Bob\\file.txt", "cmdline": "notepad file.txt", "parent_comm": "photoshop.exe"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "flash_not_shell", "event": {"image_path": "/usr/bin/ls", "cmdline": "ls", "parent_comm": "flash.exe"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "javac_not_webserver", "event": {"image_path": "Main.class", "cmdline": "java Main", "parent_comm": "javac.exe"}, "features": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "exact_sh_is_shell", "event": {"image_path": "/usr/bin/ls", "cmdline": "ls -la", "parent_comm": "sh"}, "features": [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
+{"name": "bash_with_full_path", "event": {"image_path": "/usr/bin/curl", "cmdline": "curl https://example.com", "parent_comm": "/usr/bin/bash"}, "features": [1.0, 1.0, 0.0, 0.0, 0.0, 0.0]}
