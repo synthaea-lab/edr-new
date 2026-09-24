@@ -17,10 +17,13 @@ model Tenant {
   createdAt DateTime @default(now()) @map("created_at")
 
   // Relations
-  agents     Agent[]
-  detections Detection[]
-  cases      Case[]
-  auditLogs  AuditLog[]  @relation("TenantAuditLogs")
+  agents          Agent[]
+  detections      Detection[]
+  cases           Case[]
+  auditLogs       AuditLog[]       @relation("TenantAuditLogs")
+  contentReleases ContentRelease[]
+  corpusVersions  CorpusVersion[]
+  corpusSamples   CorpusSample[]
 
   @@map("tenants")
 }
@@ -32,6 +35,7 @@ model Agent {
   enrollmentId String   @unique @map("enrollment_id") // mTLS cert subject CN
   hostname     String?
   version      String?
+  ring         String   @default("prod") // Canary ring: canary_0, canary_1, canary_2, prod
   lastSeen     DateTime @map("last_seen")
   createdAt    DateTime @default(now()) @map("created_at")
 
@@ -39,6 +43,8 @@ model Agent {
 
   @@map("agents")
   @@index([tenantId, lastSeen])
+  @@index([tenantId, ring])
+  @@index([tenantId, ring, lastSeen])
   @@index([enrollmentId])
 }
 
@@ -99,4 +105,69 @@ model AuditLog {
   @@index([tenantId, timestamp])
   @@index([userId, timestamp])
   @@index([action])
+}
+
+// Content release - tracks content manifest versions per ring
+model ContentRelease {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  ring            String   // canary_0, canary_1, canary_2, prod
+  releaseVersion  Int      @map("release_version") // Monotone counter
+  manifestUrl     String   @map("manifest_url") // Storage URL for manifest JSON
+  manifestSha256  String   @map("manifest_sha256") // SHA-256 of manifest file
+  status          String   @default("active") // active, halted, rolled_back
+  releasedAt      DateTime @map("released_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, ring, releaseVersion])
+  @@map("content_releases")
+  @@index([tenantId, ring, status])
+  @@index([tenantId, ring, releaseVersion])
+}
+
+// Corpus version - versioned snapshot of site-specific benign corpus
+model CorpusVersion {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  version         Int      // Monotone version counter (per tenant)
+  sampleCount     Int      @map("sample_count") // Number of samples in this version
+  exportUrl       String?  @map("export_url") // JSONL export URL (for ML pipeline)
+  exportSha256    String?  @map("export_sha256") // SHA-256 of JSONL export
+  status          String   @default("collecting") // collecting, finalized, archived
+  collectionStart DateTime @map("collection_start") // Start of collection period
+  collectionEnd   DateTime? @map("collection_end") // End of collection period (when finalized)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  samples CorpusSample[]
+
+  @@unique([tenantId, version])
+  @@map("corpus_versions")
+  @@index([tenantId, status])
+  @@index([tenantId, version])
+}
+
+// Corpus sample - individual benign telemetry sample for T3 curation
+model CorpusSample {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  corpusVersionId String   @map("corpus_version_id")
+  agentId         String   @map("agent_id") // Source agent for provenance
+  timestamp       DateTime // Event timestamp
+  eventType       String   @map("event_type") // exec, file_open, connect, etc.
+
+  // Event data (JSON) - normalized schema::Event
+  event           Json
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  corpusVersion CorpusVersion @relation(fields: [corpusVersionId], references: [id], onDelete: Cascade)
+
+  @@map("corpus_samples")
+  @@index([tenantId, corpusVersionId])
+  @@index([agentId, timestamp])
+  @@index([eventType])
 }

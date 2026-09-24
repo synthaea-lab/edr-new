@@ -46,6 +46,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       status: "ok",
       agentId: agent.id,
+      ring: agent.ring,
       lastSeen: agent.lastSeen.toISOString(),
     });
   } catch (error) {
