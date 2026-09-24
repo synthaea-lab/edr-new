@@ -1,0 +1,22 @@
+name: signal
+platform: linux
+script: signal.sh
+simulates: >
+  Tampering with the agent by signal: an unprivileged SIGTERM and SIGKILL aimed at
+  the agent (both fail with EPERM, the agent survives), next to 62 signals between
+  unrelated processes and one existence probe (kill -0) to the agent. Issue #362:
+  asserts the kernel-side SIGNAL_WATCH_PID filter and the T1562.001 rule on
+  Event::Signal. The script's own PASS/FAIL checks also assert the event counts
+  (zero Signal events from the unrelated traffic).
+expected_detections:
+  - technique: "T1562.001"
+    rule: check_security_process_signal   # crates/rules/src/stateless.rs
+    min_count: 2   # the SIGTERM and SIGKILL attempts; kill -0 must not alert
+    tolerance: 0
+notes: >
+  Covers the default `live` mode only. The real SIGKILL path (`kill`, restart the
+  agent, then `verify-kill`) is a separate, manual step because it kills the agent:
+  the probe records the SIGKILL in the SIGNAL_TAMPER_LAST map, pinned under
+  /sys/fs/bpf/synthaea/, and the restarted agent replays it as a T1562.001 alert.
+  Needs bpffs mounted at /sys/fs/bpf (systemd distros do it at boot); without it the
+  agent warns at startup and only the live checks can pass.
