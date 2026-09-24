@@ -16,13 +16,18 @@
 # Busybox userlands (Alpine): /bin/sh is a symlink to the busybox multi-call binary,
 # which dispatches by argv[0] — copying it to a file named "nginx" breaks its own
 # applet lookup ("applet not found"), so this can't just `cp /bin/sh`. We fall back
-# to /bin/bash there instead (a real standalone binary, unaffected by that dispatch).
-# That introduces a second wrinkle: bash tail-call-optimizes a `-c` script whose
-# entire body is one simple command, self-exec'ing in place rather than forking —
-# which would leave the child's ppid pointing at this script instead of at the
-# nginx-named process. Wrapping the inner shell in an explicit subshell (parens)
-# forces the fork that optimization would otherwise skip. Validated live on Alpine
-# 6.18 (PR #415 review) — 3/3 alerts, 0 ppid=0.
+# to $BASH there instead (a real standalone binary, unaffected by that dispatch) —
+# the interpreter actually running this script, not a hardcoded /bin/bash path: the
+# script's own shebang already requires bash, so a "no bash available" branch could
+# never be reached anyway (#430 review).
+#
+# Both branches wrap the inner shell in an explicit subshell (parens): bash and dash
+# both tail-call-optimize a `-c` script whose entire body is one simple command,
+# self-exec'ing in place rather than forking, which would leave the child's ppid
+# pointing at this script instead of at the nginx-named process. The subshell forces
+# the fork that optimization would otherwise skip — costs nothing on either shell,
+# and keeps the two branches identical in shape. Validated live on Alpine 6.18 (PR
+# #415 review) — 3/3 alerts, 0 ppid=0.
 #
 # Usage:
 #   1) terminal A: sudo target/release/agent run --events events.jsonl --alerts alerts.ndjson
@@ -45,19 +50,11 @@ trap cleanup EXIT
 
 SH_TARGET=$(readlink -f /bin/sh 2>/dev/null || echo /bin/sh)
 if [[ "$SH_TARGET" == *busybox* ]]; then
-    if ! command -v bash >/dev/null 2>&1; then
-        echo "ERROR: /bin/sh is busybox (multi-call) and no /bin/bash is available." >&2
-        echo "Renaming busybox to 'nginx' breaks its own applet dispatch (it looks" >&2
-        echo "for an applet literally named 'nginx' and finds none). Install bash," >&2
-        echo "or adapt this scenario to a different standalone shell." >&2
-        exit 1
-    fi
-    cp /bin/bash "$FAKE_WEBSERVER"
-    INNER_CMD='(/bin/sh -c "id >/dev/null")'
+    cp "$BASH" "$FAKE_WEBSERVER"
 else
     cp /bin/sh "$FAKE_WEBSERVER"
-    INNER_CMD='/bin/sh -c "id >/dev/null"'
 fi
+INNER_CMD='(/bin/sh -c "id >/dev/null")'
 
 echo "Spawning $ITERATIONS shells from a process named 'nginx' ($FAKE_WEBSERVER)..."
 for i in $(seq 1 "$ITERATIONS"); do
