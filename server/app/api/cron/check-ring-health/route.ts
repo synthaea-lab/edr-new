@@ -1,7 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-const CRON_SECRET = process.env.CRON_SECRET || "dev_cron_secret";
 const RINGS = ["canary_0", "canary_1", "canary_2"];
 const SILENCE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
@@ -28,9 +27,19 @@ const MAX_DETECTION_RATE_DROP = 0.20;   // 20% detection rate drop
  */
 export async function GET(req: NextRequest) {
   try {
-    // Verify cron secret
+    // SECURITY: Verify cron secret (must be configured in production)
+    // DO NOT use a hardcoded fallback - fail explicitly if not configured
+    const cronSecret = process.env.CRON_SECRET;
+    if (!cronSecret) {
+      console.error("CRON_SECRET environment variable is not configured");
+      return NextResponse.json(
+        { error: "Server misconfiguration - CRON_SECRET not set" },
+        { status: 500 }
+      );
+    }
+
     const authHeader = req.headers.get("Authorization");
-    if (authHeader !== `Bearer ${CRON_SECRET}`) {
+    if (authHeader !== `Bearer ${cronSecret}`) {
       return NextResponse.json(
         { error: "Unauthorized" },
         { status: 401 }
