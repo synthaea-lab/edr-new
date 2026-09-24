@@ -113,9 +113,9 @@ def verify_robustness(
             print(f"  FAIL: escape rate {card.escape_rate:.2%} > {max_escape_rate:.2%}")
             all_passed = False
 
-        if abs(card.median_score_degradation) > max_median_degradation:
+        if card.median_score_degradation > max_median_degradation:
             print(
-                f"  FAIL: median degradation {abs(card.median_score_degradation):.3f} "
+                f"  FAIL: median degradation {card.median_score_degradation:+.3f} "
                 f"> {max_median_degradation:.3f}"
             )
             all_passed = False

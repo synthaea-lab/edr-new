@@ -105,8 +105,10 @@ class ArgumentReorderMutator(Mutator):
                 tail = argv[1:]
                 argv[1:] = rng.shuffle(tail)
         elif intensity == "heavy":
-            # Full permutation
-            mutated["argv"] = rng.shuffle(argv)
+            # Full permutation of args (keep argv[0] fixed to preserve executable)
+            if len(argv) > 1:
+                tail = argv[1:]
+                argv[1:] = rng.shuffle(tail)
         else:
             raise ValueError(f"invalid intensity: {intensity}")
 

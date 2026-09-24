@@ -35,7 +35,7 @@ class LCG:
         Returns:
             Pseudo-random integer in [low, high).
         """
-        return low + (self.next() % (high - low))
+        return low + ((self.next() >> 33) % (high - low))
 
     def choice(self, items: list):
         """Select random item from list.
