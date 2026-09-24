@@ -25,6 +25,35 @@ LINUX_MACHINES = {
   "arch"       => { box: "generic/arch", provision: "../provisioning/arch-toolchain.sh" }, # rolling — #124
 }.freeze
 
+# Makes any box able to build the toolchain and the agent without OOM kills,
+# whatever it ships with (see the memory note in the provider block). Runs as
+# root before the toolchain script, idempotent on re-provision:
+# - a 4 GB swapfile, skipped with a notice when / has under 8 GB free
+#   (ubuntu2404's root is tight until the README's LVM fix-up);
+# - swappiness 60, written to /proc directly because debian13 has no `sysctl`
+#   binary (ubuntu2404 pins it to 0 in /etc/sysctl.conf, which disables swap
+#   for anonymous memory in practice);
+# - CARGO_BUILD_JOBS=2, so rustc/LLVM peaks stay within that budget.
+BUILD_HOST_SETUP = <<~'SH'
+  set -eu
+  free_gb=$(df --output=avail -BG / | tail -1 | tr -dc 0-9)
+  if [ ! -f /swapfile-synthaea ] && [ "$free_gb" -ge 8 ]; then
+    fallocate -l 4G /swapfile-synthaea || dd if=/dev/zero of=/swapfile-synthaea bs=1M count=4096
+    chmod 600 /swapfile-synthaea
+    mkswap -q /swapfile-synthaea
+    echo "/swapfile-synthaea none swap sw 0 0" >> /etc/fstab
+  fi
+  if [ -f /swapfile-synthaea ]; then
+    swapon --show=NAME | grep -qx /swapfile-synthaea || swapon /swapfile-synthaea
+  else
+    echo "build-host-setup: only ${free_gb} GB free on /, no swapfile (re-run: vagrant provision --provision-with build-host-setup)"
+  fi
+  if [ -f /etc/sysctl.conf ]; then sed -i '/^vm.swappiness/d' /etc/sysctl.conf; fi
+  echo "vm.swappiness = 60" > /etc/sysctl.d/90-synthaea.conf
+  echo 60 > /proc/sys/vm/swappiness
+  echo "export CARGO_BUILD_JOBS=2" > /etc/profile.d/synthaea-cargo.sh
+SH
+
 Vagrant.configure("2") do |config|
   # Force rsync for every synced folder — some boxes default /vagrant to an SMB
   # share, which prompts for Windows credentials on every `up`. We use only the
@@ -51,16 +80,20 @@ Vagrant.configure("2") do |config|
         hv.cpus                             = 4
         # Dynamic memory: maxmemory > memory makes vagrant-hyperv enable Hyper-V
         # Dynamic Memory with `memory` as the startup/minimum and `maxmemory` as
-        # the ceiling. Hyper-V only needs the startup amount free at boot, then
-        # balloons up under load — a static 4096 fails with 0x800705AA on a 16 GB
-        # host once a browser/IDE is open (only ~3 GB free even after
-        # `wsl --shutdown`). The toolchain build still gets up to 4 GB when the
-        # host can spare it.
-        hv.memory                           = 1024
+        # the ceiling. A static 4096 fails with 0x800705AA on a 16 GB host once a
+        # browser/IDE is open. But the balloon rarely grows in practice: these
+        # guests report a demand well under what they use, so a build thrashes
+        # at the startup amount while the host has GBs free (seen on ubuntu2404
+        # and debian13, rustc OOM-killed at 1 GB). Hence 2 GB at startup, the
+        # least a `-j2` toolchain build survives on, plus the swap and job cap
+        # from the BUILD_HOST_SETUP provisioner below.
+        hv.memory                           = 2048
         hv.maxmemory                        = 4096
         hv.linked_clone                     = true
         hv.enable_virtualization_extensions = false
       end
+
+      m.vm.provision "shell", name: "build-host-setup", inline: BUILD_HOST_SETUP
 
       # Provider-neutral, shared by every harness. Debian/RPM machines use the
       # apt/dnf script; a machine on a different package manager (pacman,

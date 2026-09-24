@@ -40,12 +40,18 @@ vagrant destroy -f ubuntu2204                     # rollback = destroy + up
 
 The repo root is rsynced one-way to `/synthaea` (needs an `rsync` on the host —
 Git for Windows ships one at `C:\Program Files\Git\usr\bin\rsync.exe`, or
-`winget install cwRsync`). RAM: the boxes use Hyper-V Dynamic Memory, 1 GB
+`winget install cwRsync`). RAM: the boxes use Hyper-V Dynamic Memory, 2 GB
 startup up to 4 GB — bring one machine up at a time, and `wsl --shutdown` first
 (`helpers.ps1` `vprep` does this). If `vagrant up` still dies with `0x800705AA`
 ("Ressources système insuffisantes" / cannot allocate RAM), the host has under
-~1.5 GB free — close a browser/IDE and retry; the VM balloons back up to 4 GB
-for the build once memory frees up.
+~2.5 GB free — close a browser/IDE and retry.
+
+Don't count on the balloon for the build: these guests report a memory demand
+well below what they use, so Hyper-V often leaves them at the startup amount
+while they swap, even with GBs free on the host. The `build-host-setup`
+provisioner (inline in the `Vagrantfile`) covers that on every box: a 4 GB
+swapfile, `vm.swappiness = 60` and `CARGO_BUILD_JOBS=2`. Before it, rustc was
+OOM-killed at 1 GB on both `ubuntu2404` and `debian13`.
 
 ## Build + test in the VM
 
@@ -111,14 +117,10 @@ from any shell:
 
 3. **`vm.swappiness = 0` in `/etc/sysctl.conf`.** With ~1 GB of RAM the
    release build's LTO step gets OOM-killed (`signal: 9`) while swap sits
-   unused. Set it back and add a swapfile:
-
-   ```bash
-   sudo sed -i 's/^vm.swappiness.*/vm.swappiness = 60/' /etc/sysctl.conf && sudo sysctl -q vm.swappiness=60
-   sudo fallocate -l 3G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
-   ```
-
-   `jobs = 2` under `[build]` in `~/.cargo/config.toml` keeps peak memory down too.
+   unused. The `build-host-setup` provisioner now resets it to 60. It also adds
+   the 4 GB swapfile, but only when `/` has 8 GB free, which this box has only
+   after step 2. Once step 2 is done, re-run it:
+   `vagrant provision ubuntu2404 --provision-with build-host-setup`.
 4. Then re-run the provisioning (`bash /synthaea/lab/provisioning/linux-toolchain.sh`)
    if the first `up` died on the disk, and check that `bpf-linker --version`
    works. Otherwise `sensor-linux` builds **without** embedded probes and
@@ -126,7 +128,8 @@ from any shell:
 
 ### `debian13` — `shekeriev/debian-13` (32 GB disk, single partition)
 
-Disk and swap are fine as shipped. What's missing:
+Disk is fine as shipped. The 1.7 GB of swap is not enough on its own, but the
+`build-host-setup` provisioner adds a 4 GB swapfile. What's missing:
 
 - **No `rsync` in the guest**, so `/synthaea` never gets populated. Either
   `sudo apt-get install -y rsync` then `vagrant rsync debian13`, or stream the
@@ -135,7 +138,7 @@ Disk and swap are fine as shipped. What's missing:
 - Provisioning therefore never ran either. Run it by hand:
   `bash /synthaea/lab/provisioning/linux-toolchain.sh`.
 - No `sysctl` binary (`procps` not installed). Read `/proc/sys/vm/*` directly
-  if needed. `swappiness` is the default 60 here.
+  if needed.
 
 ### Check the tracepoint layout on every new row
 
