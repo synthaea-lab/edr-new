@@ -63,7 +63,7 @@ class FakeParentNameMutator(Mutator):
             raise ValueError(f"invalid intensity: {intensity}")
 
         # Select one at random (deterministic via rng)
-        idx = rng.uniform(0, len(candidates) - 1)
+        idx = rng.uniform(0, len(candidates))
         mutated["parent_comm"] = candidates[idx]
 
         return mutated
@@ -126,7 +126,7 @@ class ParentPathMutator(Mutator):
             raise ValueError(f"invalid intensity: {intensity}")
 
         # Select one at random
-        idx = rng.uniform(0, len(candidates) - 1)
+        idx = rng.uniform(0, len(candidates))
         mutated["parent_image_path"] = candidates[idx]
 
         return mutated

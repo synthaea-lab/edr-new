@@ -154,22 +154,14 @@ def test_run_robustness_evaluation_missing_scenario() -> None:
         )
 
 
-def test_run_robustness_evaluation_t1_includes_lineage_mutators(dummy_model, dummy_scenario_yaml) -> None:
-    """T1 tier includes cmdline + lineage mutators (issue #48, task #21)."""
-    from synthaea_ml.evaluation.mutations import ALL_LINEAGE_MUTATORS
-    from synthaea_ml.evaluation.mutations.cmdline import ALL_T0_MUTATORS
-
-    card = run_robustness_evaluation(
-        model=dummy_model,
-        scenario_yaml=dummy_scenario_yaml,
-        tier="T1",
-    )
-
-    # T1 should include T0 (cmdline) + lineage mutators
-    expected_mutator_count = len(ALL_T0_MUTATORS) + len(ALL_LINEAGE_MUTATORS)
-    # Each mutator runs 3 intensities × 1 technique = 3 results per mutator
-    expected_result_count = expected_mutator_count * 3
-    assert len(card.mutation_results) == expected_result_count
+def test_run_robustness_evaluation_t1_not_implemented(dummy_model, dummy_scenario_yaml) -> None:
+    """T1 tier raises NotImplementedError (deferred until combined features scoring)."""
+    with pytest.raises(NotImplementedError, match="T1"):
+        run_robustness_evaluation(
+            model=dummy_model,
+            scenario_yaml=dummy_scenario_yaml,
+            tier="T1",
+        )
 
 
 def test_run_robustness_evaluation_t2_not_implemented(dummy_model, dummy_scenario_yaml) -> None:

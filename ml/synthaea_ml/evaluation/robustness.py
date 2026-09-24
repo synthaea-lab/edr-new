@@ -65,8 +65,7 @@ def _select_mutators_for_tier(tier: str) -> list[Mutator]:
     if tier == "T0":
         return ALL_T0_MUTATORS
     if tier == "T1":
-        # T1 tier: cmdline + lineage mutations (correlation features added in T2)
-        return ALL_T0_MUTATORS + ALL_LINEAGE_MUTATORS
+        raise NotImplementedError("T1 mutators not yet implemented")
     if tier == "T2":
         raise NotImplementedError("T2 mutators not yet implemented")
     raise ValueError(f"invalid tier: {tier}")
