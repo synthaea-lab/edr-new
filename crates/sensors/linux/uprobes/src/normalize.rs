@@ -9,9 +9,8 @@
 //! before event emission. See `crate::redact` for patterns and implementation.
 
 use schema::{
-    DnsQueryEvent,
-    ContainerContext, Event, EventMeta, ReadlineInputEvent, ShellType, TlsCaptureEvent,
-    TlsDirection, TlsLibraryType, User,
+    ContainerContext, DnsQueryEvent, Event, EventMeta, ReadlineInputEvent, ShellType,
+    TlsCaptureEvent, TlsDirection, TlsLibraryType, User,
 };
 use sensor_linux_wire as wire;
 
