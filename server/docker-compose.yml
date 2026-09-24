@@ -30,9 +30,13 @@ services:
       NEXTAUTH_SECRET: dev_secret_change_in_production
       BETTER_AUTH_SECRET: dev_secret_change_in_production
       CRON_SECRET: dev_cron_secret
+      NGINX_PROXY_SECRET: dev_nginx_secret_change_in_production
       NODE_ENV: development
-    ports:
-      - "3000:3000"
+    # SECURITY: Port 3000 should NOT be exposed in production
+    # Only the nginx proxy (8443) should be accessible
+    # Uncomment for local development debugging only:
+    # ports:
+    #   - "3000:3000"
     volumes:
       - .:/app
       - /app/node_modules
@@ -44,6 +48,9 @@ services:
     image: nginx:alpine
     depends_on:
       - server
+    environment:
+      # Shared secret for proxy authentication
+      NGINX_PROXY_SECRET: dev_nginx_secret_change_in_production
     ports:
       - "8443:8443" # Agent ingest (mTLS)
     volumes:

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getTenantId } from "@/lib/tenant";
+import { getTenantId, getUserId } from "@/lib/tenant";
 import { z } from "zod";
 
 const EnrollmentSchema = z.object({
@@ -12,7 +12,7 @@ const EnrollmentSchema = z.object({
 export async function POST(req: NextRequest) {
   try {
     const tenantId = await getTenantId(req);
-    const userId = req.headers.get("x-user-id");
+    const userId = await getUserId(req);
 
     const body = await req.json();
     const { enrollmentId, hostname, version } = EnrollmentSchema.parse(body);
@@ -41,17 +41,15 @@ export async function POST(req: NextRequest) {
     });
 
     // Audit log
-    if (userId) {
-      await prisma.auditLog.create({
-        data: {
-          tenantId,
-          userId,
-          action: "enrollment.create",
-          resource: `agents/${agent.id}`,
-          details: { enrollmentId, hostname, version },
-        },
-      });
-    }
+    await prisma.auditLog.create({
+      data: {
+        tenantId,
+        userId,
+        action: "enrollment.create",
+        resource: `agents/${agent.id}`,
+        details: { enrollmentId, hostname, version },
+      },
+    });
 
     return NextResponse.json({
       status: "enrolled",

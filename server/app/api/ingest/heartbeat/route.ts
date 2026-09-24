@@ -1,9 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { extractEnrollmentId } from "@/lib/tenant";
+import { extractEnrollmentId, verifyProxyAuth } from "@/lib/tenant";
 
 export async function POST(req: NextRequest) {
   try {
+    // SECURITY: Verify request came through nginx proxy
+    // Prevents header spoofing attacks
+    try {
+      verifyProxyAuth(req);
+    } catch (error) {
+      console.error("Proxy auth failed:", error);
+      return NextResponse.json(
+        { error: "Forbidden - invalid proxy authentication" },
+        { status: 403 }
+      );
+    }
+
     // Verify mTLS authentication
     const certVerified = req.headers.get("X-Client-Cert-Verified");
     const certSubject = req.headers.get("X-Client-Cert-Subject");
