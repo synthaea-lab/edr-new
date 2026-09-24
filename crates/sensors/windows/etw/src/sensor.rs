@@ -66,7 +66,25 @@ fn stop_orphaned_session(name: &str) {
 /// needed, and it catches every orphan regardless of how many unclean shutdowns
 /// preceded this start. See `normalize::parse_orphaned_sessions` for the pure,
 /// tested parsing logic.
+///
+/// Single-instance assumption (Jean's #408 review, non-blocking): this stops
+/// every live `wtrace-` session, not just ones this install actually orphaned
+/// — correct only as long as at most one agent runs per host. Two instances
+/// overlapping even briefly (a watchdog restart racing a slow shutdown, a
+/// future Windows self-update swap, a manual `agent run` while the service is
+/// up) would have the new instance silently blind the old one's still-live
+/// session, which then trips the old instance's own silence watchdog
+/// ([`liveness_watch`]). `sensor-windows-etw` depends only on `schema`
+/// (workspace dependency rules), so it has no way to ask the agent/watchdog
+/// whether another instance is already running — that check, if ever needed,
+/// belongs a layer up, not here.
+///
+/// Also best-effort removes the pre-#408 state file (`synthaea-etw-session`,
+/// see the old `session_state_path`) so a host upgraded from that version
+/// doesn't keep it around forever — the new mechanism doesn't use it.
 fn stop_all_orphaned_sessions() {
+    let _ = std::fs::remove_file(std::env::temp_dir().join("synthaea-etw-session"));
+
     let out = std::process::Command::new("logman")
         .args(["query", "-ets"])
         .output();
