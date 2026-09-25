@@ -140,30 +140,55 @@ pub fn evaluate_exec(event: &ExecEvent) -> Vec<Alert> {
 /// scope; `schema::MemfdCreateEvent`, #265, is the creation-time telemetry — this
 /// check does not correlate to it, see below).
 ///
-/// Stateless by design: `sched_process_exec` (the tracepoint `sensor-linux` hooks
-/// for every `Event::Exec`) fires on the kernel's common post-exec path regardless
-/// of which `exec*(2)` variant ran, including `execveat`'s `AT_EMPTY_PATH` form —
-/// the kernel reports the executed path as `/memfd:<name> (deleted)` for that case
-/// (the same string `/proc/<pid>/exe` shows), so the marker survives into
-/// `ExecEvent::image_path` with no correlation to the creation event needed.
+/// `ExecEvent::image_path` is `bprm->filename` at the kernel's `sched_process_exec`
+/// tracepoint (`crates/sensors/linux/ebpf`, #111) — **not** `/proc/<pid>/exe`.
+/// Traced against a live kernel (Alpine 6.18.50, #85 review) with a memfd copy of
+/// `/bin/true`:
+/// - `execveat(fd, "", AT_EMPTY_PATH)` (the memfd-exec primitive): `bprm->filename`
+///   is `/dev/fd/<n>`, and the kernel names the task after the memfd dentry, so
+///   `comm` starts with `memfd:`.
+/// - `execv` via `/proc/self/fd/<n>`: `bprm->filename` is `/proc/self/fd/<n>` (or
+///   `/proc/<pid>/fd/<n>`); `comm` is whatever the caller set.
 ///
-/// Correlating to `MemfdCreateEvent` instead was considered and rejected:
-/// `memfd_create` alone is common in legitimate code (glibc, systemd, browser
-/// sandboxing) — the *exec* is the technique, not the creation, so creation-only
-/// telemetry stays undispatched rather than becoming a noisy signal on its own.
+/// Neither shape ever produces `/memfd:<name> (deleted)` — that string is only what
+/// `readlink /proc/<pid>/exe` shows, which the sensor doesn't read. An earlier
+/// version of this check matched on that string and never fired on real telemetry.
+///
+/// Correlating to `MemfdCreateEvent` instead of matching the exec shape directly was
+/// considered and rejected: `memfd_create` alone is common in legitimate code
+/// (glibc, systemd, browser sandboxing) — the *exec* is the technique, not the
+/// creation, so creation-only telemetry stays undispatched rather than becoming a
+/// noisy signal on its own.
 #[must_use]
 pub(crate) fn check_memfd_exec(event: &ExecEvent) -> Option<Alert> {
-    if !event.image_path.contains("memfd:") {
+    if !event.meta.comm.starts_with("memfd:") && !is_fd_exec_path(&event.image_path) {
         return None;
     }
     Some(Alert {
         technique: "T1620",
         message: format!(
-            "pid={} comm={}: executed from an in-memory file ({}) — no payload ever \
-             touched disk",
+            "pid={} comm={}: executed from a file descriptor ({}), not a real path — \
+             no payload ever touched disk",
             event.meta.pid, event.meta.comm, event.image_path,
         ),
     })
+}
+
+/// Matches `/dev/fd/<n>` or `/proc/(self|<pid>)/fd/<n>` — exec via a file
+/// descriptor (`fexecve`/`execveat` with `AT_EMPTY_PATH`, or exec via
+/// `/proc/self/fd`) rather than a real on-disk path.
+fn is_fd_exec_path(path: &str) -> bool {
+    let is_digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if let Some(fd) = path.strip_prefix("/dev/fd/") {
+        return is_digits(fd);
+    }
+    let Some(rest) = path.strip_prefix("/proc/") else {
+        return false;
+    };
+    let Some((pid_or_self, fd)) = rest.split_once("/fd/") else {
+        return false;
+    };
+    (pid_or_self == "self" || is_digits(pid_or_self)) && is_digits(fd)
 }
 
 /// T1611 — Escape to Host: a containerized process opening `/proc/<pid>/root` reaches
