@@ -35,7 +35,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 
 | Technique | L | W | M | Status / what closes it |
 | --- | --- | --- | --- | --- |
-| T1566 Phishing (attachment/link → execution) | 🟡 | 📋 | 🟢 | Provenance→exec join: macOS `FileQuarantine` shipped (#96); Windows MotW #365; Linux has no OS mark (browser artifacts #87). Content: pack issue below |
+| T1566 Phishing (attachment/link → execution) | 🟡 | 🟢 | 🟢 | Provenance→exec join (T1204.002) on `FileQuarantine`: macOS xattr (#96), Windows MotW (#365); Linux has no OS mark (browser artifacts #87). Content: pack issue below |
 | T1189 Drive-by Compromise | 🟡 | 🟡 | 🟡 | Browser-lineage exec rules exist (download-then-exec); naming the technique is content work |
 | T1078 Valid Accounts | 🟡 | 🟡 | 🟡 | `Auth` events on all three platforms; anomaly content (impossible travel is plane-side M9) |
 | T1190 Exploit Public-Facing App | 🟢 | 🟡 | 🟡 | Linux web-server-lineage rule exists; W/M siblings are content work |
@@ -45,7 +45,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 | Technique | L | W | M | Status |
 | --- | --- | --- | --- | --- |
 | T1059 Command & Scripting Interpreter | 🟢 | 🟢 | 🟢 | Encoded-PowerShell (.001), base64-shell (.004), interpreter lineage; script blocks post-decode on W |
-| T1204 User Execution | 🟢 | 📋 | 🟡 | Download-then-exec chain tagged; quarantined-exec content for M rides #96's events, W waits on #365 |
+| T1204 User Execution | 🟢 | 🟢 | 🟢 | Download-then-exec chain tagged (L); T1204.002 provenance→exec join on `FileQuarantine` — Windows MotW (#365) and macOS quarantine xattr (#96) share one rule |
 | T1047 WMI | — | 🟢 | — | `WmiActivity` events + tags live |
 | T1053 Scheduled Task/Job | 🟢 | 🟢 | 🟡 | cron/systemd paths (L), 4698 + 4702 task hijack (W); macOS cron/launchd paths covered via persistence patterns |
 | T1620 Reflective Code Loading | — | 🟢 | 📋 | Dynamic .NET loads tagged (W); macOS sibling in #355's set |
@@ -78,7 +78,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 | T1055 Process Injection | 📋 | 🟢/📋 | 📋 | Remote-thread tag exists (W partial; full via TI-ETW #137); ptrace/process_vm #265 (L); task-port set #355 (M) |
 | T1036 Masquerading | 🟢 | 🟢 | 🟢 | `check_masquerading` — system-binary names outside their legitimate locations (wave 1, #379) |
 | T1027 Obfuscation | 🟢 | 🟢 | 🟡 | Encoded-command coverage; broader entropy scoring is the ML layer |
-| T1553 Subvert Trust Controls | — | 📋 | 🟢/📋 | Gatekeeper override #356, quarantine-strip #357 (M); MotW-strip via #365/#136 (W) |
+| T1553 Subvert Trust Controls | — | 📋 | 🟢/📋 | Gatekeeper override #356, quarantine-strip #357 (M); MotW-strip via #136 (W; #365 sees the mark written, not removed) |
 | T1218 System Binary Proxy Execution | — | 🟢 | — | LOLBIN rule (W); L/M lolbin lists are content work |
 | T1112 Modify Registry | — | 🟢 | — | Registry writes tagged via persistence rules |
 

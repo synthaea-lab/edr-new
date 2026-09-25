@@ -55,7 +55,7 @@ pending (the coverage packs #376–#381 — see
 | **Kernel modules & drivers**<br><sub>TA0003/TA0005 rootkits</sub> | 📋 #264 module+bpf | 🟡* image loads · 📋 #39 | 📋 #357 kexts |
 | **Tamper on security tooling**<br><sub>TA0005 T1562</sub> | 📋 #362 kill-trace | 📋 #39 driver vantage | ✅ ES signals |
 | **Anti-forensics**<br><sub>TA0005 T1070</sub> | 🟡* deletions · LSM timestomp row | 📋 #136 timestomp/ADS | ✅ deletions · 📋 #357 strip/stomp |
-| **Download provenance**<br><sub>TA0001 Initial Access</sub> | 📋 #87 (no OS mark) | 📋 #365 | ✅ ES |
+| **Download provenance**<br><sub>TA0001 Initial Access</sub> | 📋 #87 (no OS mark) | ✅ ETW MotW | ✅ ES |
 | **Devices**<br><sub>TA0001 Initial Access · TA0010 Exfil</sub> | 📋 #84 | 📋 #84 | 📋 device-control |
 | **Containers**<br><sub>TA0004 Escape context</sub> | ✅ /proc | 📋 #371 silos | 📋 #372 host-side |
 | **Host state & inventory**<br><sub>TA0003 pre-existing persistence</sub> | 📋 #87 | ✅ WMI · 📋 #286 | 📋 #359 |
@@ -158,7 +158,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | **Lateral-movement services** | ETW · WMI-Activity | WQL queries (EID 23) + method invocations (EID 24, `Win32_Process.Create`) | ✅ used | T1047 | #21 |
 | **Lateral-movement services** | ETW · BITS-Client | background transfer jobs | 📋 planned | T1197 | #284 |
 | **Tamper & anti-forensics** | driver · minifilter | timestomping (SetInformation), ADS manipulation, raw-volume access | 📋 planned | T1070.006, T1564.004 | #136 |
-| **Download provenance** | ETW · Kernel-File | `Zone.Identifier` ADS (mark-of-the-web) → v21 `FileQuarantine` (`HostUrl`/`ReferrerUrl` read-back); minifilter supersedes | 📋 planned | T1553.005 | #365 |
+| **Download provenance** | ETW · Kernel-File | `Zone.Identifier` ADS write (mark-of-the-web) → v21 `FileQuarantine` (`HostUrl`/`ReferrerUrl` read-back, writer as `agent`; zones 0–2 dropped; a raced read reports the mark alone); consumed by the T1204.002 download→exec join. Strip/tamper of the mark needs the minifilter (#136) | ✅ used | T1204.002 | #365 |
 | **Containers** | Win32 · silo query | server-silo attribution on process-isolated Windows containers → `EventMeta::container` (Hyper-V/WSL2 = agent-inside, documented) | 📋 planned | container context for rules | #371 |
 | **Devices** | device-control | Windows collectors land with the cross-platform crate | 📋 planned | T1091 | #84 |
 | **Host state** | Win32 · WMI/CIM | point-in-time inventory; Sysmon-channel opt-in is an ADR-first decision | ✅ / 📋 | pre-existing persistence | collectors; #286 |
@@ -228,7 +228,7 @@ AVC, seccomp, …) and the SELinux-on-server validation gap.
 | ASL / legacy syslog | superseded by the unified log (#95 reads the successor) |
 
 Cross-platform note: download provenance is one shape on all three platforms —
-Windows mark-of-the-web (#365), the macOS quarantine xattr (shipped, #96), and
+Windows mark-of-the-web (shipped, #365), the macOS quarantine xattr (shipped, #96), and
 browser artifacts via `inventory` — all feeding the platform-neutral
 `FileQuarantine` event: the provenance link between a network event and a
 dropped file.
