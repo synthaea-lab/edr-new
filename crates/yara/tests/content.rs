@@ -32,8 +32,34 @@ fn every_shipped_rule_fires_on_its_sample() {
         std::fs::write(&p, bytes).unwrap();
         let hits = rules.scan_file(&p).unwrap();
         assert!(
-            hits.iter().any(|h| h == ident),
+            hits.iter().any(|h| &h.identifier == ident),
             "rule `{ident}` did not fire (hits: {hits:?})"
+        );
+    }
+}
+
+#[test]
+fn every_shipped_rule_ignores_its_negative_sample() {
+    // One (rule identifier, benign bytes) pair per shipped rule — the content FP
+    // regression suite (issue #73).
+    let samples: &[(&str, &[u8])] = &[(
+        "synthaea_lab_payload",
+        b"#!/bin/sh\n# a completely unrelated benign script\necho hi\n",
+    )];
+    let rules = RuleSet::load_dir(&content_dir()).unwrap();
+    assert_eq!(
+        samples.len(),
+        rules.rule_count(),
+        "one negative sample per shipped RULE — add the sample for the new rule"
+    );
+    for (ident, bytes) in samples {
+        let p =
+            std::env::temp_dir().join(format!("yara-content-neg-{}-{ident}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        let hits = rules.scan_file(&p).unwrap();
+        assert!(
+            hits.is_empty(),
+            "benign lookalike for `{ident}` fired: {hits:?}"
         );
     }
 }

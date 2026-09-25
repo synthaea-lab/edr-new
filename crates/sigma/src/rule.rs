@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use schema::detection::Severity;
 use serde::Deserialize;
 
 /// Sigma rule as loaded from the YAML.
@@ -12,6 +13,16 @@ pub struct SigmaRule {
     pub description: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// Required by `validate()` for any rule shipped through
+    /// [`crate::SigmaEngine::load_rule`] — `Option` here (rather than a plain
+    /// required field) so a missing value is one validation error among several,
+    /// not a deserialize failure that would also break every hand-parsed YAML
+    /// fixture in unit tests that don't care about metadata.
+    #[serde(default)]
+    pub severity: Option<Severity>,
+    /// Upstream Sigma field name. Required non-empty by `validate()`.
+    #[serde(default)]
+    pub falsepositives: Vec<String>,
     pub detection: Detection,
 }
 
@@ -65,4 +76,5 @@ pub struct SigmaAlert {
     pub title: String,
     pub tags: Vec<String>,
     pub description: String,
+    pub severity: Severity,
 }
