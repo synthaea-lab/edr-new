@@ -1,7 +1,12 @@
 name: ML
 
 on:
-  workflow_dispatch: # billing blocked — re-enable push/pull_request when resolved
+  push:
+    branches: [main]
+    paths: ["ml/**", ".github/workflows/ml.yml"]
+  pull_request:
+    paths: ["ml/**", ".github/workflows/ml.yml"]
+  workflow_dispatch:
 
 jobs:
   lint-test:

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
+import { buildIdentityHeaders } from "@/lib/tenant";
 
 export async function middleware(req: NextRequest) {
   // Public routes - no authentication required
@@ -24,15 +25,10 @@ export async function middleware(req: NextRequest) {
   }
 
   // Inject tenant context for protected routes
-  const headers = new Headers(req.headers);
-
-  // Organization ID from better-auth = Tenant ID
-  if (session.session.activeOrganizationId) {
-    headers.set("x-tenant-id", session.session.activeOrganizationId);
-  }
-
-  // User ID for audit logging
-  headers.set("x-user-id", session.user.id);
+  const headers = buildIdentityHeaders(req.headers, {
+    tenantId: session.session.activeOrganizationId,
+    userId: session.user.id,
+  });
 
   return NextResponse.next({
     request: { headers },
