@@ -15,9 +15,10 @@
 
 mod queue;
 
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 
 pub use queue::{ScanOutcome, ScanQueue, ScanStats};
+use schema::detection::Severity;
 
 pub const MAX_SCAN_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -30,6 +31,25 @@ pub enum YaraError {
     },
     #[error("rule compilation failed in {path}: {message}")]
     Compile { path: String, message: String },
+    /// Issue #73: every rule must carry severity/technique/falsepositives in its
+    /// `meta:` block. Names the rule identifier — the file path isn't available
+    /// once rules are compiled into one `yara_x::Rules` set.
+    #[error("missing or invalid rule metadata in `{identifier}`: {what}")]
+    MissingMetadata { identifier: String, what: String },
+}
+
+/// Required `meta:` fields, extracted and validated at compile time so a rule
+/// missing them is a hard load-time error, not a silently-unused YAML/text block.
+struct RuleMetadata {
+    severity: Severity,
+}
+
+/// One YARA match, with the metadata required by issue #73 attached — the scanner
+/// no longer hands back a bare rule identifier only.
+#[derive(Debug, Clone)]
+pub struct YaraMatch {
+    pub identifier: String,
+    pub severity: Severity,
 }
 
 /// Compiled rule set, ready to scan. Compile once, scan many.
@@ -39,6 +59,8 @@ pub struct RuleSet {
     /// and the content suite pairs one sample per rule (review finding: the
     /// file count let a multi-rule file ship with untested rules).
     count: usize,
+    /// Keyed by rule identifier; populated at compile time by [`Self::from_compiled`].
+    metadata: HashMap<String, RuleMetadata>,
 }
 
 impl std::fmt::Debug for RuleSet {
@@ -59,8 +81,9 @@ impl RuleSet {
     /// # Errors
     ///
     /// Returns [`YaraError::Io`] when the directory tree or a rule file cannot be
-    /// read, and [`YaraError::Compile`] (naming the file) when a rule does not
-    /// compile.
+    /// read, [`YaraError::Compile`] (naming the file) when a rule does not compile,
+    /// and [`YaraError::MissingMetadata`] (naming the rule identifier) when a rule's
+    /// `meta:` block lacks a valid `severity`, `technique`, or `falsepositives`.
     pub fn load_dir(dir: &Path) -> Result<Self, YaraError> {
         let mut compiler = yara_x::Compiler::new();
         let mut stack = vec![dir.to_path_buf()];
@@ -87,11 +110,23 @@ impl RuleSet {
                 }
             }
         }
-        let rules = compiler.build();
-        let rule_count = rules.iter().count();
+        Self::from_compiled(compiler.build())
+    }
+
+    /// Extracts and validates required metadata for every compiled rule. Shared by
+    /// [`Self::load_dir`] and the crate's own unit tests, so metadata validation is
+    /// never bypassed by a hand-built `RuleSet`.
+    fn from_compiled(rules: yara_x::Rules) -> Result<Self, YaraError> {
+        let mut metadata = HashMap::new();
+        let mut count = 0;
+        for rule in rules.iter() {
+            count += 1;
+            metadata.insert(rule.identifier().to_string(), extract_metadata(&rule)?);
+        }
         Ok(Self {
             rules,
-            count: rule_count,
+            count,
+            metadata,
         })
     }
 
@@ -112,7 +147,7 @@ impl RuleSet {
     /// Returns [`YaraError::Io`] when the file cannot be read (a vanished dropper
     /// payload is the normal case) and [`YaraError::Compile`] when the scan itself
     /// fails inside the engine.
-    pub fn scan_file(&self, path: &Path) -> Result<Vec<String>, YaraError> {
+    pub fn scan_file(&self, path: &Path) -> Result<Vec<YaraMatch>, YaraError> {
         let io = |source: std::io::Error| YaraError::Io {
             path: path.display().to_string(),
             source,
@@ -145,8 +180,113 @@ impl RuleSet {
         })?;
         Ok(results
             .matching_rules()
-            .map(|r| r.identifier().to_string())
+            .map(|r| {
+                let identifier = r.identifier().to_string();
+                // Every rule in `self.rules` got a metadata entry from the same
+                // `rules.iter()` pass in `from_compiled` — this is defensive, not
+                // expected to ever fall back, kept panic-free because scanning runs
+                // on attacker-influenced file content.
+                let severity = self
+                    .metadata
+                    .get(&identifier)
+                    .map_or(Severity::Low, |m| m.severity);
+                YaraMatch {
+                    identifier,
+                    severity,
+                }
+            })
             .collect())
+    }
+}
+
+/// Reads and validates a compiled rule's required `meta:` fields: `severity`
+/// (matching a [`Severity`] variant), `technique` (`T\d{4}` or `T\d{4}.\d{3}`), and
+/// `falsepositives` (non-empty). Issue #73's metadata-schema requirement.
+fn extract_metadata(rule: &yara_x::Rule) -> Result<RuleMetadata, YaraError> {
+    let mut severity = None;
+    let mut technique = None;
+    let mut falsepositives = None;
+    for (key, value) in rule.metadata() {
+        let yara_x::MetaValue::String(s) = value else {
+            continue;
+        };
+        match key {
+            "severity" => severity = parse_severity(s),
+            "technique" => technique = Some(s),
+            "falsepositives" => falsepositives = Some(s),
+            _ => {}
+        }
+    }
+
+    let severity = severity.ok_or_else(|| {
+        missing_metadata(
+            rule.identifier(),
+            "missing or invalid `severity` meta (expected low/medium/high/critical)".to_string(),
+        )
+    })?;
+
+    match technique {
+        Some(t) if is_technique(t) => {}
+        Some(t) => {
+            return Err(missing_metadata(
+                rule.identifier(),
+                format!("invalid `technique` meta `{t}` (expected e.g. T1105 or T1059.004)"),
+            ));
+        }
+        None => {
+            return Err(missing_metadata(
+                rule.identifier(),
+                "missing `technique` meta".to_string(),
+            ));
+        }
+    }
+
+    match falsepositives {
+        Some(fp) if !fp.trim().is_empty() => {}
+        _ => {
+            return Err(missing_metadata(
+                rule.identifier(),
+                "missing or empty `falsepositives` meta".to_string(),
+            ));
+        }
+    }
+
+    Ok(RuleMetadata { severity })
+}
+
+fn parse_severity(s: &str) -> Option<Severity> {
+    match s {
+        "low" => Some(Severity::Low),
+        "medium" => Some(Severity::Medium),
+        "high" => Some(Severity::High),
+        "critical" => Some(Severity::Critical),
+        _ => None,
+    }
+}
+
+/// Matches `T1234` or `T1234.001` (MITRE ATT&CK technique ID convention already used
+/// in shipped YARA content).
+fn is_technique(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix('T') else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, '.');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    if id.len() != 4 || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(sub) => sub.len() == 3 && sub.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+fn missing_metadata(identifier: &str, what: String) -> YaraError {
+    YaraError::MissingMetadata {
+        identifier: identifier.to_string(),
+        what,
     }
 }
 
@@ -156,6 +296,10 @@ mod tests {
 
     const TEST_RULE: &str = r#"
 rule test_marker {
+    meta:
+        severity = "high"
+        technique = "T1105"
+        falsepositives = "none known"
     strings:
         $m = "SYNTHAEA-TEST-MARKER"
     condition:
@@ -166,10 +310,7 @@ rule test_marker {
     fn ruleset_from(src: &str) -> RuleSet {
         let mut compiler = yara_x::Compiler::new();
         compiler.add_source(src.as_bytes()).unwrap();
-        RuleSet {
-            rules: compiler.build(),
-            count: 1,
-        }
+        RuleSet::from_compiled(compiler.build()).unwrap()
     }
 
     fn tmp_file(name: &str, content: &[u8]) -> std::path::PathBuf {
@@ -183,7 +324,10 @@ rule test_marker {
         let rules = ruleset_from(TEST_RULE);
         let hit = tmp_file("hit", b"payload SYNTHAEA-TEST-MARKER payload");
         let miss = tmp_file("miss", b"nothing to see");
-        assert_eq!(rules.scan_file(&hit).unwrap(), vec!["test_marker"]);
+        let hits = rules.scan_file(&hit).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].identifier, "test_marker");
+        assert_eq!(hits[0].severity, Severity::High);
         assert!(rules.scan_file(&miss).unwrap().is_empty());
     }
 
