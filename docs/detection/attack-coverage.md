@@ -28,7 +28,7 @@ dedicated content · 📋 waits on a filed issue (telemetry or content) ·
 Engine tags as of this assessment (from `rules`/`correlator` source):
 T1021.002, T1036.005, T1037.004, T1041, T1048.003, T1053.003/.005, T1055,
 T1059 (+.001/.004), T1070.002, T1071 (+.004), T1105, T1110, T1127, T1136.001,
-T1204, T1218, T1490, T1543.001/.002/.003, T1547.015, T1571, T1611, T1620. Sigma-imported content carries its
+T1204, T1218, T1486, T1490, T1543.001/.002/.003, T1547.015, T1571, T1574.006, T1611, T1620. Sigma-imported content carries its
 own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 
 ## Initial Access (TA0001)
@@ -143,7 +143,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 
 | Technique | L | W | M | Status |
 | --- | --- | --- | --- | --- |
-| T1486 Data Encrypted (ransomware) | 🟢 | 🟡 | 🟡 | Burst write/rename tags (L); full pack is #82 (tripwires + reflex response) |
+| T1486 Data Encrypted (ransomware) | 🟢 | 🟡 | 🟡 | Mass rename appending a suffix to the old path, per pid (20 in 5 s) and per parent for shell loops (L, #455); blind spots (in-place rewrite, rename to a new name, name-keyed FP gating) in #459; full pack is #82 (tripwires + reflex response) |
 | T1490 Inhibit System Recovery | 🟢 | 🟢 | 🟢 | `check_recovery_inhibit` — vssadmin/wmic-shadowcopy/wbadmin/bcdedit/tmutil multi-token matches (wave 1, #381) |
 | T1489 Service Stop | 🟡 | 🟡 | 🟡 | Unit/service lifecycle visible; content work |
 | T1529 System Shutdown | 🟡 | 🟡 | 🟡 | Exec-visible; low value alone |
