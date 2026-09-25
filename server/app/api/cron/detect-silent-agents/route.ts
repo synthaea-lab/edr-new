@@ -1,19 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
+import { verifyCronRequest } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
 const SILENCE_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 
 export async function GET(req: NextRequest) {
   try {
-    // Verify cron auth token
-    const authHeader = req.headers.get("Authorization");
-    const expectedToken = `Bearer ${process.env.CRON_SECRET}`;
-
-    if (!authHeader || authHeader !== expectedToken) {
-      return NextResponse.json(
-        { error: "Unauthorized - invalid cron secret" },
-        { status: 401 }
-      );
+    const denied = verifyCronRequest(req);
+    if (denied) {
+      return denied;
     }
 
     const threshold = new Date(Date.now() - SILENCE_THRESHOLD_MS);

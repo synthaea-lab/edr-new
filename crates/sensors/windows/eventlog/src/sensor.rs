@@ -356,15 +356,16 @@ fn normalize_scheduled_task(block: &str) -> ParsedBlock {
     if task.task_name.is_empty() {
         return Some((record_id, None));
     }
-    let Some(action_path) = xml::task_action_path(&task.task_content) else {
-        return Some((record_id, None));
+    // A task whose action we cannot read is still a persistence artifact: report
+    // it with a placeholder path instead of dropping it (#422).
+    let (path, flags) = match xml::task_actions_display(&task.task_content) {
+        Some(actions) => (actions, FLAG_PERSISTENCE_TASK_ARTIFACT),
+        None => (
+            xml::TASK_ACTION_UNKNOWN.to_string(),
+            FLAG_PERSISTENCE_TASK_ARTIFACT | schema::FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN,
+        ),
     };
-    let event = persistence_file_open(
-        task.pid,
-        xml::task_leaf_name(&task.task_name),
-        action_path,
-        FLAG_PERSISTENCE_TASK_ARTIFACT,
-    );
+    let event = persistence_file_open(task.pid, xml::task_leaf_name(&task.task_name), path, flags);
     Some((record_id, Some(event)))
 }
 
@@ -550,19 +551,28 @@ fn applocker_leaf_name(path: &str) -> String {
 
 /// An 8004 without a `FilePath` cannot carry a persistence artifact — nothing
 /// to hand to the sink. Skip, advancing the cursor.
+///
+/// The path is expanded from `AppLocker`'s path variables
+/// (`%OSDRIVE%\USERS\...` → `C:\USERS\...`) so path-based rules can match
+/// it, and the blocked user's SID lands in `meta.user` (#427). Still a
+/// `FileOpenEvent` for now; the move to `PolicyDenialEvent` is #427's
+/// schema step.
 fn normalize_applocker_block(block: &str) -> ParsedBlock {
-    let ev = xml::parse_applocker_block(block)?;
+    let ev = xml::parse_applocker_event(block)?;
     let record_id = ev.record_id;
     if ev.file_path.is_empty() {
         return Some((record_id, None));
     }
-    let comm = applocker_leaf_name(&ev.file_path);
-    let event = persistence_file_open(
-        ev.target_process_id,
-        comm,
-        ev.file_path,
-        FLAG_APPLICATION_BLOCKED,
-    );
+    let path = xml::expand_applocker_path(&ev.file_path, |name| std::env::var(name).ok());
+    let comm = applocker_leaf_name(&path);
+    let mut event =
+        persistence_file_open(ev.target_process_id, comm, path, FLAG_APPLICATION_BLOCKED);
+    if let (Event::FileOpen(open), Some(sid)) = (&mut event, ev.target_user) {
+        open.meta.user = User::Windows {
+            sid,
+            integrity_level: None,
+        };
+    }
     Some((record_id, Some(event)))
 }
 
@@ -1128,5 +1138,80 @@ mod wevtutil_tests {
         let err = wevtutil(&["qe", "Synthaea-No-Such-Channel", "/c:1"])
             .expect_err("an unknown channel must not look like a quiet one");
         assert!(err.contains("exited with"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    /// Minimal 4698 block: only the fields `parse_scheduled_task_block` reads.
+    fn block_4698(task_content_escaped: &str) -> String {
+        format!(
+            "<Event><System><EventID>4698</EventID><EventRecordID>42</EventRecordID></System><EventData><Data Name='TaskName'>\\HiddenTask</Data><Data Name='TaskContent'>{task_content_escaped}</Data><Data Name='ClientProcessId'>1234</Data></EventData></Event>"
+        )
+    }
+
+    #[test]
+    fn task_with_no_readable_action_is_still_reported() {
+        let block = block_4698(
+            "&lt;Task&gt;&lt;Actions&gt;&lt;ComHandler/&gt;&lt;/Actions&gt;&lt;/Task&gt;",
+        );
+        let Some((42, Some(Event::FileOpen(event)))) = normalize_scheduled_task(&block) else {
+            panic!("a 4698 must never be dropped (#422)");
+        };
+        assert_eq!(event.path, xml::TASK_ACTION_UNKNOWN);
+        assert_eq!(
+            event.flags,
+            FLAG_PERSISTENCE_TASK_ARTIFACT | schema::FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN
+        );
+        assert_eq!(event.meta.comm, "HiddenTask");
+        assert_eq!(event.meta.pid, 1234);
+    }
+
+    #[test]
+    fn task_with_several_actions_reports_all_of_them() {
+        let block = block_4698(
+            "&lt;Actions&gt;&lt;Exec&gt;&lt;Command&gt;a.exe&lt;/Command&gt;&lt;/Exec&gt;&lt;ComHandler&gt;&lt;ClassId&gt;{X}&lt;/ClassId&gt;&lt;/ComHandler&gt;&lt;/Actions&gt;",
+        );
+        let Some((42, Some(Event::FileOpen(event)))) = normalize_scheduled_task(&block) else {
+            panic!("expected a FileOpen event");
+        };
+        assert_eq!(event.path, "a.exe | com:{X}");
+        assert_eq!(event.flags, FLAG_PERSISTENCE_TASK_ARTIFACT);
+    }
+}
+
+#[cfg(test)]
+mod applocker_tests {
+    use super::*;
+
+    #[test]
+    fn applocker_block_carries_the_expanded_path_and_the_blocked_user() {
+        let block = "<Event><System><EventID>8004</EventID><EventRecordID>7</EventRecordID></System>\
+            <UserData><RuleAndFileData><PolicyName>EXE</PolicyName>\
+            <TargetUser>S-1-5-21-1-2-3-1001</TargetUser><TargetProcessId>42</TargetProcessId>\
+            <FilePath>%OSDRIVE%\\USERS\\X\\EVIL.EXE</FilePath></RuleAndFileData></UserData></Event>";
+        let (record_id, event) = normalize_applocker_block(block).expect("should parse");
+        assert_eq!(record_id, 7);
+        let Some(Event::FileOpen(open)) = event else {
+            panic!("expected a FileOpen event");
+        };
+        assert!(
+            !open.path.starts_with('%'),
+            "path variable left unexpanded: {}",
+            open.path
+        );
+        assert!(open.path.ends_with("\\USERS\\X\\EVIL.EXE"), "{}", open.path);
+        assert_eq!(open.meta.comm, "evil.exe");
+        assert_eq!(open.meta.pid, 42);
+        assert_eq!(open.flags, FLAG_APPLICATION_BLOCKED);
+        assert_eq!(
+            open.meta.user,
+            User::Windows {
+                sid: "S-1-5-21-1-2-3-1001".into(),
+                integrity_level: None,
+            }
+        );
     }
 }
