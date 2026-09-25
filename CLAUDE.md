@@ -94,9 +94,9 @@ New crate? Add it to the rules in `tools/check-deps.py` in the same change.
 - `tools/gauntlet.sh` — the full local check matrix (fmt, deps, clippy on host +
   linux target + the Windows sensor crates, tests, cargo-deny, docs). `--fast`
   skips the cross-target/docs passes; opt-in pre-push gate:
-  `git config core.hooksPath tools/hooks`. **While CI is billing-blocked
-  (workflow_dispatch only, issue #318), this is the enforcement — run it before
-  every push.**
+  `git config core.hooksPath tools/hooks`. CI (`.github/workflows/ci.yml`) is the
+  enforcement on every push and pull request; the gauntlet is a pre-push
+  convenience that catches the same failures earlier.
 - `cargo check` / `cargo test` (default members) — works on any OS; with `--workspace`, add `--exclude sensor-linux-ebpf` (bpfel target).
 - `cargo clippy --workspace --exclude sensor-linux-ebpf --all-targets -- -D warnings` — must stay clean.
 - `python3 tools/check-deps.py` — dependency direction check.
