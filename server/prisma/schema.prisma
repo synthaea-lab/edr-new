@@ -66,6 +66,11 @@ model Detection {
   meta  Json
 
   createdAt DateTime @default(now()) @map("created_at")
+  // Bumped whenever caseId (or any other field) changes, notably by the
+  // cron/group-detections sweep — the staleness check on a case narrative
+  // compares against this, not createdAt, since a detection can be grouped
+  // into a case well after it was ingested (see GET /api/cases/[id]).
+  updatedAt DateTime @updatedAt @map("updated_at")
 
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
   // SetNull, not Cascade: deleting a Case must not delete the underlying

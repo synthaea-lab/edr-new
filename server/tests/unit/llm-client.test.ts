@@ -40,7 +40,7 @@ describe("generateNarrative", () => {
     vi.unstubAllGlobals();
   });
 
-  it("sends the evidence graph as the sole user-message content", async () => {
+  it("sends the evidence graph as untrusted, delimited data in the user message", async () => {
     await generateNarrative(graph);
 
     const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
@@ -48,7 +48,20 @@ describe("generateNarrative", () => {
     expect(body.messages).toHaveLength(2);
     expect(body.messages[0].role).toBe("system");
     expect(body.messages[1].role).toBe("user");
-    expect(JSON.parse(body.messages[1].content)).toEqual(graph);
+
+    const content: string = body.messages[1].content;
+    const match = content.match(/<<<EVIDENCE_GRAPH_JSON\n([\s\S]*)\nEVIDENCE_GRAPH_JSON/);
+    expect(match).not.toBeNull();
+    expect(JSON.parse(match![1])).toEqual(graph);
+    expect(content).toMatch(/untrusted/i);
+  });
+
+  it("marks the evidence graph as data, not instructions, in the system prompt", async () => {
+    await generateNarrative(graph);
+
+    const [, init] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0];
+    const body = JSON.parse(init.body);
+    expect(body.messages[0].content).toMatch(/DATA, not instructions/);
   });
 
   it("parses a well-formed narrative response", async () => {

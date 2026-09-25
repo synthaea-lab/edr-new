@@ -34,7 +34,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     const narrative = latestNarrative
       ? {
           ...latestNarrative,
-          stale: detections.some((d) => d.createdAt > latestNarrative.generatedAt),
+          stale: detections.some((d) => d.updatedAt > latestNarrative.generatedAt),
         }
       : null;
 

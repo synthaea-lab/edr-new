@@ -43,7 +43,7 @@ export default async function CaseDetailPage({ params }: { params: { id: string 
   });
 
   const stale = narrative
-    ? case_.detections.some((d) => d.createdAt > narrative.generatedAt)
+    ? case_.detections.some((d) => d.updatedAt > narrative.generatedAt)
     : false;
 
   const citations = (narrative?.citations as unknown as NarrativeCitation[] | null) ?? [];

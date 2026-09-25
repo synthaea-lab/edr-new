@@ -68,6 +68,44 @@ describe("GET /api/cases/[id]", () => {
     expect(body.narrative.stale).toBe(true);
   });
 
+  it("marks the narrative stale when an older detection is grouped into the case after generation", async () => {
+    // Regression test: the cron sweep (group-detections) can attach an
+    // already-ingested, already-old detection to a case well after a
+    // narrative was generated for it. Staleness must key off when the
+    // detection last changed (updatedAt, bumped by that grouping update),
+    // not when it was first ingested (createdAt) — otherwise a narrative
+    // silently omits evidence it was never shown.
+    const tenant = await createTestTenant();
+    const agent = await createTestAgent(tenant.id);
+    const case_ = await createTestCase(tenant.id);
+
+    // Detection exists, ungrouped, before the narrative is generated.
+    const detection = await createTestDetection(tenant.id, agent.id, { caseId: null });
+    await createTestCaseNarrative(tenant.id, case_.id, { generatedAt: new Date() });
+
+    // Only grouped into the case afterwards, e.g. by the cron sweep.
+    await prisma.detection.update({ where: { id: detection.id }, data: { caseId: case_.id } });
+
+    const res = await GET(request(tenant.id), { params: { id: case_.id } });
+    const body = await res.json();
+
+    expect(body.narrative.stale).toBe(true);
+  });
+
+  it("does not mark the narrative stale when no detection changed after generation", async () => {
+    const tenant = await createTestTenant();
+    const agent = await createTestAgent(tenant.id);
+    const case_ = await createTestCase(tenant.id);
+    await createTestDetection(tenant.id, agent.id, { caseId: case_.id });
+
+    await createTestCaseNarrative(tenant.id, case_.id, { generatedAt: new Date() });
+
+    const res = await GET(request(tenant.id), { params: { id: case_.id } });
+    const body = await res.json();
+
+    expect(body.narrative.stale).toBe(false);
+  });
+
   it("returns 404 for a case belonging to another tenant", async () => {
     const tenant1 = await createTestTenant("Tenant 1");
     const tenant2 = await createTestTenant("Tenant 2");
