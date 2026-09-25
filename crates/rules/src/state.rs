@@ -93,6 +93,7 @@ pub struct RuleState {
     /// short-lived `mv` pid, so the per-pid counter never climbs, but every child
     /// shares the loop's shell as `ppid`. Real Linux ransomware ships this way, so the
     /// per-pid counter alone would miss it (issue #262 review, old-dov). LRU-bounded.
+    /// `ppid <= 1` (unknown/init) is never keyed here — see `check_mass_rename_pattern`.
     ransomware_rename_by_ppid: BoundedMap<u32, SlidingCounter>,
     /// The agent's own pid, for [`Self::check_self_spawn`]'s narrow exclusion of
     /// its own known children (issue #403). `None` until [`Self::seed_own_pid`] is
@@ -794,7 +795,12 @@ impl RuleState {
         // Only pids that are themselves light renamers feed this counter, so a single
         // busy process (already handled above) does not also drive the shared per-ppid
         // counter to a second alert — see `RANSOMWARE_LOOP_CHILD_MAX`.
-        if pid_count > RANSOMWARE_LOOP_CHILD_MAX {
+        //
+        // ppid 0 ("unknown" — a `PROC_LINEAGE` miss on the sensor, never real pid 0)
+        // and ppid 1 (init — orphans and daemons reparent there) are shared buckets
+        // that would lump unrelated processes into a false "shell-loop" alert; a real
+        // loop's children have the loop's shell as parent, so skip both (#455 review).
+        if pid_count > RANSOMWARE_LOOP_CHILD_MAX || event.meta.ppid <= 1 {
             return None;
         }
         let ppid_entry = self

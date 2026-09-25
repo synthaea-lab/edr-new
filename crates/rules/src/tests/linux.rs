@@ -755,6 +755,33 @@ fn shell_loop_rename_across_distinct_pids_triggers_via_ppid() {
 }
 
 #[test]
+fn distinct_pids_with_unknown_or_init_parent_do_not_alert_via_ppid() {
+    // ppid 0 = "unknown" (a PROC_LINEAGE miss on the sensor) and ppid 1 = init are
+    // shared buckets: unrelated single-rename processes must not be lumped into a
+    // false shell-loop alert (#455 review, old-dov). Each rename is a distinct pid
+    // (so the per-pid counter never climbs) sharing ppid 0, then ppid 1.
+    for shared_ppid in [0u32, 1u32] {
+        let mut state = RuleState::new();
+        let mut alerts = Vec::new();
+        for i in 0..RANSOMWARE_RENAME_THRESHOLD * 2 {
+            let mut ev = file_rename_event_full(
+                30_000 + i, // a distinct pid each time
+                "daemon",
+                &format!("/var/lib/app/x{i}.dat"),
+                &format!("/var/lib/app/x{i}.dat.bak"),
+                u64::from(i) * 100_000_000,
+            );
+            ev.meta.ppid = shared_ppid;
+            alerts.extend(state.on_file_rename(&ev));
+        }
+        assert!(
+            alerts.is_empty(),
+            "ppid={shared_ppid} must not trigger a shell-loop alert"
+        );
+    }
+}
+
+#[test]
 fn single_process_burst_yields_exactly_one_alert_not_two() {
     // Regression for the double-count seam: one encryptor pid's renames also land in
     // the shared per-ppid counter. Without the RANSOMWARE_LOOP_CHILD_MAX gate, a
