@@ -239,3 +239,23 @@ def test_mutation_class_names() -> None:
     names = [m.mutation_class_name() for m in mutators]
     assert len(names) == len(set(names))  # All unique
     assert all(isinstance(n, str) and n for n in names)  # All non-empty strings
+
+
+@pytest.mark.parametrize(
+    ("mutator", "field", "intensity", "candidates"),
+    [
+        (FakeParentNameMutator(), "parent_comm", "light", ["systemd", "explorer.exe"]),
+        (ParentPathMutator(), "parent_image_path", "heavy", ParentPathMutator.SUSPICIOUS_PATHS),
+    ],
+)
+def test_every_candidate_is_reachable(mutator, field, intensity, candidates) -> None:
+    """Regression test for the `uniform(0, len(candidates) - 1)` off-by-one:
+    the last candidate was never selected because `LCG.uniform` is
+    [low, high), so excluding it from `high` made the final index
+    unreachable. Membership-only assertions (the tests above) pass with
+    that bug in place; this pins that every candidate is reached across a
+    range of seeds instead.
+    """
+    record = {"parent_comm": "x", "parent_image_path": "x"}
+    seen = {mutator.mutate(record, intensity, LCG(seed=s))[field] for s in range(500)}
+    assert set(candidates) <= seen
