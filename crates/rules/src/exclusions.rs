@@ -55,6 +55,13 @@ pub(crate) const RANSOMWARE_RENAME_WINDOW_NS: u64 = 5_000_000_000; // 5s
 /// almost immediately and is caught by the per-pid counter instead — this keeps one
 /// process's burst from also driving the shared per-ppid counter to a second alert.
 pub(crate) const RANSOMWARE_LOOP_CHILD_MAX: u32 = 3;
+/// Pairing window for one scheduled-task registration seen on both Security 4698
+/// and TaskScheduler/Operational 106 (#422, T1053.005). The two are normalized by
+/// separate poll threads, each on a 2s cadence, so their timestamps land a few
+/// seconds apart in either order. 60s covers a slow poll with ample margin, while a
+/// real re-registration of the same task with the same action inside it adds
+/// nothing an analyst would miss. Uncalibrated against fleet traffic (2026-09-25).
+pub(crate) const TASK_REGISTRATION_DEDUP_WINDOW_NS: u64 = 60_000_000_000; // 60s
 
 /// Processes excluded from SELF-SPAWN (child side) — frequent legitimate self-spawn
 /// confirmed in lab.
