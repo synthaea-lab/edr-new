@@ -18,11 +18,13 @@ To migrate from `old/lab` after review:
 | `log-clear.sh` | A log file under `/var/log/` deleted outright | T1070.002 — asserts the FileDeleteEvent-side `check_log_file_delete` rule (Linux only here; the exec-side `check_log_clear_exec` half needs a systemd-based row) |
 | `encoded-powershell.ps1` | `powershell.exe -EncodedCommand <base64>` invocations | T1059.001 — asserts the ExecEvent-side `check_encoded_powershell` rule |
 | `scheduled-task-persistence.ps1` | `schtasks.exe /Create` a demo task | T1053.005 — asserts the 4698 → `FLAG_PERSISTENCE_TASK_ARTIFACT` → `check_scheduled_task_persistence` end-to-end pipeline |
+| `scheduled-task-hijack.ps1` | A demo task's action rewritten (`Set-ScheduledTask`): once benignly, once at `cmd.exe` | T1053.005 task hijack — asserts the 4702 → `FLAG_PERSISTENCE_TASK_UPDATE_ARTIFACT` → `check_scheduled_task_update_persistence` pipeline, including the pattern gate (the benign rewrite must stay silent) |
 | `service-install-persistence.ps1` | `sc.exe create` a demo service (never runs) | T1543.003 — asserts the 7045 → `FLAG_PERSISTENCE_ARTIFACT` → `check_service_install_persistence` end-to-end pipeline |
 | `create-account-persistence.ps1` | `net user /add` a benign local SAM account | T1136.001 — asserts the 4720 → `FLAG_PERSISTENCE_ACCOUNT_ARTIFACT` → `check_account_creation_persistence` end-to-end pipeline (local SAM only; T1136.002 domain accounts are out of scope) |
 
-The four `.ps1` scenarios above are the Windows demo surface — see `../../demo/`
-for the runbook that chains them in the reviewer-facing order.
+The `.ps1` scenarios above, except `scheduled-task-hijack.ps1`, are the Windows
+demo surface — see `../../demo/` for the runbook that chains them in the
+reviewer-facing order.
 
 New scenarios follow the same shape: one script, one documented expectation list,
 runnable against any platform's agent from the VM matrix (`../vagrant`).
