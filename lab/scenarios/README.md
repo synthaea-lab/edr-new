@@ -27,6 +27,12 @@ for the runbook that chains them in the reviewer-facing order.
 New scenarios follow the same shape: one script, one documented expectation list,
 runnable against any platform's agent from the VM matrix (`../vagrant`).
 
+Windows scenarios must run on a stock Windows PowerShell 5.1 under any locale
+(#433). They dot-source `common.ps1` and keep to its three rules: ASCII-only source
+(`tools/check-ps1-ascii.py`, run by CI), locale-dependent arguments built from the
+current culture (`Get-FarFutureDate`), and every native call checked
+(`Invoke-Native`), so a failed step throws instead of reporting success.
+
 ## Machine-readable expectations
 
 Each `.sh` scenario above has a YAML sidecar (`<name>.yaml`, decided in issue #44:
