@@ -730,3 +730,73 @@ fn mass_rename_with_random_hex_suffix_triggers() {
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].technique, "T1486");
 }
+
+#[test]
+fn shell_loop_rename_across_distinct_pids_triggers_via_ppid() {
+    // `for f in *; do mv "$f" "$f.locked"; done`: each `mv` is its own short-lived
+    // pid, so the per-pid counter never climbs — but every child shares the loop's
+    // shell as ppid. The per-ppid counter catches it (issue #262 review, old-dov).
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        let mut ev = file_rename_event_full(
+            20_000 + i, // a fresh mv pid each iteration
+            "mv",
+            &format!("/home/u/doc{i}.pdf"),
+            &format!("/home/u/doc{i}.pdf.locked"),
+            u64::from(i) * 100_000_000,
+        );
+        ev.meta.ppid = 4242; // the loop's shell
+        alerts.extend(state.on_file_rename(&ev));
+    }
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1486");
+    assert!(alerts[0].message.contains("ppid=4242"));
+}
+
+#[test]
+fn single_process_burst_yields_exactly_one_alert_not_two() {
+    // Regression for the double-count seam: one encryptor pid's renames also land in
+    // the shared per-ppid counter. Without the RANSOMWARE_LOOP_CHILD_MAX gate, a
+    // rename after the per-pid alert would push the per-ppid counter over threshold
+    // and fire a spurious second alert. Drive 2 * threshold renames from one pid and
+    // assert exactly one alert total.
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD * 2 {
+        let mut ev = file_rename_event_full(
+            9100,
+            "encryptor",
+            &format!("/home/u/c{i}.docx"),
+            &format!("/home/u/c{i}.docx.locked"),
+            u64::from(i) * 100_000_000, // all inside one 5s window
+        );
+        ev.meta.ppid = 7000;
+        alerts.extend(state.on_file_rename(&ev));
+    }
+    assert_eq!(alerts.len(), 1);
+}
+
+#[test]
+fn in_place_edit_backup_is_a_documented_false_positive() {
+    // `sed -i.bak 's/old/new/' *.conf` across 20+ files rename(2)s each original to
+    // `f.conf.bak` from one pid — the exact prefix-preserving, lettered-suffix shape.
+    // A FileRenameEvent carries only `comm`, not the exe path an evidence-gated
+    // exclusion needs, so this rule currently fires here (see check_mass_rename_pattern
+    // doc). This test pins that known behavior; the fix (exe path + comm/trusted-path
+    // gate) is tracked as a follow-up. If a future change makes this stop alerting,
+    // update the doc and this test together, deliberately.
+    let mut state = RuleState::new();
+    let mut alerts = Vec::new();
+    for i in 0..RANSOMWARE_RENAME_THRESHOLD {
+        alerts.extend(state.on_file_rename(&file_rename_event_full(
+            9200,
+            "sed",
+            &format!("/etc/nginx/sites-enabled/s{i}.conf"),
+            &format!("/etc/nginx/sites-enabled/s{i}.conf.bak"),
+            u64::from(i) * 100_000_000,
+        )));
+    }
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0].technique, "T1486");
+}

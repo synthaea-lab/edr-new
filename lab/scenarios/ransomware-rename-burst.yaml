@@ -18,5 +18,7 @@ notes: >
   RANSOMWARE_RENAME_THRESHOLD is 20 renames in RANSOMWARE_RENAME_WINDOW_NS (5s); the
   script renames 22 for timing margin. One alert per window by design (SlidingCounter
   one-alert-per-window), so min_count stays 1 regardless of the exact rename count.
-  The renames run from one python3 process on purpose: the counter is per pid, and
-  a `mv` loop would spread them over 22 pids and never alert.
+  Default mode ("single") renames from one python3 process (per-pid counter). Mode
+  "loop" uses a shell `mv` loop — one short-lived pid per file, all sharing the
+  script's shell as ppid — which the per-ppid counter catches (issue #262 review);
+  it produces the same single T1486 alert, worded with ppid= instead of pid=.

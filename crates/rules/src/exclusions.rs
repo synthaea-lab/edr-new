@@ -49,6 +49,12 @@ pub(crate) const BEACON_WINDOW_NS: u64 = 60_000_000_000; // 60s
 /// threshold, so this alerts well before that volume is reached.
 pub(crate) const RANSOMWARE_RENAME_THRESHOLD: u32 = 20;
 pub(crate) const RANSOMWARE_RENAME_WINDOW_NS: u64 = 5_000_000_000; // 5s
+/// A pid contributes to the per-ppid (shell-loop) counter only while it has renamed
+/// at most this many files in the window. A loop's `mv` child renames exactly one
+/// file and exits, so it always qualifies; a single busy encryptor climbs past this
+/// almost immediately and is caught by the per-pid counter instead — this keeps one
+/// process's burst from also driving the shared per-ppid counter to a second alert.
+pub(crate) const RANSOMWARE_LOOP_CHILD_MAX: u32 = 3;
 
 /// Processes excluded from SELF-SPAWN (child side) — frequent legitimate self-spawn
 /// confirmed in lab.
