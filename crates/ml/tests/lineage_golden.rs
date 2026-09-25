@@ -10,8 +10,7 @@
 //! regenerate the golden file AND retrain the models.
 
 use ml::features::lineage::{FEATURE_NAMES, extract_features};
-use schema::ExecEvent;
-use schema::fixtures::meta;
+use schema::{ExecEvent, fixtures::meta};
 use serde_json::Value;
 
 const GOLDEN: &str = include_str!(concat!(
@@ -48,6 +47,7 @@ fn event_from_json(value: &Value) -> ExecEvent {
         parent_image_path,
         sha256: None,
         signature: None,
+        env_security: vec![],
     }
 }
 

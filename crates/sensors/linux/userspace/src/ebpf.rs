@@ -114,6 +114,15 @@ pub const TRACEPOINTS: &[(&str, &str, &str)] = &[
         "syscalls",
         "sys_enter_memfd_create",
     ),
+    ("sys_enter_setuid", "syscalls", "sys_enter_setuid"),
+    ("sys_enter_setgid", "syscalls", "sys_enter_setgid"),
+    ("sys_enter_setresuid", "syscalls", "sys_enter_setresuid"),
+    ("sys_enter_setresgid", "syscalls", "sys_enter_setresgid"),
+    ("sys_enter_setfsuid", "syscalls", "sys_enter_setfsuid"),
+    ("sys_enter_setfsgid", "syscalls", "sys_enter_setfsgid"),
+    ("sys_enter_capset", "syscalls", "sys_enter_capset"),
+    ("sys_enter_setns", "syscalls", "sys_enter_setns"),
+    ("sys_enter_unshare", "syscalls", "sys_enter_unshare"),
 ];
 
 /// `sensor_linux_wire::LineageEntry` is `repr(C)` over a `u32` and a `[u8; 16]` — every
@@ -129,7 +138,7 @@ unsafe impl aya::Pod for PodLineage {}
 
 /// Loads the compiled eBPF object (bytecode embedded at build time), without
 /// initializing the eBPF logger or loading/attaching any individual program. Shared
-/// between the agent's preflight and [`LinuxSensor::run`].
+/// between the agent's preflight and [`LinuxSensor`](crate::LinuxSensor)'s `Sensor::run`.
 ///
 /// # Errors
 ///
@@ -149,12 +158,104 @@ pub fn load_ebpf() -> Result<aya::Ebpf, SensorError> {
         tracing::debug!(ret, "remove limit on locked memory failed");
     }
 
-    let ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
+    load_embedded(None).map_err(|e| err(format!("failed to load the eBPF object: {e}")))
+}
+
+#[cfg(ebpf_embedded)]
+fn load_embedded(tamper_pin: Option<&std::path::Path>) -> Result<aya::Ebpf, aya::EbpfError> {
+    // `sched_process_fork`'s record layout differs across kernels (issue #415): feed
+    // the probe the running kernel's offsets, or leave it disabled (it then inserts
+    // nothing, and lineage falls back to the `/proc` priming snapshot) rather than
+    // let it read garbage pids at a compiled-in guess.
+    let fork = crate::tracefs::read_fork_layout();
+    let (known, comm_offset, comm_data_loc, parent_pid_offset, child_pid_offset) = match fork {
+        Some(l) => {
+            tracing::info!(
+                parent_comm_offset = l.parent_comm_offset,
+                parent_comm_data_loc = l.parent_comm_data_loc,
+                parent_pid_offset = l.parent_pid_offset,
+                child_pid_offset = l.child_pid_offset,
+                "sched_process_fork layout read from tracefs"
+            );
+            (
+                1u32,
+                l.parent_comm_offset,
+                u32::from(l.parent_comm_data_loc),
+                l.parent_pid_offset,
+                l.child_pid_offset,
+            )
+        }
+        None => {
+            tracing::warn!(
+                "sched_process_fork format unreadable or unrecognised (tracefs not mounted \
+                 at /sys/kernel/tracing or /sys/kernel/debug/tracing?) — fork lineage \
+                 disabled; exec events keep the parent only for processes primed from \
+                 /proc at startup"
+            );
+            (0, 8, 0, 24, 44)
+        }
+    };
+
+    let mut loader = aya::EbpfLoader::new();
+    loader
+        .override_global("FORK_LAYOUT_KNOWN", &known, true)
+        .override_global("FORK_PARENT_COMM_OFFSET", &comm_offset, true)
+        .override_global("FORK_PARENT_COMM_DATA_LOC", &comm_data_loc, true)
+        .override_global("FORK_PARENT_PID_OFFSET", &parent_pid_offset, true)
+        .override_global("FORK_CHILD_PID_OFFSET", &child_pid_offset, true);
+    if let Some(path) = tamper_pin {
+        loader.map_pin_path("SIGNAL_TAMPER_LAST", path);
+    }
+    loader.load(aya::include_bytes_aligned!(concat!(
         env!("OUT_DIR"),
         "/sensor-linux-ebpf"
     )))
-    .map_err(|e| err(format!("failed to load the eBPF object: {e}")))?;
-    Ok(ebpf)
+}
+
+/// bpffs directory holding the agent's pinned maps (issue #362).
+#[cfg(ebpf_embedded)]
+const PIN_DIR: &str = "/sys/fs/bpf/synthaea";
+
+/// Pin path of `SIGNAL_TAMPER_LAST`. Versioned by `WIRE_VERSION`: aya reuses an
+/// existing pin as-is without checking its value size, so a pin left by an agent
+/// built against another `SignalEvent` layout must never be picked up.
+#[cfg(ebpf_embedded)]
+fn tamper_pin_path() -> std::path::PathBuf {
+    std::path::Path::new(PIN_DIR).join(format!(
+        "signal_tamper_last_v{}",
+        sensor_linux_wire::WIRE_VERSION
+    ))
+}
+
+/// [`load_ebpf`] for `LinuxSensor::run` (issue #362): same object, but
+/// `SIGNAL_TAMPER_LAST` is pinned under [`PIN_DIR`] so it outlives the agent. A
+/// `SIGKILL` is then still attributable after the restart that follows it. Without
+/// bpffs (not mounted, or no permission to
+/// create the directory) the object loads unpinned instead, with a warning: the
+/// sensor keeps running, only cross-restart `SIGKILL` attribution is lost.
+///
+/// # Errors
+///
+/// Same as [`load_ebpf`].
+#[cfg(ebpf_embedded)]
+pub(crate) fn load_ebpf_for_run() -> Result<aya::Ebpf, SensorError> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let pinned = std::fs::create_dir_all(PIN_DIR)
+        .and_then(|()| std::fs::set_permissions(PIN_DIR, std::fs::Permissions::from_mode(0o700)))
+        .map_err(|e| e.to_string())
+        .and_then(|()| load_embedded(Some(&tamper_pin_path())).map_err(|e| e.to_string()));
+    match pinned {
+        Ok(ebpf) => Ok(ebpf),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "could not pin SIGNAL_TAMPER_LAST under {PIN_DIR}: a SIGKILL sent to the \
+                 agent will not be attributable after its restart"
+            );
+            load_ebpf()
+        }
+    }
 }
 
 /// This build carries no embedded probes (bpf-linker was absent at build time — see
@@ -172,6 +273,16 @@ pub fn load_ebpf() -> Result<aya::Ebpf, SensorError> {
          and rebuild"
             .to_string(),
     ))
+}
+
+/// See the `ebpf_embedded` variant: this build cannot load anything.
+///
+/// # Errors
+///
+/// Always, same as [`load_ebpf`] in this configuration.
+#[cfg(not(ebpf_embedded))]
+pub(crate) fn load_ebpf_for_run() -> Result<aya::Ebpf, SensorError> {
+    load_ebpf()
 }
 
 /// Loads (kernel verifier included) the program `program_name` without attaching it.
@@ -282,4 +393,51 @@ pub(crate) fn write_signal_watch_pid(ebpf: &mut aya::Ebpf, pid: u32) -> Result<(
     watch
         .set(0, pid, 0)
         .map_err(|e| err(format!("failed to write SIGNAL_WATCH_PID: {e}")))
+}
+
+/// `sensor_linux_wire::SignalEvent` is `repr(C)` over integers and byte arrays, so
+/// every bit pattern is valid. Same newtype reasoning as [`PodLineage`].
+#[repr(transparent)]
+#[derive(Clone, Copy)]
+pub(crate) struct PodSignal(pub(crate) sensor_linux_wire::SignalEvent);
+
+// SAFETY: see the doc comment above.
+unsafe impl aya::Pod for PodSignal {}
+
+/// Handle on `SIGNAL_TAMPER_LAST` (issue #362): the last `SIGKILL` the probes saw
+/// aimed at the agent, written kernel-side before delivery.
+pub(crate) type TamperSlot = aya::maps::Array<aya::maps::MapData, PodSignal>;
+
+/// Takes `SIGNAL_TAMPER_LAST` out of `ebpf`.
+///
+/// # Errors
+///
+/// Returns [`SensorError`] when the map is missing from the eBPF object or is not
+/// an array of `SignalEvent`.
+pub(crate) fn take_tamper_slot(ebpf: &mut aya::Ebpf) -> Result<TamperSlot, SensorError> {
+    let map = ebpf
+        .take_map("SIGNAL_TAMPER_LAST")
+        .ok_or_else(|| err("map SIGNAL_TAMPER_LAST not found in eBPF object".to_string()))?;
+    aya::maps::Array::try_from(map)
+        .map_err(|e| err(format!("SIGNAL_TAMPER_LAST is not an array map: {e}")))
+}
+
+/// The recorded `SIGKILL`, if any. An all-zero slot (never written, or cleared)
+/// has a zero timestamp, which no real event has.
+pub(crate) fn read_tamper_slot(slot: &TamperSlot) -> Option<sensor_linux_wire::SignalEvent> {
+    let PodSignal(event) = slot.get(&0, 0).ok()?;
+    (event.meta.timestamp_ns != 0).then_some(event)
+}
+
+/// Zeroes the slot, so the same `SIGKILL` is never reported twice.
+///
+/// # Errors
+///
+/// Returns [`SensorError`] when the map write fails.
+pub(crate) fn clear_tamper_slot(slot: &mut TamperSlot) -> Result<(), SensorError> {
+    // SAFETY: `SignalEvent` is plain-old-data (see `PodSignal`), so all-zero is a
+    // valid value.
+    let zero: sensor_linux_wire::SignalEvent = unsafe { core::mem::zeroed() };
+    slot.set(0, PodSignal(zero), 0)
+        .map_err(|e| err(format!("failed to clear SIGNAL_TAMPER_LAST: {e}")))
 }

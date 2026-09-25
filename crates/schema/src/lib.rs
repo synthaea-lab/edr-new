@@ -152,7 +152,23 @@ pub mod time;
 /// as v13-v24. Originally claimed as 21 → 22 while this branch was open, then
 /// renumbered each time another PR took the number first: 22 → 23 (#262 Phase 3
 /// xattr), 23 → 24 (#297 `PolicyDenial`), 24 → 25 (#264 kernel module / eBPF).
-pub const SCHEMA_VERSION: u32 = 25;
+///
+/// Bumped 25 → 26 for [`Event::IdentityChange`], [`Event::CapSet`], and
+/// [`Event::Namespace`] (#266: privilege escalation, capability abuse, and
+/// container-escape telemetry via `setuid`-family syscalls, `capset(2)`, and
+/// `setns(2)`/`unshare(2)`). Linux-only, no cross-platform reuse, same
+/// posture as #264/#265's Linux-only additions. Same serialization-visible
+/// reasoning as v13-v25.
+///
+/// Bumped 26 → 27 for [`ExecEvent::env_security`] (#363): a present-only
+/// allowlist capture of the loader-hijack environment family (`LD_PRELOAD`,
+/// `LD_LIBRARY_PATH`, `LD_AUDIT`, `LD_DEBUG_OUTPUT`, `GLIBC_TUNABLES`) —
+/// additive optional field, no new `Event` variant, same serialization-visible
+/// reasoning as every field addition since v13. Originally claimed as 21 → 22
+/// while this branch was open, then renumbered each time another PR took the
+/// number first: 22 → 23 (#262 Phase 3 xattr), 23 → 24 (#297 `PolicyDenial`),
+/// 24 → 25 (#264), 25 → 26 → 27 (#265, #266).
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -180,6 +196,15 @@ pub const FLAG_PERSISTENCE_ARTIFACT: u32 = 0x1000_0000;
 /// than a service (T1543.003). See `check_scheduled_task_persistence` (`rules`) and
 /// `docs/adr/0004-windows-persistence-detection-via-eventlog-polling.md`.
 pub const FLAG_PERSISTENCE_TASK_ARTIFACT: u32 = 0x2000_0000;
+
+/// Set alongside [`FLAG_PERSISTENCE_TASK_ARTIFACT`] when the task definition had no
+/// action the sensor could read (no `Exec` with a `Command`, no `ComHandler` with a
+/// `ClassId`). The persistence event is still reported, since a task whose action
+/// is hidden from us is no less suspicious, but `path` then holds a placeholder
+/// instead of an action list. Not serialization-visible (a bit in the existing
+/// `flags`), so no [`SCHEMA_VERSION`] bump; same reasoning as
+/// [`FLAG_PERSISTENCE_ARTIFACT`].
+pub const FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN: u32 = 0x0200_0000;
 
 /// Same principle as [`FLAG_PERSISTENCE_ARTIFACT`], for a Windows **local account
 /// creation** (event 4720, "A user account was created" — ATT&CK T1136.001) rather
@@ -359,6 +384,18 @@ pub struct ExecEvent {
     /// Code-signature verdict for the executed image, filled by enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
+    /// Security-relevant environment variables present at exec time, `(name, value)`
+    /// pairs (#363) — the dynamic-linker-hijack family: `LD_PRELOAD`,
+    /// `LD_LIBRARY_PATH`, `LD_AUDIT` (the quieter sibling of `LD_PRELOAD`),
+    /// `LD_DEBUG_OUTPUT` (arbitrary-file-write via the linker's own debug tracing),
+    /// and `GLIBC_TUNABLES` (the CVE-2023-4911 "Looney Tunables" vector). A fixed
+    /// allowlist, never the whole environment — environments carry secrets and
+    /// multi-KB noise — and present-only: a name absent from the process's actual
+    /// environment is simply not in this list, never an empty-value entry. Empty on
+    /// every platform/sensor that has not opted into this capture (Linux/eBPF only,
+    /// so far).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_security: Vec<(String, String)>,
 }
 
 impl ExecEvent {
@@ -1401,6 +1438,84 @@ pub struct BpfEvent {
     pub cmd: u32,
 }
 
+/// Which user/group identity syscall produced an [`IdentityChangeEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityChangeKind {
+    SetUid,
+    SetGid,
+    SetResUid,
+    SetResGid,
+    SetFsUid,
+    SetFsGid,
+}
+
+/// User/group identity change (issue #266): `setuid(2)`/`setgid(2)`/
+/// `setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/`setfsgid(2)`. The
+/// SUID-binary-abuse and privilege-drop/escalation primitive — a process
+/// requesting uid/gid 0 after starting as an unprivileged user is the
+/// canonical exploit-success signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityChangeEvent {
+    pub meta: EventMeta,
+    pub kind: IdentityChangeKind,
+    /// The requested id — the single argument for [`IdentityChangeKind::SetUid`]/
+    /// [`IdentityChangeKind::SetGid`]/[`IdentityChangeKind::SetFsUid`]/
+    /// [`IdentityChangeKind::SetFsGid`], or the "real" argument for the
+    /// `SetRes*` kinds.
+    pub real: u32,
+    /// [`IdentityChangeKind::SetResUid`]/[`IdentityChangeKind::SetResGid`]'s
+    /// "effective" argument only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<u32>,
+    /// [`IdentityChangeKind::SetResUid`]/[`IdentityChangeKind::SetResGid`]'s
+    /// "saved" argument only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<u32>,
+}
+
+/// Linux capability set change (issue #266): `capset(2)`. Only the low 32
+/// capability bits are decoded — see `sensor-linux-wire::CapSetEvent`'s doc
+/// for why that already covers every capability an attacker plausibly wants
+/// (`CAP_SYS_ADMIN`, `CAP_SETUID`, `CAP_NET_ADMIN`, `CAP_DAC_OVERRIDE`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapSetEvent {
+    pub meta: EventMeta,
+    /// The target process. `0` means "the calling process itself" — this is
+    /// `capset(2)`'s own documented meaning for pid 0, not an absent value,
+    /// so it stays a plain `u32` rather than `Option<u32>`.
+    pub target_pid: u32,
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
+/// Which namespace syscall produced a [`NamespaceEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceSyscall {
+    SetNs,
+    Unshare,
+}
+
+/// Namespace manipulation (issue #266): `setns(2)` — the container-escape
+/// primitive, joining a host namespace from inside a container — and
+/// `unshare(2)`, creating a new namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceEvent {
+    pub meta: EventMeta,
+    pub syscall: NamespaceSyscall,
+    /// [`NamespaceSyscall::SetNs`]'s fd argument (an open `/proc/[pid]/ns/*`
+    /// file). Absent for [`NamespaceSyscall::Unshare`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd: Option<i32>,
+    /// `setns(2)`'s `nstype` (a single `CLONE_NEW*` constant, or `0` for
+    /// "any"), or `unshare(2)`'s `flags` (a bitmask of one or more
+    /// `CLONE_NEW*` bits) — not decoded to constant names here, same
+    /// "sensor reports, detection interprets" split as `PtraceEvent::request`.
+    pub flags: u32,
+}
+
 /// The normalized event envelope.
 ///
 /// `#[non_exhaustive]`: new telemetry categories (registry, DNS, image load, ...) are
@@ -1453,6 +1568,9 @@ pub enum Event {
     ProcessVmRead(ProcessVmReadEvent),
     ProcessVmWrite(ProcessVmWriteEvent),
     MemfdCreate(MemfdCreateEvent),
+    IdentityChange(IdentityChangeEvent),
+    CapSet(CapSetEvent),
+    Namespace(NamespaceEvent),
 }
 
 impl Event {
@@ -1503,6 +1621,9 @@ impl Event {
             Event::ProcessVmRead(e) => &e.meta,
             Event::ProcessVmWrite(e) => &e.meta,
             Event::MemfdCreate(e) => &e.meta,
+            Event::IdentityChange(e) => &e.meta,
+            Event::CapSet(e) => &e.meta,
+            Event::Namespace(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.

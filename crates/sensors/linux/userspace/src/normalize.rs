@@ -6,10 +6,11 @@
 //! once at startup and passes it here so schema timestamps are epoch nanoseconds.
 
 use schema::{
-    BpfEvent, ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileChmodEvent,
-    FileChownEvent, FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent, FileRenameEvent,
-    FileSetxattrEvent, FileWriteEvent, KernelModuleAction, KernelModuleEvent, MemfdCreateEvent,
-    MountEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, SignalEvent,
+    BpfEvent, CapSetEvent, ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent,
+    FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent,
+    FileRenameEvent, FileSetxattrEvent, FileWriteEvent, IdentityChangeEvent, IdentityChangeKind,
+    KernelModuleAction, KernelModuleEvent, MemfdCreateEvent, MountEvent, NamespaceEvent,
+    NamespaceSyscall, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, SignalEvent,
     SocketAcceptEvent, SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
 };
 use sensor_linux_wire as wire;
@@ -66,7 +67,22 @@ use sensor_linux_wire as wire;
 /// `PtraceEvent`, `ProcessVmReadEvent`, `ProcessVmWriteEvent`, `MemfdCreateEvent`
 /// — new `ptrace`/`process_vm_read`/`process_vm_write`/`memfd_create` mapping
 /// functions below; no existing mapping changed shape.
-const _: () = assert!(wire::WIRE_VERSION == 14);
+///
+/// v15 (#266, originally claimed as v12 — see that constant's doc) added
+/// `IdentityChangeEvent`/`CapSetEvent`/`NamespaceEvent` — new
+/// `identity_change`/`cap_set`/`namespace` mapping functions below.
+/// `identity_change` turns the wire struct's `kind: u8` discriminant into
+/// `schema::IdentityChangeKind` and only surfaces `effective`/`saved` as
+/// `Some` for the two `SetRes*` kinds (never from the wire value itself,
+/// which is always populated — see that struct's doc). `namespace` does the
+/// same `syscall: u8` → enum conversion and surfaces `fd` as `Some` only for
+/// `setns`. No existing mapping changed shape.
+///
+/// v16 (#267 Phase 1, originally claimed as v12 — see that constant's doc)
+/// added `GetAddrInfoEvent` — not imported here either (the DNS uprobe pair
+/// lives in `sensor-linux-uprobes`, not this crate's tracepoint-only
+/// surface); no existing mapping changed shape.
+const _: () = assert!(wire::WIRE_VERSION == 16);
 
 /// Same, but an empty buffer means "not captured" rather than the empty string —
 /// the probe leaves `pcomm` zeroed when the fork-lineage map had no entry.
@@ -105,12 +121,16 @@ fn meta(
 /// space-joined rendering of `argv` for display and Sigma matching; consumers that
 /// need the exact tokens use `argv` (or `ExecEvent::ml_cmdline`). `parent_comm` is the
 /// fork-lineage entry, or `None` when the parent predated the probe and priming
-/// missed it.
+/// missed it. `env_security` is passed in by the caller the same way as `argv` — the
+/// Linux sensor reads it from `/proc/<pid>/environ` when it drains the event (issue
+/// #363; same drain-time-read tradeoffs as `argv`, see `read_proc_environ_security`),
+/// already filtered to the security-relevant allowlist.
 #[must_use]
 pub fn exec(
     event: &wire::ExecEvent,
     boot_epoch_offset_ns: u64,
     argv: Vec<String>,
+    env_security: Vec<(String, String)>,
     container: Option<ContainerContext>,
 ) -> Event {
     let image_raw = &event.image[..(event.image_len as usize).min(wire::MAX_PATH_LEN)];
@@ -130,6 +150,7 @@ pub fn exec(
         parent_image_path: None,
         sha256: None,
         signature: None,
+        env_security,
     })
 }
 
@@ -518,6 +539,63 @@ pub fn memfd_create(
     })
 }
 
+#[must_use]
+pub fn identity_change(
+    event: &wire::IdentityChangeEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let (kind, is_res) = match event.kind {
+        1 => (IdentityChangeKind::SetGid, false),
+        2 => (IdentityChangeKind::SetResUid, true),
+        3 => (IdentityChangeKind::SetResGid, true),
+        4 => (IdentityChangeKind::SetFsUid, false),
+        5 => (IdentityChangeKind::SetFsGid, false),
+        _ => (IdentityChangeKind::SetUid, false),
+    };
+    Event::IdentityChange(IdentityChangeEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        kind,
+        real: event.real,
+        effective: is_res.then_some(event.effective),
+        saved: is_res.then_some(event.saved),
+    })
+}
+
+#[must_use]
+pub fn cap_set(
+    event: &wire::CapSetEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::CapSet(CapSetEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        target_pid: event.target_pid,
+        effective: event.effective,
+        permitted: event.permitted,
+        inheritable: event.inheritable,
+    })
+}
+
+#[must_use]
+pub fn namespace(
+    event: &wire::NamespaceEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let is_setns = event.syscall == 0;
+    Event::Namespace(NamespaceEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        syscall: if is_setns {
+            NamespaceSyscall::SetNs
+        } else {
+            NamespaceSyscall::Unshare
+        },
+        fd: is_setns.then_some(event.fd),
+        flags: event.flags,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,7 +634,13 @@ mod tests {
     #[test]
     fn exec_keeps_argv_and_joins_cmdline() {
         let event = wire_exec(b"/usr/bin/curl", b"bash");
-        let Event::Exec(e) = exec(&event, 500, argv(&["curl", "-o", "/tmp/x"]), None) else {
+        let Event::Exec(e) = exec(
+            &event,
+            500,
+            argv(&["curl", "-o", "/tmp/x"]),
+            Vec::new(),
+            None,
+        ) else {
             panic!("wrong variant")
         };
         assert_eq!(e.argv, ["curl", "-o", "/tmp/x"]);
@@ -577,7 +661,8 @@ mod tests {
     fn exec_image_path_ignores_spoofed_argv0() {
         // execve("/tmp/evil", {"/usr/sbin/sshd", ...}, ...)
         let event = wire_exec(b"/tmp/evil", b"bash");
-        let Event::Exec(e) = exec(&event, 0, argv(&["/usr/sbin/sshd", "-D"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["/usr/sbin/sshd", "-D"]), Vec::new(), None)
+        else {
             panic!("wrong variant")
         };
         assert_eq!(
@@ -594,7 +679,7 @@ mod tests {
     fn exec_empty_argv_when_process_already_exited() {
         // /proc/<pid>/cmdline gone by drain time — image_path still authoritative.
         let event = wire_exec(b"/bin/sh", b"bash");
-        let Event::Exec(e) = exec(&event, 0, Vec::new(), None) else {
+        let Event::Exec(e) = exec(&event, 0, Vec::new(), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert!(e.argv.is_empty());
@@ -603,9 +688,28 @@ mod tests {
     }
 
     #[test]
+    fn exec_carries_security_env_when_present() {
+        let event = wire_exec(b"/usr/bin/ls", b"bash");
+        let env = vec![("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string())];
+        let Event::Exec(e) = exec(&event, 0, argv(&["ls"]), env.clone(), None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.env_security, env);
+    }
+
+    #[test]
+    fn exec_security_env_empty_for_plain_exec() {
+        let event = wire_exec(b"/usr/bin/ls", b"bash");
+        let Event::Exec(e) = exec(&event, 0, argv(&["ls"]), Vec::new(), None) else {
+            panic!("wrong variant")
+        };
+        assert!(e.env_security.is_empty());
+    }
+
+    #[test]
     fn exec_parent_comm_absent_when_lineage_missed() {
         let event = wire_exec(b"/bin/sh", b"");
-        let Event::Exec(e) = exec(&event, 0, argv(&["sh"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["sh"]), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert_eq!(e.parent_comm, None);
@@ -620,7 +724,7 @@ mod tests {
             image: None,
             name: None,
         };
-        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Some(ctx)) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Vec::new(), Some(ctx)) else {
             panic!("wrong variant")
         };
         let container = e.meta.container.expect("container attributed");
@@ -637,7 +741,7 @@ mod tests {
             image: Some("nginx:1.27".to_string()),
             name: Some("web1".to_string()),
         };
-        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Some(ctx)) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Vec::new(), Some(ctx)) else {
             panic!("wrong variant")
         };
         let container = e.meta.container.expect("container attributed");
@@ -648,7 +752,7 @@ mod tests {
     #[test]
     fn bare_metal_process_has_no_container() {
         let event = wire_exec(b"/usr/bin/curl", b"bash");
-        let Event::Exec(e) = exec(&event, 0, argv(&["curl"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["curl"]), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert_eq!(e.meta.container, None);
@@ -1143,5 +1247,107 @@ mod tests {
             panic!("wrong variant")
         };
         assert_eq!(e.cmd, 5);
+    }
+
+    #[test]
+    fn identity_change_setuid_has_only_real() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 0,
+            real: 1000,
+            effective: 0,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetUid);
+        assert_eq!(e.real, 1000);
+        assert_eq!(e.effective, None);
+        assert_eq!(e.saved, None);
+    }
+
+    #[test]
+    fn identity_change_setresuid_carries_all_three() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 2,
+            real: 1000,
+            effective: 1000,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetResUid);
+        assert_eq!(e.real, 1000);
+        assert_eq!(e.effective, Some(1000));
+        assert_eq!(e.saved, Some(0));
+    }
+
+    #[test]
+    fn identity_change_setfsgid_has_only_real() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 5,
+            real: 1000,
+            effective: 0,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetFsGid);
+        assert_eq!(e.effective, None);
+        assert_eq!(e.saved, None);
+    }
+
+    #[test]
+    fn cap_set_carries_the_low_word_bits() {
+        let event = wire::CapSetEvent {
+            meta: wire_meta(b"evil"),
+            target_pid: 0,
+            effective: 1 << 21,
+            permitted: 1 << 21,
+            inheritable: 0,
+        };
+        let Event::CapSet(e) = cap_set(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.target_pid, 0);
+        assert_eq!(e.effective, 1 << 21);
+        assert_eq!(e.permitted, 1 << 21);
+    }
+
+    #[test]
+    fn namespace_setns_carries_the_fd() {
+        let event = wire::NamespaceEvent {
+            meta: wire_meta(b"nsenter"),
+            syscall: 0,
+            fd: 3,
+            flags: 0x4000_0000,
+        };
+        let Event::Namespace(e) = namespace(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.syscall, NamespaceSyscall::SetNs);
+        assert_eq!(e.fd, Some(3));
+        assert_eq!(e.flags, 0x4000_0000);
+    }
+
+    #[test]
+    fn namespace_unshare_has_no_fd() {
+        let event = wire::NamespaceEvent {
+            meta: wire_meta(b"unshare"),
+            syscall: 1,
+            fd: -1,
+            flags: 0x0002_0000,
+        };
+        let Event::Namespace(e) = namespace(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.syscall, NamespaceSyscall::Unshare);
+        assert_eq!(e.fd, None);
+        assert_eq!(e.flags, 0x0002_0000);
     }
 }

@@ -18,6 +18,9 @@
 #[cfg(feature = "user")]
 extern crate std;
 
+mod path_filter;
+pub use path_filter::is_filtered_path;
+
 /// Bumped on every layout-affecting change to the structs below. Not a wire header
 /// (ring-buffer items carry none) — a build-time tripwire: the userspace loader
 /// `const _`-asserts the value it was compiled against, so an ebpf/userspace version
@@ -129,10 +132,46 @@ extern crate std;
 ///   `iov_len` (a size signal, not a full scatter-gather resolution) — same
 ///   "requested size, not full path/content" tradeoff `FileWriteEvent` and
 ///   `UdpSendEvent::size` already make.
+/// - v15: `IdentityChangeEvent`, `CapSetEvent`, and `NamespaceEvent` added
+///   (issue #266) — privilege escalation, capability abuse, and container
+///   escape via namespace manipulation. `IdentityChangeEvent` covers
+///   `setuid(2)`/`setgid(2)`/`setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/
+///   `setfsgid(2)` with a `kind` discriminant (same shape as `MountEvent`'s
+///   `mounted` bool and `#264`'s `KernelModuleEvent::action` — one event
+///   family, several closely related syscalls). `CapSetEvent` decodes only
+///   the low 32 capability bits (`__user_cap_data_struct[0]`) of
+///   `capset(2)`'s requested effective/permitted/inheritable sets — every
+///   capability an attacker plausibly cares about (`CAP_SYS_ADMIN`=21,
+///   `CAP_SETUID`=7, `CAP_NET_ADMIN`=12, ...) is below bit 32; the high word
+///   (`__user_cap_data_struct[1]`, capabilities 32+: `CAP_BPF`,
+///   `CAP_PERFMON`, `CAP_CHECKPOINT_RESTORE`) is not read. `NamespaceEvent`
+///   covers `setns(2)` (the actual container-escape primitive — joining a
+///   host namespace from inside a container) and `unshare(2)` with a
+///   `syscall` discriminant. `prctl(PR_SET_SECUREBITS)`/`prctl(PR_CAPBSET_DROP)`
+///   (also listed on #266) are deliberately deferred: both are one `option`
+///   value out of `prctl(2)`'s dozens, needing a filtered `sys_enter_prctl`
+///   probe shaped like the `sys_enter_bpf` cmd filter (#264) — a future
+///   addition, not silently dropped.
+/// - v16: `GetAddrInfoEvent` added (issue #267 Phase 1) — a uprobe/uretprobe
+///   pair on glibc's `getaddrinfo(3)`, the DNS-based C2/tunneling/
+///   exfiltration visibility this crate had none of. Entry stashes the
+///   query-name pointer and the caller's `struct addrinfo **res` output-
+///   parameter pointer (`GETADDRINFO_ARGS`, internal to the ebpf crate, same
+///   pid_tgid-keyed correlation-map shape as `SSL_READ_ARGS`); exit reads the
+///   return code and, on success, dereferences `*res` and decodes only the
+///   *first* `addrinfo` entry's family + address — a real query commonly
+///   returns several (one per A/AAAA record, sometimes both), and walking
+///   the whole linked list is deferred, same "first element only" tradeoff
+///   as `#265`'s `ProcessVmReadEvent::remote_iov_len`. Emitted on failure
+///   too (`status != 0`, no address fields) — a resolution failure is itself
+///   a signal (DGA malware generates many). musl's internal resolver,
+///   systemd-resolved's D-Bus path, and raw UDP/TCP port-53 capture (DoH/DoT
+///   blind spots either way) are `#267`'s Phase 2, not implemented here.
 ///   Originally claimed as v12 while this branch was open; renumbered to v13
 ///   once `#262` Phase 3's xattr telemetry took v12, then to v14 once #362 and
-///   #264 took v13 on `main` (same coordination note as `SCHEMA_VERSION`).
-pub const WIRE_VERSION: u32 = 14;
+///   #264 took v13 on `main`, then to v16 once #265 and #266 took v14/v15
+///   (same coordination note as `SCHEMA_VERSION`).
+pub const WIRE_VERSION: u32 = 16;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -153,6 +192,10 @@ pub const MAX_FS_TYPE_LEN: usize = 32;
 /// this probe even sees it. Rounded up here for alignment headroom, not
 /// because names can be longer.
 pub const MAX_MODULE_NAME_LEN: usize = 64;
+/// Budget for a `getaddrinfo(3)` query name. RFC 1035's 253-byte domain-name
+/// limit fits comfortably; matches `MAX_PATH_LEN`'s existing budget rather
+/// than inventing a new number.
+pub const MAX_DNS_QUERY_LEN: usize = 256;
 /// Budget for TLS plaintext capture (first N bytes). Chosen to fit comfortably
 /// in a ring-buffer event with metadata while staying under 512 bytes total.
 pub const MAX_TLS_CAPTURE: usize = 256;
@@ -452,6 +495,61 @@ pub struct SignalEvent {
     pub target_pid: u32,
 }
 
+/// User/group identity change (issue #266): `setuid(2)`/`setgid(2)`/
+/// `setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/`setfsgid(2)`. The
+/// SUID-binary-abuse and privilege-drop/escalation primitive.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IdentityChangeEvent {
+    pub meta: EventMeta,
+    /// 0=setuid, 1=setgid, 2=setresuid, 3=setresgid, 4=setfsuid, 5=setfsgid.
+    pub kind: u8,
+    /// The requested id: `setuid`/`setgid`/`setfsuid`/`setfsgid`'s single
+    /// argument, or `setresuid`/`setresgid`'s "real" argument.
+    pub real: u32,
+    /// `setresuid`/`setresgid`'s "effective" argument only — meaningless
+    /// (not read) for the other four `kind`s; the userspace loader decides
+    /// whether to surface it purely from `kind`, never from this value.
+    pub effective: u32,
+    /// `setresuid`/`setresgid`'s "saved" argument only — same caveat as
+    /// `effective`.
+    pub saved: u32,
+}
+
+/// eBPF program/map lifecycle capability probe's sibling (issue #266):
+/// `capset(2)`. Decodes only the low 32 capability bits — see this file's
+/// `WIRE_VERSION` v12 changelog for why that is deliberately sufficient.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CapSetEvent {
+    pub meta: EventMeta,
+    /// `cap_user_header_t.pid` — the target process. `0` means "the calling
+    /// process itself" (`capset(2)`'s own documented meaning for pid 0, not
+    /// a probe failure sentinel).
+    pub target_pid: u32,
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
+/// Namespace manipulation (issue #266): `setns(2)` (the container-escape
+/// primitive — joining a host namespace from inside a container) and
+/// `unshare(2)` (creating a new namespace).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NamespaceEvent {
+    pub meta: EventMeta,
+    /// 0 = setns, 1 = unshare.
+    pub syscall: u8,
+    /// `setns(2)`'s fd argument (an open `/proc/[pid]/ns/*` file). `-1` for
+    /// `unshare`.
+    pub fd: i32,
+    /// `setns(2)`'s `nstype` (a single `CLONE_NEW*` constant, or `0` for
+    /// "any"), or `unshare(2)`'s `flags` (a bitmask of one or more
+    /// `CLONE_NEW*` bits).
+    pub flags: u32,
+}
+
 /// TLS plaintext capture (uprobes on `SSL_read`/`SSL_write`, issue #90).
 /// Captures the first `MAX_TLS_CAPTURE` bytes of plaintext before encryption
 /// (`SSL_write`) or after decryption (`SSL_read`) for C2 beacon detection.
@@ -607,6 +705,30 @@ pub struct MemfdCreateEvent {
     pub name_len: u16,
     /// The `flags` argument (`MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, ...).
     pub flags: u32,
+}
+
+/// DNS resolution via glibc's `getaddrinfo(3)` (issue #267 Phase 1): the
+/// DNS-based C2/tunneling/exfiltration visibility primitive. See this file's
+/// `WIRE_VERSION` v16 changelog for the uprobe/uretprobe correlation shape and
+/// the "first `addrinfo` entry only" tradeoff.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GetAddrInfoEvent {
+    pub meta: EventMeta,
+    pub query: [u8; MAX_DNS_QUERY_LEN],
+    pub query_len: u16,
+    /// `getaddrinfo(3)`'s return code: `0` on success, a negative `EAI_*`
+    /// constant on failure (`EAI_NONAME`, `EAI_AGAIN`, ...) — not decoded to
+    /// a name here, same "sensor reports, detection interprets" split as
+    /// every other raw syscall/libc return value in this crate.
+    pub status: i32,
+    /// `true` if `addr_v4`/`addr_v6`/`is_ipv6` were populated from the
+    /// first resolved `addrinfo` entry. `false` on failure (`status != 0`)
+    /// or an unrecognized `ai_family`.
+    pub addr_resolved: bool,
+    pub is_ipv6: bool,
+    pub addr_v4: [u8; 4],
+    pub addr_v6: [u8; 16],
 }
 
 /// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a

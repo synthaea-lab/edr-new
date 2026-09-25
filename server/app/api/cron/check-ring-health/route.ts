@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { verifyCronRequest } from "@/lib/cron-auth";
 import { prisma } from "@/lib/prisma";
 
 const RINGS = ["canary_0", "canary_1", "canary_2"];
@@ -27,23 +28,10 @@ const MAX_DETECTION_RATE_DROP = 0.20;   // 20% detection rate drop
  */
 export async function GET(req: NextRequest) {
   try {
-    // SECURITY: Verify cron secret (must be configured in production)
-    // DO NOT use a hardcoded fallback - fail explicitly if not configured
-    const cronSecret = process.env.CRON_SECRET;
-    if (!cronSecret) {
-      console.error("CRON_SECRET environment variable is not configured");
-      return NextResponse.json(
-        { error: "Server misconfiguration - CRON_SECRET not set" },
-        { status: 500 }
-      );
-    }
-
-    const authHeader = req.headers.get("Authorization");
-    if (authHeader !== `Bearer ${cronSecret}`) {
-      return NextResponse.json(
-        { error: "Unauthorized" },
-        { status: 401 }
-      );
+    // SECURITY: fails closed when CRON_SECRET is unset, constant-time compare.
+    const denied = verifyCronRequest(req);
+    if (denied) {
+      return denied;
     }
 
     const halted: Array<{ tenantId: string; ring: string; reason: string }> = [];
