@@ -47,7 +47,7 @@ own tags (pipeline: #73); YARA/intel content is #60/#82 territory.
 | T1059 Command & Scripting Interpreter | 🟢 | 🟢 | 🟢 | Encoded-PowerShell (.001), base64-shell (.004), interpreter lineage; script blocks post-decode on W |
 | T1204 User Execution | 🟢 | 📋 | 🟡 | Download-then-exec chain tagged; quarantined-exec content for M rides #96's events, W waits on #365 |
 | T1047 WMI | — | 🟢 | — | `WmiActivity` events + tags live |
-| T1053 Scheduled Task/Job | 🟢 | 🟢 | 🟡 | cron/systemd paths (L), 4698 (W); macOS cron/launchd paths covered via persistence patterns |
+| T1053 Scheduled Task/Job | 🟢 | 🟢 | 🟡 | cron/systemd paths (L), 4698 + 4702 task hijack (W); macOS cron/launchd paths covered via persistence patterns |
 | T1620 Reflective Code Loading | — | 🟢 | 📋 | Dynamic .NET loads tagged (W); macOS sibling in #355's set |
 
 ## Persistence (TA0003)
