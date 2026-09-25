@@ -1,6 +1,38 @@
 import { NextRequest } from "next/server";
 
 /**
+ * Headers the middleware derives from the session. Route handlers trust them
+ * as identity (`getTenantId`/`getUserId`), so a client must never be able to
+ * supply them.
+ */
+const IDENTITY_HEADERS = ["x-tenant-id", "x-user-id"] as const;
+
+/**
+ * Builds the headers forwarded to a protected route: the client's own, with
+ * any client-supplied identity header removed, then the session's identity.
+ *
+ * Deleting first is the point. Overwriting only when the session has a value
+ * let a session without an active organization forward the client's own
+ * `x-tenant-id`, i.e. act as any tenant it named (#468).
+ */
+export function buildIdentityHeaders(
+  incoming: Headers,
+  identity: { tenantId: string | null | undefined; userId: string }
+): Headers {
+  const headers = new Headers(incoming);
+  for (const name of IDENTITY_HEADERS) {
+    headers.delete(name);
+  }
+  // Organization ID from better-auth = Tenant ID
+  if (identity.tenantId) {
+    headers.set("x-tenant-id", identity.tenantId);
+  }
+  // User ID for audit logging
+  headers.set("x-user-id", identity.userId);
+  return headers;
+}
+
+/**
  * Extracts tenant ID from request headers.
  * Middleware injects x-tenant-id from session.
  */
