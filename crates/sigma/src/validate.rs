@@ -24,17 +24,87 @@ pub enum SigmaError {
     },
     #[error("unsupported Sigma construct in {path}: {what}")]
     Unsupported { path: String, what: String },
+    #[error("missing or invalid rule metadata in {path}: {what}")]
+    MissingMetadata { path: String, what: String },
 }
 
-/// Rejects any construct outside the supported subset, naming it precisely.
+/// Platforms `rules/sigma/` is organized by (issue #73: platform is derived from the
+/// directory, not a redundant YAML field).
+const KNOWN_PLATFORMS: &[&str] = &["linux", "windows", "macos"];
+
+/// Rejects any construct outside the supported subset, naming it precisely, and any
+/// rule missing the required metadata (issue #73: severity, ATT&CK technique,
+/// false-positive notes, platform).
 pub(crate) fn validate(rule: &SigmaRule, path: &str) -> Result<(), SigmaError> {
     validate_condition(rule, path)?;
     let Some(selection) = rule.detection.selections.get("selection") else {
         return Err(unsupported(path, "missing `selection` block".to_string()));
     };
     match selection {
-        Selection::FieldMap(fields) => validate_field_map(fields, path),
-        Selection::Keywords(keywords) => validate_keywords(keywords, path),
+        Selection::FieldMap(fields) => validate_field_map(fields, path)?,
+        Selection::Keywords(keywords) => validate_keywords(keywords, path)?,
+    }
+    validate_metadata(rule, path)
+}
+
+/// Checks the required rule metadata: severity, at least one ATT&CK technique tag,
+/// non-empty false-positive notes, and a recognized platform directory.
+fn validate_metadata(rule: &SigmaRule, path: &str) -> Result<(), SigmaError> {
+    if rule.severity.is_none() {
+        return Err(missing_metadata(path, "missing `severity`".to_string()));
+    }
+    if rule.falsepositives.is_empty() {
+        return Err(missing_metadata(
+            path,
+            "missing `falsepositives` (must list at least one known FP scenario, or explain why none are known)".to_string(),
+        ));
+    }
+    if !rule.tags.iter().any(|t| is_technique_tag(t)) {
+        return Err(missing_metadata(
+            path,
+            "no ATT&CK technique tag in `tags` (expected e.g. `attack.t1059.004`)".to_string(),
+        ));
+    }
+    let normalized = path.replace('\\', "/");
+    if !KNOWN_PLATFORMS
+        .iter()
+        .any(|p| normalized.contains(&format!("/{p}/")))
+    {
+        return Err(missing_metadata(
+            path,
+            format!(
+                "not under a known platform directory ({})",
+                KNOWN_PLATFORMS.join("/")
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Matches Sigma's `attack.t<technique>[.<sub-technique>]` tag convention, e.g.
+/// `attack.t1059.004` or `attack.t1105`.
+fn is_technique_tag(tag: &str) -> bool {
+    let lower = tag.to_lowercase();
+    let Some(rest) = lower.strip_prefix("attack.t") else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, '.');
+    let Some(id) = parts.next() else {
+        return false;
+    };
+    if id.len() != 4 || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return false;
+    }
+    match parts.next() {
+        None => true,
+        Some(sub) => sub.len() == 3 && sub.bytes().all(|b| b.is_ascii_digit()),
+    }
+}
+
+fn missing_metadata(path: &str, what: String) -> SigmaError {
+    SigmaError::MissingMetadata {
+        path: path.to_string(),
+        what,
     }
 }
 

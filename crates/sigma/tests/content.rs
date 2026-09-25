@@ -72,6 +72,71 @@ fn matching_samples() -> Vec<(&'static str, ExecEvent)> {
     ]
 }
 
+/// One benign lookalike per shipped rule, keyed by the rule title it must NOT
+/// trigger (issue #73: the content FP regression suite). Adding a rule to
+/// rules/sigma/ means adding its negative sample here.
+fn non_matching_samples() -> Vec<(&'static str, ExecEvent)> {
+    vec![
+        (
+            "Base64-encoded command piped to a shell",
+            exec("/bin/bash", "echo hello | base64"),
+        ),
+        (
+            "GTFOBins - system binary used to spawn a shell",
+            exec("/usr/bin/find", "find . -name '*.log'"),
+        ),
+        (
+            "Persistence via cron, SSH authorized_keys or systemd service",
+            exec("/usr/bin/crontab", "crontab -l"),
+        ),
+        (
+            "Reverse shell via /dev/tcp or nc/ncat with execution",
+            exec("/usr/bin/curl", "curl -s https://example.com/health"),
+        ),
+        (
+            "Executable launched from a temporary or world-writable directory",
+            exec("/usr/bin/ls", "/usr/bin/ls -la"),
+        ),
+        (
+            "Rundll32 with suspicious argument",
+            exec(
+                "C:\\Windows\\System32\\rundll32.exe",
+                "rundll32.exe shell32.dll,Control_RunDLL desk.cpl",
+            ),
+        ),
+        (
+            "PowerShell Base64-encoded command",
+            exec(
+                "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "powershell.exe -NoProfile -Command Get-Process",
+            ),
+        ),
+        (
+            "Executable from AppData or Temp",
+            exec("C:\\Program Files\\App\\app.exe", "app.exe --version"),
+        ),
+    ]
+}
+
+#[test]
+fn every_shipped_rule_ignores_its_negative_sample() {
+    let engine = SigmaEngine::load_dir(&content_dir()).unwrap();
+    let samples = non_matching_samples();
+    assert_eq!(
+        samples.len(),
+        engine.rule_count(),
+        "one negative sample per shipped rule — add the sample for the new rule"
+    );
+    for (title, event) in &samples {
+        let hits = engine.eval_exec(event);
+        assert!(
+            hits.is_empty(),
+            "benign lookalike for `{title}` fired: {:?}",
+            hits.iter().map(|a| &a.title).collect::<Vec<_>>()
+        );
+    }
+}
+
 #[test]
 fn every_shipped_rule_loads() {
     let dir = content_dir();

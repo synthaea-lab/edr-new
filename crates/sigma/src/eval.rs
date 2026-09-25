@@ -2,7 +2,7 @@
 //! passed [`crate::validate`] — the defensive `false` arms exist only for direct
 //! evaluation of hand-constructed rules in tests.
 
-use schema::ExecEvent;
+use schema::{ExecEvent, detection::Severity};
 
 use crate::rule::{Selection, SigmaAlert, SigmaRule, ValueList};
 
@@ -14,6 +14,10 @@ pub(crate) fn eval_rule_exec(rule: &SigmaRule, event: &ExecEvent) -> Option<Sigm
             title: rule.title.clone(),
             tags: rule.tags.clone(),
             description: rule.description.clone(),
+            // `validate()` rejects a missing severity for anything shipped through
+            // `SigmaEngine::load_rule` — the fallback only fires for a
+            // hand-constructed rule evaluated directly in a test.
+            severity: rule.severity.unwrap_or(Severity::Low),
         })
     } else {
         None
