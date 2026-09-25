@@ -40,13 +40,13 @@ from sklearn.ensemble import IsolationForest
 
 from synthaea_ml.data.canonical import ml_cmdline_from_record
 from synthaea_ml.data.manifest import DEFAULT_BASELINE_FILENAME
+from synthaea_ml.evaluation.robustness import run_robustness_evaluation
 from synthaea_ml.features.cmdline import extract_features
 from synthaea_ml.registry.training_record import (
     DatasetVersion,
     dataset_version_from_manifest,
     write_training_record,
 )
-from synthaea_ml.evaluation.robustness import run_robustness_evaluation
 
 TRAINING_SCRIPT = "synthaea_ml/training/train_site_model.py"
 MODEL_FILENAME = "model.onnx"
@@ -143,7 +143,6 @@ def run_global_floor_check(
 
     Returns True if floor check passes, False otherwise.
     """
-    from synthaea_ml.evaluation.robustness import run_robustness_evaluation
     import pickle
 
     # Load global model
