@@ -131,7 +131,39 @@ pub fn evaluate_exec(event: &ExecEvent) -> Vec<Alert> {
         .chain(check_masquerading(event))
         .chain(check_recovery_inhibit(event))
         .chain(check_log_clear_exec(event))
+        .chain(check_memfd_exec(event))
         .collect()
+}
+
+/// T1620 — Reflective Code Loading: executing a payload that never touches disk via
+/// `memfd_create(2)` + `execveat(fd, "", ..., AT_EMPTY_PATH)` (issue #85's Linux
+/// scope; `schema::MemfdCreateEvent`, #265, is the creation-time telemetry — this
+/// check does not correlate to it, see below).
+///
+/// Stateless by design: `sched_process_exec` (the tracepoint `sensor-linux` hooks
+/// for every `Event::Exec`) fires on the kernel's common post-exec path regardless
+/// of which `exec*(2)` variant ran, including `execveat`'s `AT_EMPTY_PATH` form —
+/// the kernel reports the executed path as `/memfd:<name> (deleted)` for that case
+/// (the same string `/proc/<pid>/exe` shows), so the marker survives into
+/// `ExecEvent::image_path` with no correlation to the creation event needed.
+///
+/// Correlating to `MemfdCreateEvent` instead was considered and rejected:
+/// `memfd_create` alone is common in legitimate code (glibc, systemd, browser
+/// sandboxing) — the *exec* is the technique, not the creation, so creation-only
+/// telemetry stays undispatched rather than becoming a noisy signal on its own.
+#[must_use]
+pub(crate) fn check_memfd_exec(event: &ExecEvent) -> Option<Alert> {
+    if !event.image_path.contains("memfd:") {
+        return None;
+    }
+    Some(Alert {
+        technique: "T1620",
+        message: format!(
+            "pid={} comm={}: executed from an in-memory file ({}) — no payload ever \
+             touched disk",
+            event.meta.pid, event.meta.comm, event.image_path,
+        ),
+    })
 }
 
 /// T1611 — Escape to Host: a containerized process opening `/proc/<pid>/root` reaches

@@ -827,3 +827,27 @@ fn in_place_edit_backup_is_a_documented_false_positive() {
     assert_eq!(alerts.len(), 1);
     assert_eq!(alerts[0].technique, "T1486");
 }
+
+// ── T1620 memfd fileless exec (stateless, issue #85) ───────────────────────
+
+#[test]
+fn memfd_exec_matches() {
+    let mut event = exec_event("./payload");
+    event.image_path = "/memfd:payload (deleted)".to_string();
+    let alert = check_memfd_exec(&event).unwrap();
+    assert_eq!(alert.technique, "T1620");
+}
+
+#[test]
+fn normal_exec_does_not_match_memfd() {
+    let event = exec_event("/usr/bin/ls -la");
+    assert!(check_memfd_exec(&event).is_none());
+}
+
+#[test]
+fn path_merely_containing_mem_does_not_false_positive() {
+    // "member.sh" contains "mem" but not the "memfd:" marker — must not match.
+    let mut event = exec_event("./member.sh");
+    event.image_path = "/opt/tools/member.sh".to_string();
+    assert!(check_memfd_exec(&event).is_none());
+}
