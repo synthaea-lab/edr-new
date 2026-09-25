@@ -131,7 +131,44 @@ pub mod time;
 /// serialization-visible reasoning as v13-v22. Originally claimed as 21 → 22
 /// while this branch was open; renumbered once #262 Phase 3's xattr telemetry
 /// took v22 on `main` first — same coordination note as v13 and ADR-0005.
-pub const SCHEMA_VERSION: u32 = 23;
+///
+/// Bumped 23 → 24 for [`Event::KernelModule`] and [`Event::BpfOperation`]
+/// (#264: kernel module load/unload and eBPF program/map lifecycle
+/// telemetry — `init_module(2)`/`finit_module(2)`/`delete_module(2)` and a
+/// filtered `bpf(2)`). Linux-only, no cross-platform reuse (same posture as
+/// #265's `Ptrace`/`ProcessVmRead`/`ProcessVmWrite`/`MemfdCreate` — these
+/// syscalls have no Windows/macOS analogue this shape fits). Same
+/// serialization-visible reasoning as v13-v23. Originally claimed as 21 → 22
+/// while this branch was open; renumbered to 22 → 23 once `#262` Phase 3's
+/// xattr telemetry took v22 on `main` first, then to 23 → 24 once `#297`'s
+/// `PolicyDenial` took v23 on `main` in turn — same coordination note as above.
+///
+/// Bumped 24 → 25 for [`Event::Ptrace`], [`Event::ProcessVmRead`],
+/// [`Event::ProcessVmWrite`], and [`Event::MemfdCreate`] (#265: process
+/// injection/debugging telemetry — `ptrace(2)`, `process_vm_readv(2)`/
+/// `process_vm_writev(2)`, `memfd_create(2)`). Linux-only, no cross-platform
+/// reuse (unlike `AuthEvent`'s logon/session precedent) — these syscalls have no
+/// Windows/macOS analogue this shape fits. Same serialization-visible reasoning
+/// as v13-v24. Originally claimed as 21 → 22 while this branch was open, then
+/// renumbered each time another PR took the number first: 22 → 23 (#262 Phase 3
+/// xattr), 23 → 24 (#297 `PolicyDenial`), 24 → 25 (#264 kernel module / eBPF).
+///
+/// Bumped 25 → 26 for [`Event::IdentityChange`], [`Event::CapSet`], and
+/// [`Event::Namespace`] (#266: privilege escalation, capability abuse, and
+/// container-escape telemetry via `setuid`-family syscalls, `capset(2)`, and
+/// `setns(2)`/`unshare(2)`). Linux-only, no cross-platform reuse, same
+/// posture as #264/#265's Linux-only additions. Same serialization-visible
+/// reasoning as v13-v25.
+///
+/// Bumped 26 → 27 for [`ExecEvent::env_security`] (#363): a present-only
+/// allowlist capture of the loader-hijack environment family (`LD_PRELOAD`,
+/// `LD_LIBRARY_PATH`, `LD_AUDIT`, `LD_DEBUG_OUTPUT`, `GLIBC_TUNABLES`) —
+/// additive optional field, no new `Event` variant, same serialization-visible
+/// reasoning as every field addition since v13. Originally claimed as 21 → 22
+/// while this branch was open, then renumbered each time another PR took the
+/// number first: 22 → 23 (#262 Phase 3 xattr), 23 → 24 (#297 `PolicyDenial`),
+/// 24 → 25 (#264), 25 → 26 → 27 (#265, #266).
+pub const SCHEMA_VERSION: u32 = 27;
 
 /// Marker set on [`FileOpenEvent::flags`] by `sensor-windows-eventlog` when it
 /// reports a Windows **service install** as a persistence artifact (event 7045, "A
@@ -159,6 +196,15 @@ pub const FLAG_PERSISTENCE_ARTIFACT: u32 = 0x1000_0000;
 /// than a service (T1543.003). See `check_scheduled_task_persistence` (`rules`) and
 /// `docs/adr/0004-windows-persistence-detection-via-eventlog-polling.md`.
 pub const FLAG_PERSISTENCE_TASK_ARTIFACT: u32 = 0x2000_0000;
+
+/// Set alongside [`FLAG_PERSISTENCE_TASK_ARTIFACT`] when the task definition had no
+/// action the sensor could read (no `Exec` with a `Command`, no `ComHandler` with a
+/// `ClassId`). The persistence event is still reported, since a task whose action
+/// is hidden from us is no less suspicious, but `path` then holds a placeholder
+/// instead of an action list. Not serialization-visible (a bit in the existing
+/// `flags`), so no [`SCHEMA_VERSION`] bump; same reasoning as
+/// [`FLAG_PERSISTENCE_ARTIFACT`].
+pub const FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN: u32 = 0x0200_0000;
 
 /// Same principle as [`FLAG_PERSISTENCE_ARTIFACT`], for a Windows **local account
 /// creation** (event 4720, "A user account was created" — ATT&CK T1136.001) rather
@@ -338,6 +384,18 @@ pub struct ExecEvent {
     /// Code-signature verdict for the executed image, filled by enrichment.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signature: Option<Signature>,
+    /// Security-relevant environment variables present at exec time, `(name, value)`
+    /// pairs (#363) — the dynamic-linker-hijack family: `LD_PRELOAD`,
+    /// `LD_LIBRARY_PATH`, `LD_AUDIT` (the quieter sibling of `LD_PRELOAD`),
+    /// `LD_DEBUG_OUTPUT` (arbitrary-file-write via the linker's own debug tracing),
+    /// and `GLIBC_TUNABLES` (the CVE-2023-4911 "Looney Tunables" vector). A fixed
+    /// allowlist, never the whole environment — environments carry secrets and
+    /// multi-KB noise — and present-only: a name absent from the process's actual
+    /// environment is simply not in this list, never an empty-value entry. Empty on
+    /// every platform/sensor that has not opted into this capture (Linux/eBPF only,
+    /// so far).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_security: Vec<(String, String)>,
 }
 
 impl ExecEvent {
@@ -629,6 +687,78 @@ pub struct SocketAcceptEvent {
     pub accepted_fd: u32,
     pub peer_addr: core::net::IpAddr,
     pub peer_port: u16,
+}
+
+/// Process debugging/injection primitive (issue #265): `ptrace(2)`, every request
+/// unfiltered — the request code itself (`PTRACE_ATTACH`, `PTRACE_POKEDATA`, ...)
+/// is the injection/debugger-abuse signal, not something this sensor pre-filters.
+/// Linux-only (there is no Windows/macOS equivalent this reuses — `ptrace(2)` has
+/// no cross-platform analogue the way logon/session events did for
+/// [`AuthEvent`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PtraceEvent {
+    pub meta: EventMeta,
+    /// The raw `request` argument (see `<sys/ptrace.h>`) — not decoded to a name
+    /// here, same "sensor reports, detection interprets" split as elsewhere.
+    pub request: u64,
+    /// The target process being traced/attached/read.
+    pub target_pid: u32,
+    /// The `addr` argument — meaningful for PEEK/POKE*-family requests, passed
+    /// through as-is for every request regardless (see
+    /// `sensor-linux-wire::PtraceEvent`'s doc).
+    pub addr: u64,
+    /// The `data` argument — the value written for POKE* requests, a second
+    /// pointer for several others.
+    pub data: u64,
+}
+
+/// Cross-process memory read (issue #265): `process_vm_readv(2)` — reads another
+/// process's memory directly, without `ptrace`'s attach/stop choreography. The
+/// credential-dumping/memory-scraping primitive on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessVmReadEvent {
+    pub meta: EventMeta,
+    /// The process being read FROM.
+    pub target_pid: u32,
+    /// How many `struct iovec` entries the caller passed on each side — a real
+    /// scatter-gather call can span several; only the first remote entry's length
+    /// is resolved (`remote_iov_len`), not each one.
+    pub local_iov_count: u64,
+    pub remote_iov_count: u64,
+    /// `remote_iov[0].iov_len` — bytes of the target's memory the first requested
+    /// region covers. `0` if `remote_iov_count` is `0` or the read failed.
+    pub remote_iov_len: u64,
+}
+
+/// Cross-process memory write (issue #265): `process_vm_writev(2)` — the
+/// write-direction mirror of [`ProcessVmReadEvent`]: injecting data into another
+/// process's memory without `ptrace(PTRACE_POKEDATA, ...)`'s word-at-a-time
+/// interface. Classic shellcode-injection primitive.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessVmWriteEvent {
+    pub meta: EventMeta,
+    /// The process being written TO.
+    pub target_pid: u32,
+    pub local_iov_count: u64,
+    pub remote_iov_count: u64,
+    /// `remote_iov[0].iov_len` — bytes being written into the target's memory by
+    /// the first requested region. Same caveats as
+    /// [`ProcessVmReadEvent::remote_iov_len`].
+    pub remote_iov_len: u64,
+}
+
+/// Anonymous in-memory file creation (issue #265): `memfd_create(2)` — the
+/// fileless-execution primitive (`memfd_create` + a written ELF image +
+/// `execveat(fd, "", ..., AT_EMPTY_PATH)` runs a binary that never touches a real
+/// path on disk).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemfdCreateEvent {
+    pub meta: EventMeta,
+    /// The caller-supplied display name — cosmetic only per `memfd_create(2)`
+    /// (shows up as the target of `/proc/<pid>/fd/<n>`), not a real path.
+    pub name: String,
+    /// `MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, ...
+    pub flags: u32,
 }
 
 /// DNS resolution — the query name and answer, joined to the resolving process.
@@ -1255,6 +1385,137 @@ pub struct PolicyDenialEvent {
     pub enforced: bool,
 }
 
+/// Which of the three kernel-module syscalls produced a [`KernelModuleEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KernelModuleAction {
+    /// `init_module(2)` — raw ELF module image supplied directly in memory.
+    Load,
+    /// `finit_module(2)` — module image loaded from an already-open file
+    /// descriptor.
+    LoadFd,
+    /// `delete_module(2)` — unload by name.
+    Unload,
+}
+
+/// Kernel module load/unload (issue #264): `init_module(2)`, `finit_module(2)`,
+/// `delete_module(2)`. The classic rootkit-installation primitive — unauthorized
+/// module loading is one of the highest-signal kernel-tampering events on Linux.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KernelModuleEvent {
+    pub meta: EventMeta,
+    pub action: KernelModuleAction,
+    /// The module name — only [`KernelModuleAction::Unload`] receives one
+    /// directly as a syscall argument; `init_module`/`finit_module` load a raw
+    /// ELF image whose module name lives inside the blob itself, not decoded
+    /// here (see `sensor-linux-wire::KernelModuleEvent`'s doc).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The already-open file descriptor [`KernelModuleAction::LoadFd`] loads
+    /// from. Resolving it to a path is deferred — same "sensor reports the
+    /// syscall boundary, not an enriched path" posture as `FileWriteEvent`'s
+    /// fd-only shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd: Option<i32>,
+    /// Size in bytes of the raw module image [`KernelModuleAction::Load`]
+    /// receives.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_len: Option<u64>,
+}
+
+/// eBPF program/map lifecycle (issue #264): the `bpf(2)` syscall, filtered at
+/// the source to `BPF_MAP_CREATE`/`BPF_PROG_LOAD`/`BPF_PROG_ATTACH` — every
+/// other `bpf(2)` command (map lookups/updates, the overwhelming majority of
+/// real traffic, including this agent's own sensor) never reaches this event
+/// stream at all (see `sensor-linux-wire::BpfEvent`'s doc). eBPF-based defense
+/// evasion and kernel backdoor detection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BpfEvent {
+    pub meta: EventMeta,
+    /// Raw `bpf_cmd` value (`<linux/bpf.h>`) — always one of the three
+    /// filtered commands above; not decoded to a name here, same
+    /// "sensor reports, detection interprets" split as `PtraceEvent::request`.
+    pub cmd: u32,
+}
+
+/// Which user/group identity syscall produced an [`IdentityChangeEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IdentityChangeKind {
+    SetUid,
+    SetGid,
+    SetResUid,
+    SetResGid,
+    SetFsUid,
+    SetFsGid,
+}
+
+/// User/group identity change (issue #266): `setuid(2)`/`setgid(2)`/
+/// `setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/`setfsgid(2)`. The
+/// SUID-binary-abuse and privilege-drop/escalation primitive — a process
+/// requesting uid/gid 0 after starting as an unprivileged user is the
+/// canonical exploit-success signal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdentityChangeEvent {
+    pub meta: EventMeta,
+    pub kind: IdentityChangeKind,
+    /// The requested id — the single argument for [`IdentityChangeKind::SetUid`]/
+    /// [`IdentityChangeKind::SetGid`]/[`IdentityChangeKind::SetFsUid`]/
+    /// [`IdentityChangeKind::SetFsGid`], or the "real" argument for the
+    /// `SetRes*` kinds.
+    pub real: u32,
+    /// [`IdentityChangeKind::SetResUid`]/[`IdentityChangeKind::SetResGid`]'s
+    /// "effective" argument only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective: Option<u32>,
+    /// [`IdentityChangeKind::SetResUid`]/[`IdentityChangeKind::SetResGid`]'s
+    /// "saved" argument only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub saved: Option<u32>,
+}
+
+/// Linux capability set change (issue #266): `capset(2)`. Only the low 32
+/// capability bits are decoded — see `sensor-linux-wire::CapSetEvent`'s doc
+/// for why that already covers every capability an attacker plausibly wants
+/// (`CAP_SYS_ADMIN`, `CAP_SETUID`, `CAP_NET_ADMIN`, `CAP_DAC_OVERRIDE`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapSetEvent {
+    pub meta: EventMeta,
+    /// The target process. `0` means "the calling process itself" — this is
+    /// `capset(2)`'s own documented meaning for pid 0, not an absent value,
+    /// so it stays a plain `u32` rather than `Option<u32>`.
+    pub target_pid: u32,
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
+/// Which namespace syscall produced a [`NamespaceEvent`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NamespaceSyscall {
+    SetNs,
+    Unshare,
+}
+
+/// Namespace manipulation (issue #266): `setns(2)` — the container-escape
+/// primitive, joining a host namespace from inside a container — and
+/// `unshare(2)`, creating a new namespace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NamespaceEvent {
+    pub meta: EventMeta,
+    pub syscall: NamespaceSyscall,
+    /// [`NamespaceSyscall::SetNs`]'s fd argument (an open `/proc/[pid]/ns/*`
+    /// file). Absent for [`NamespaceSyscall::Unshare`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fd: Option<i32>,
+    /// `setns(2)`'s `nstype` (a single `CLONE_NEW*` constant, or `0` for
+    /// "any"), or `unshare(2)`'s `flags` (a bitmask of one or more
+    /// `CLONE_NEW*` bits) — not decoded to constant names here, same
+    /// "sensor reports, detection interprets" split as `PtraceEvent::request`.
+    pub flags: u32,
+}
+
 /// The normalized event envelope.
 ///
 /// `#[non_exhaustive]`: new telemetry categories (registry, DNS, image load, ...) are
@@ -1301,6 +1562,15 @@ pub enum Event {
     FileSetxattr(FileSetxattrEvent),
     FileRemovexattr(FileRemovexattrEvent),
     PolicyDenial(PolicyDenialEvent),
+    KernelModule(KernelModuleEvent),
+    BpfOperation(BpfEvent),
+    Ptrace(PtraceEvent),
+    ProcessVmRead(ProcessVmReadEvent),
+    ProcessVmWrite(ProcessVmWriteEvent),
+    MemfdCreate(MemfdCreateEvent),
+    IdentityChange(IdentityChangeEvent),
+    CapSet(CapSetEvent),
+    Namespace(NamespaceEvent),
 }
 
 impl Event {
@@ -1345,6 +1615,15 @@ impl Event {
             Event::FileSetxattr(e) => &e.meta,
             Event::FileRemovexattr(e) => &e.meta,
             Event::PolicyDenial(e) => &e.meta,
+            Event::KernelModule(e) => &e.meta,
+            Event::BpfOperation(e) => &e.meta,
+            Event::Ptrace(e) => &e.meta,
+            Event::ProcessVmRead(e) => &e.meta,
+            Event::ProcessVmWrite(e) => &e.meta,
+            Event::MemfdCreate(e) => &e.meta,
+            Event::IdentityChange(e) => &e.meta,
+            Event::CapSet(e) => &e.meta,
+            Event::Namespace(e) => &e.meta,
             // No wildcard arm, on purpose: #[non_exhaustive] has no effect inside
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.

@@ -18,6 +18,9 @@
 #[cfg(feature = "user")]
 extern crate std;
 
+mod path_filter;
+pub use path_filter::is_filtered_path;
+
 /// Bumped on every layout-affecting change to the structs below. Not a wire header
 /// (ring-buffer items carry none) — a build-time tripwire: the userspace loader
 /// `const _`-asserts the value it was compiled against, so an ebpf/userspace version
@@ -86,7 +89,89 @@ extern crate std;
 ///   `setcap` writes, functionally the "+s" of extended attributes) but not
 ///   `value`: the namespace+attribute name is what most detections need, and
 ///   `value` is an arbitrary-length secondary read this slice does not add.
-pub const WIRE_VERSION: u32 = 12;
+/// - v13: `MountEvent`/`SignalEvent` added (issue #362), `KernelModuleEvent` and
+///   `BpfEvent` added (issue #264). `MountEvent` covers `mount(2)`/`umount2(2)`
+///   (`move_mount(2)` deferred, same "known gap, not silently dropped" treatment
+///   as `fchmod`/`fchown`'s fd-only variants). `umount2(2)`'s actual kernel
+///   tracepoint is `syscalls:sys_enter_umount`, not `sys_enter_umount2`: glibc's
+///   `umount2(2)` libc wrapper maps to a kernel syscall the kernel itself
+///   (`fs/namespace.c`) names plain `umount`, confirmed live on the lab 2026-09-23
+///   after the assumed `sys_enter_umount2` turned out not to exist. `fs_type` gets
+///   its own small `MAX_FS_TYPE_LEN` budget — filesystem type names (`ext4`,
+///   `overlay`, `tmpfs`, ...) never approach `MAX_PATH_LEN`. `SignalEvent` covers
+///   `kill(2)`/`tgkill(2)`, filtered at the probe via `SIGNAL_WATCH_PID` (internal
+///   to the ebpf crate, not part of this wire ABI) to targets that are the agent's
+///   own pid — the "tamper subset, never the firehose" filter `SignalToEsClient`
+///   uses on macOS (its ES-client gate), scoped down to just self-protection for
+///   v1 (watchdog/other registered security processes are a documented future
+///   extension, not implemented here). `tkill(2)` is deferred: it takes a thread
+///   id, not a thread-group id, and has no field comparable to the whole-process
+///   pid this filter watches for. `KernelModuleEvent` covers kernel module
+///   load/unload (`init_module(2)`/`finit_module(2)`/`delete_module(2)`) —
+///   `KernelModuleEvent::name` is only populated for `delete_module(2)`, the only
+///   one of the three that receives a module name as a real syscall argument;
+///   `init_module`/`finit_module` load a raw ELF image whose module name lives
+///   inside the blob itself, not decoded here (same "sensor reports the syscall
+///   boundary, not the payload" posture as `FileWriteEvent`'s no-path stance).
+///   `BpfEvent` covers the eBPF program/map lifecycle (`bpf(2)`), filtered
+///   in-kernel to `BPF_MAP_CREATE`, `BPF_PROG_LOAD`, and `BPF_PROG_ATTACH` only —
+///   every other `bpf(2)` command (map lookups/updates, the overwhelming majority
+///   of real traffic, including this agent's own sensor loading its probes) never
+///   reaches the ring buffer, the same "never the firehose" discipline as
+///   `SIGNAL_WATCH_PID` filtering.
+///   Originally claimed as v12 while this branch was open; renumbered to v13
+///   once `#262` Phase 3's xattr telemetry took v12 on `main` first (same
+///   coordination note as `SCHEMA_VERSION`'s v13/v19/v20 history).
+/// - v14: `PtraceEvent`, `ProcessVmReadEvent`, `ProcessVmWriteEvent`,
+///   `MemfdCreateEvent` added (issue #265) — process injection/debugging
+///   telemetry: `ptrace(2)` (every request, unfiltered — the request code itself
+///   is the signal), `process_vm_readv(2)`/`process_vm_writev(2)` (cross-process
+///   memory access without ptrace's attach/stop dance), `memfd_create(2)`
+///   (anonymous-fd fileless-execution primitive). The two `process_vm_*` events
+///   carry each iovec array's element count plus the first remote-iovec entry's
+///   `iov_len` (a size signal, not a full scatter-gather resolution) — same
+///   "requested size, not full path/content" tradeoff `FileWriteEvent` and
+///   `UdpSendEvent::size` already make.
+/// - v15: `IdentityChangeEvent`, `CapSetEvent`, and `NamespaceEvent` added
+///   (issue #266) — privilege escalation, capability abuse, and container
+///   escape via namespace manipulation. `IdentityChangeEvent` covers
+///   `setuid(2)`/`setgid(2)`/`setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/
+///   `setfsgid(2)` with a `kind` discriminant (same shape as `MountEvent`'s
+///   `mounted` bool and `#264`'s `KernelModuleEvent::action` — one event
+///   family, several closely related syscalls). `CapSetEvent` decodes only
+///   the low 32 capability bits (`__user_cap_data_struct[0]`) of
+///   `capset(2)`'s requested effective/permitted/inheritable sets — every
+///   capability an attacker plausibly cares about (`CAP_SYS_ADMIN`=21,
+///   `CAP_SETUID`=7, `CAP_NET_ADMIN`=12, ...) is below bit 32; the high word
+///   (`__user_cap_data_struct[1]`, capabilities 32+: `CAP_BPF`,
+///   `CAP_PERFMON`, `CAP_CHECKPOINT_RESTORE`) is not read. `NamespaceEvent`
+///   covers `setns(2)` (the actual container-escape primitive — joining a
+///   host namespace from inside a container) and `unshare(2)` with a
+///   `syscall` discriminant. `prctl(PR_SET_SECUREBITS)`/`prctl(PR_CAPBSET_DROP)`
+///   (also listed on #266) are deliberately deferred: both are one `option`
+///   value out of `prctl(2)`'s dozens, needing a filtered `sys_enter_prctl`
+///   probe shaped like the `sys_enter_bpf` cmd filter (#264) — a future
+///   addition, not silently dropped.
+/// - v16: `GetAddrInfoEvent` added (issue #267 Phase 1) — a uprobe/uretprobe
+///   pair on glibc's `getaddrinfo(3)`, the DNS-based C2/tunneling/
+///   exfiltration visibility this crate had none of. Entry stashes the
+///   query-name pointer and the caller's `struct addrinfo **res` output-
+///   parameter pointer (`GETADDRINFO_ARGS`, internal to the ebpf crate, same
+///   pid_tgid-keyed correlation-map shape as `SSL_READ_ARGS`); exit reads the
+///   return code and, on success, dereferences `*res` and decodes only the
+///   *first* `addrinfo` entry's family + address — a real query commonly
+///   returns several (one per A/AAAA record, sometimes both), and walking
+///   the whole linked list is deferred, same "first element only" tradeoff
+///   as `#265`'s `ProcessVmReadEvent::remote_iov_len`. Emitted on failure
+///   too (`status != 0`, no address fields) — a resolution failure is itself
+///   a signal (DGA malware generates many). musl's internal resolver,
+///   systemd-resolved's D-Bus path, and raw UDP/TCP port-53 capture (DoH/DoT
+///   blind spots either way) are `#267`'s Phase 2, not implemented here.
+///   Originally claimed as v12 while this branch was open; renumbered to v13
+///   once `#262` Phase 3's xattr telemetry took v12, then to v14 once #362 and
+///   #264 took v13 on `main`, then to v16 once #265 and #266 took v14/v15
+///   (same coordination note as `SCHEMA_VERSION`).
+pub const WIRE_VERSION: u32 = 16;
 
 pub const TASK_COMM_LEN: usize = 16;
 pub const MAX_PATH_LEN: usize = 256;
@@ -98,6 +183,19 @@ pub const MAX_PATH_LEN: usize = 256;
 /// unusually long name (evasion, or just an unusual but legitimate tool) is exactly
 /// the case a smaller buffer would have hidden (review finding, PR #332).
 pub const MAX_XATTR_NAME_LEN: usize = 255;
+/// Budget for `MountEvent::fs_type` (issue #362) — filesystem type names
+/// (`ext4`, `overlay`, `tmpfs`, `fuse.sshfs`, ...) are always short, nowhere near
+/// `MAX_PATH_LEN`.
+pub const MAX_FS_TYPE_LEN: usize = 32;
+/// Kernel's own `MODULE_NAME_LEN` (`include/linux/module.h`) is 56;
+/// `delete_module(2)` itself truncates any longer name at that bound before
+/// this probe even sees it. Rounded up here for alignment headroom, not
+/// because names can be longer.
+pub const MAX_MODULE_NAME_LEN: usize = 64;
+/// Budget for a `getaddrinfo(3)` query name. RFC 1035's 253-byte domain-name
+/// limit fits comfortably; matches `MAX_PATH_LEN`'s existing budget rather
+/// than inventing a new number.
+pub const MAX_DNS_QUERY_LEN: usize = 256;
 /// Budget for TLS plaintext capture (first N bytes). Chosen to fit comfortably
 /// in a ring-buffer event with metadata while staying under 512 bytes total.
 pub const MAX_TLS_CAPTURE: usize = 256;
@@ -358,6 +456,100 @@ pub struct SocketAcceptEvent {
     pub is_ipv6: bool,
 }
 
+/// Mount/unmount (`syscalls:sys_enter_mount`/`sys_enter_umount`, issue #362 — the
+/// latter is `sys_enter_umount`, not `sys_enter_umount2`, despite the libc call
+/// being `umount2(2)`; see this file's `WIRE_VERSION` v12 changelog).
+/// `source`/`fs_type` are zero-length on an unmount — `umount2(2)` only takes a
+/// target path. `move_mount(2)` is not captured here.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MountEvent {
+    pub meta: EventMeta,
+    pub mount_point: [u8; MAX_PATH_LEN],
+    pub mount_point_len: u16,
+    /// The `source` argument to `mount(2)` (device node, bind-mount source path,
+    /// image path). Zero-length on `umount2(2)`, which has none.
+    pub source: [u8; MAX_PATH_LEN],
+    pub source_len: u16,
+    /// Zero-length on `umount2(2)`, which has no filesystem type argument.
+    pub fs_type: [u8; MAX_FS_TYPE_LEN],
+    pub fs_type_len: u8,
+    /// `mount(2)`'s `mountflags & MS_RDONLY`, computed at probe time. Always
+    /// `false` on an unmount (`readonly` is not a meaningful `umount2(2)` concept).
+    pub readonly: bool,
+    /// `true` for `mount(2)`, `false` for `umount2(2)`.
+    pub mounted: bool,
+}
+
+/// A signal was sent to a watched target (`syscalls:sys_enter_kill`/
+/// `sys_enter_tgkill`, issue #362), filtered at the probe via `SIGNAL_WATCH_PID`
+/// (internal to the ebpf crate) to targets that are the agent's own pid — see this
+/// file's `WIRE_VERSION` v12 changelog. `meta` is the SENDER, not the target —
+/// same convention as macOS's `SignalToEsClient`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SignalEvent {
+    pub meta: EventMeta,
+    /// Signal number, platform-native (`SIGKILL` = 9, `SIGTERM` = 15, ...).
+    pub signal: u32,
+    pub target_pid: u32,
+}
+
+/// User/group identity change (issue #266): `setuid(2)`/`setgid(2)`/
+/// `setresuid(2)`/`setresgid(2)`/`setfsuid(2)`/`setfsgid(2)`. The
+/// SUID-binary-abuse and privilege-drop/escalation primitive.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct IdentityChangeEvent {
+    pub meta: EventMeta,
+    /// 0=setuid, 1=setgid, 2=setresuid, 3=setresgid, 4=setfsuid, 5=setfsgid.
+    pub kind: u8,
+    /// The requested id: `setuid`/`setgid`/`setfsuid`/`setfsgid`'s single
+    /// argument, or `setresuid`/`setresgid`'s "real" argument.
+    pub real: u32,
+    /// `setresuid`/`setresgid`'s "effective" argument only — meaningless
+    /// (not read) for the other four `kind`s; the userspace loader decides
+    /// whether to surface it purely from `kind`, never from this value.
+    pub effective: u32,
+    /// `setresuid`/`setresgid`'s "saved" argument only — same caveat as
+    /// `effective`.
+    pub saved: u32,
+}
+
+/// eBPF program/map lifecycle capability probe's sibling (issue #266):
+/// `capset(2)`. Decodes only the low 32 capability bits — see this file's
+/// `WIRE_VERSION` v12 changelog for why that is deliberately sufficient.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CapSetEvent {
+    pub meta: EventMeta,
+    /// `cap_user_header_t.pid` — the target process. `0` means "the calling
+    /// process itself" (`capset(2)`'s own documented meaning for pid 0, not
+    /// a probe failure sentinel).
+    pub target_pid: u32,
+    pub effective: u32,
+    pub permitted: u32,
+    pub inheritable: u32,
+}
+
+/// Namespace manipulation (issue #266): `setns(2)` (the container-escape
+/// primitive — joining a host namespace from inside a container) and
+/// `unshare(2)` (creating a new namespace).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct NamespaceEvent {
+    pub meta: EventMeta,
+    /// 0 = setns, 1 = unshare.
+    pub syscall: u8,
+    /// `setns(2)`'s fd argument (an open `/proc/[pid]/ns/*` file). `-1` for
+    /// `unshare`.
+    pub fd: i32,
+    /// `setns(2)`'s `nstype` (a single `CLONE_NEW*` constant, or `0` for
+    /// "any"), or `unshare(2)`'s `flags` (a bitmask of one or more
+    /// `CLONE_NEW*` bits).
+    pub flags: u32,
+}
+
 /// TLS plaintext capture (uprobes on `SSL_read`/`SSL_write`, issue #90).
 /// Captures the first `MAX_TLS_CAPTURE` bytes of plaintext before encryption
 /// (`SSL_write`) or after decryption (`SSL_read`) for C2 beacon detection.
@@ -389,6 +581,154 @@ pub struct ReadlineInputEvent {
     pub input_len: u32,
     /// Full command line input. Budget: 512 bytes.
     pub input: [u8; MAX_READLINE_INPUT],
+}
+
+/// Kernel module load/unload (issue #264): `init_module(2)` (raw ELF image from
+/// memory), `finit_module(2)` (image from an already-open fd), `delete_module(2)`
+/// (unload by name). The classic rootkit-installation primitive.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct KernelModuleEvent {
+    pub meta: EventMeta,
+    /// `delete_module(2)`'s `name` argument — the only one of the three
+    /// syscalls that names the module directly (see this file's v12
+    /// changelog). Zero-length for `init_module`/`finit_module`.
+    pub name: [u8; MAX_MODULE_NAME_LEN],
+    pub name_len: u16,
+    /// `finit_module(2)`'s fd argument. `-1` for `init_module`/`delete_module`.
+    pub fd: i32,
+    /// `init_module(2)`'s `len` argument — size in bytes of the raw module
+    /// image. `0` for `finit_module`/`delete_module`.
+    pub image_len: u64,
+    /// `finit_module(2)`/`delete_module(2)`'s `flags` argument. `0` for
+    /// `init_module` (no flags argument).
+    pub flags: u32,
+    /// 0 = `init_module` (load, raw image), 1 = `finit_module` (load, from
+    /// fd), 2 = `delete_module` (unload).
+    pub action: u8,
+}
+
+/// eBPF program/map lifecycle (issue #264): `bpf(2)`, filtered in-kernel to
+/// `BPF_MAP_CREATE`/`BPF_PROG_LOAD`/`BPF_PROG_ATTACH` (see this file's v12
+/// changelog) — eBPF-based defense evasion and kernel backdoor detection.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct BpfEvent {
+    pub meta: EventMeta,
+    /// Raw `bpf_cmd` value (`<linux/bpf.h>`) — always one of the three
+    /// filtered commands above; not decoded to a name here, same
+    /// "sensor reports, detection interprets" split as every other raw
+    /// syscall-argument field in this crate.
+    pub cmd: u32,
+}
+
+/// Process debugging/injection primitive (`syscalls:sys_enter_ptrace`, issue #265).
+/// Every request is captured unfiltered — `PTRACE_ATTACH`/`PTRACE_POKEDATA`/
+/// `PTRACE_SETREGS` against a foreign process is the injection/debugger-abuse
+/// pattern this issue targets, and filtering by request code here would just move
+/// the detection logic's own job into the sensor.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PtraceEvent {
+    pub meta: EventMeta,
+    /// The `request` argument (`PTRACE_ATTACH`, `PTRACE_PEEKDATA`, ... — see
+    /// `<sys/ptrace.h>`). Kept as the raw integer, not decoded to a name, here —
+    /// same "sensor reports, detection interprets" split as everywhere else.
+    pub request: u64,
+    /// The `pid` argument — the target process being traced/attached/read.
+    pub target_pid: u32,
+    /// The `addr` argument. Meaningful for the PEEK/POKE*-family requests (the
+    /// target address); the kernel ignores it for several other requests, but it
+    /// is passed through as-is regardless, same discipline as `FileChownEvent`'s
+    /// "leave unchanged" uid/gid sentinel.
+    pub addr: u64,
+    /// The `data` argument. For POKE* requests, the value written; for several
+    /// others, reused as a second pointer (e.g. `PTRACE_GETREGS`'s output buffer).
+    pub data: u64,
+}
+
+/// Cross-process memory read (`syscalls:sys_enter_process_vm_readv`, issue #265) —
+/// reads another process's memory directly, without ptrace's attach/stop
+/// choreography. The credential-dumping/memory-scraping primitive on Linux (there
+/// is no LSASS equivalent, but the technique — read a target process's heap/stack
+/// for secrets — is the same).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessVmReadEvent {
+    pub meta: EventMeta,
+    /// The `pid` argument — the process being read FROM.
+    pub target_pid: u32,
+    /// `liovcnt`/`riovcnt`: how many `struct iovec` entries the caller passed on
+    /// each side. A real scatter-gather call can span several; only the first
+    /// remote entry's length is resolved below (see `remote_iov_len`), not each
+    /// one — same "volume signal, not full resolution" tradeoff `FileWriteEvent`
+    /// makes for `write(2)`.
+    pub local_iov_count: u64,
+    pub remote_iov_count: u64,
+    /// `remote_iov[0].iov_len` — how many bytes of the target's memory the first
+    /// (and, for the overwhelmingly common single-entry call, only) requested
+    /// region covers. `0` if `remote_iov_count` is `0` or the read failed.
+    pub remote_iov_len: u64,
+}
+
+/// Cross-process memory write (`syscalls:sys_enter_process_vm_writev`, issue
+/// #265) — the write-direction mirror of [`ProcessVmReadEvent`]: injecting data
+/// into another process's memory without `ptrace(PTRACE_POKEDATA, ...)`'s
+/// word-at-a-time interface. Classic shellcode-injection primitive.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct ProcessVmWriteEvent {
+    pub meta: EventMeta,
+    /// The `pid` argument — the process being written TO.
+    pub target_pid: u32,
+    pub local_iov_count: u64,
+    pub remote_iov_count: u64,
+    /// `remote_iov[0].iov_len` — how many bytes are being written into the
+    /// target's memory by the first requested region. Same caveats as
+    /// [`ProcessVmReadEvent::remote_iov_len`].
+    pub remote_iov_len: u64,
+}
+
+/// Anonymous in-memory file creation (`syscalls:sys_enter_memfd_create`, issue
+/// #265) — the fileless-execution primitive: `memfd_create` + `fexecve`/a written
+/// ELF image + `execveat(fd, "", ..., AT_EMPTY_PATH)` runs a binary that never
+/// touches a real path on disk.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MemfdCreateEvent {
+    pub meta: EventMeta,
+    /// The caller-supplied display name (`name` argument) — cosmetic only per
+    /// `memfd_create(2)` (shows up as the target of `/proc/<pid>/fd/<n>`), not a
+    /// real path, but attacker tooling that names it `/tmp/x` or similar to look
+    /// like a real file on a process listing is itself a signal.
+    pub name: [u8; MAX_PATH_LEN],
+    pub name_len: u16,
+    /// The `flags` argument (`MFD_CLOEXEC`, `MFD_ALLOW_SEALING`, ...).
+    pub flags: u32,
+}
+
+/// DNS resolution via glibc's `getaddrinfo(3)` (issue #267 Phase 1): the
+/// DNS-based C2/tunneling/exfiltration visibility primitive. See this file's
+/// `WIRE_VERSION` v16 changelog for the uprobe/uretprobe correlation shape and
+/// the "first `addrinfo` entry only" tradeoff.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GetAddrInfoEvent {
+    pub meta: EventMeta,
+    pub query: [u8; MAX_DNS_QUERY_LEN],
+    pub query_len: u16,
+    /// `getaddrinfo(3)`'s return code: `0` on success, a negative `EAI_*`
+    /// constant on failure (`EAI_NONAME`, `EAI_AGAIN`, ...) — not decoded to
+    /// a name here, same "sensor reports, detection interprets" split as
+    /// every other raw syscall/libc return value in this crate.
+    pub status: i32,
+    /// `true` if `addr_v4`/`addr_v6`/`is_ipv6` were populated from the
+    /// first resolved `addrinfo` entry. `false` on failure (`status != 0`)
+    /// or an unrecognized `ai_family`.
+    pub addr_resolved: bool,
+    pub is_ipv6: bool,
+    pub addr_v4: [u8; 4],
+    pub addr_v6: [u8; 16],
 }
 
 /// Decodes a fixed comm buffer: NUL-terminated, kernel-truncated to 15 bytes — a

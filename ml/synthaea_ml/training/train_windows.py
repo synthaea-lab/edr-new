@@ -34,16 +34,29 @@ from pathlib import Path
 import numpy as np
 from skl2onnx import to_onnx
 from sklearn.ensemble import IsolationForest
+from sklearn.model_selection import train_test_split
 
+from synthaea_ml.calibration import (
+    calibrate_threshold,
+    compute_feature_bounds,
+)
 from synthaea_ml.data.manifest import DEFAULT_BASELINE_FILENAME
-from synthaea_ml.features.cmdline import extract_features
+from synthaea_ml.evaluation.robustness import run_robustness_evaluation
+from synthaea_ml.features.cmdline import FEATURE_NAMES, extract_features
 from synthaea_ml.registry.training_record import (
+    RobustnessCard,
     dataset_version_from_manifest,
     write_training_record,
 )
 
 TRAINING_SCRIPT = "synthaea_ml/training/train_windows.py"
 MODEL_FILENAME = "model.onnx"
+METADATA_FILENAME = "model_metadata.json"
+
+# Conformal calibration parameters (issue #46)
+FP_BUDGET_PER_ENDPOINT_DAY = 5.0
+BENIGN_RATE_PER_DAY = 1000.0
+FEATURE_BOUNDS_MARGIN = 0.05
 
 # contamination=0.05 - same value as the Linux model (train_linux.py), for the same
 # reason: with a baseline example count of the same order of magnitude, a lower
@@ -131,6 +144,21 @@ def main() -> None:
         required=True,
         help="Registry version directory (model.onnx + training.json are written here).",
     )
+    parser.add_argument(
+        "--robustness-scenarios",
+        type=Path,
+        nargs="*",
+        default=[],
+        help="Optional scenario yamls for adversarial robustness evaluation (issue #45).",
+    )
+    parser.add_argument(
+        "--robustness-events",
+        type=Path,
+        help=(
+            "Optional events.jsonl or baseline.jsonl file for robustness evaluation. "
+            "If provided, uses real events from this file instead of synthetic events."
+        ),
+    )
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -153,20 +181,86 @@ def main() -> None:
 
     X = np.array([extract_features(c) for c in cmdlines], dtype=np.float32)
 
+    # Split 70/30 for conformal calibration (issue #46)
+    X_train, X_cal = train_test_split(X, test_size=0.3, random_state=42)
+    print(f"Split: {len(X_train)} training, {len(X_cal)} calibration")
+
     clf = IsolationForest(**HYPERPARAMETERS)
-    clf.fit(X)
+    clf.fit(X_train)
+
+    # Conformal calibration: compute threshold for FP budget
+    conformal_cal = calibrate_threshold(
+        clf,
+        X_cal,
+        fp_budget=FP_BUDGET_PER_ENDPOINT_DAY,
+        benign_rate_per_day=BENIGN_RATE_PER_DAY,
+    )
+    print(
+        f"Conformal calibration: threshold={conformal_cal.threshold:.4f} "
+        f"for ≤{FP_BUDGET_PER_ENDPOINT_DAY} FP/endpoint/day"
+    )
+
+    # Compute feature bounds for OOD detection
+    bounds = compute_feature_bounds(
+        X_train,
+        list(FEATURE_NAMES),
+        margin=FEATURE_BOUNDS_MARGIN,
+    )
+    print(f"Feature bounds computed with {FEATURE_BOUNDS_MARGIN*100}% margin")
 
     # skl2onnx 1.20 does not yet follow the `ai.onnx.ml` v4 domain emitted by default
     # with onnx 1.22 - explicitly pinned to the latest version this skl2onnx can consume.
-    onnx_model = to_onnx(clf, X[:1], target_opset={"": 18, "ai.onnx.ml": 3})
+    onnx_model = to_onnx(clf, X_train[:1], target_opset={"": 18, "ai.onnx.ml": 3})
     model_path = args.output_dir / MODEL_FILENAME
     model_path.write_bytes(onnx_model.SerializeToString())
+
+    # Export metadata for Rust scorer (issue #46)
+    metadata = {
+        "threshold": conformal_cal.threshold,
+        "feature_bounds": {
+            "feature_names": bounds.feature_names,
+            "min_values": bounds.min_values,
+            "max_values": bounds.max_values,
+        },
+    }
+    metadata_path = args.output_dir / METADATA_FILENAME
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    print(f"Metadata exported: {metadata_path}")
+
+    # Run robustness evaluation if scenarios provided
+    robustness_cards: list[RobustnessCard] = []
+    if args.robustness_scenarios:
+        print(f"\nRunning robustness evaluation on {len(args.robustness_scenarios)} scenario(s)...")
+        if args.robustness_events:
+            print(f"  Using events from: {args.robustness_events}")
+        for scenario_path in args.robustness_scenarios:
+            try:
+                card = run_robustness_evaluation(
+                    model=clf,
+                    scenario_yaml=scenario_path,
+                    tier="T0",
+                    mutation_seed=42,
+                    events_source=args.robustness_events,
+                )
+                robustness_cards.append(card)
+                print(
+                    f"  {card.scenario_name}: escape_rate={card.escape_rate:.2%}, "
+                    f"median_degradation={card.median_score_degradation:+.3f}"
+                )
+            except Exception as e:
+                print(f"ERROR: robustness evaluation failed for {scenario_path}: {e}")
+                # Re-raise to fail fast - a crashed evaluation should not produce
+                # a model_record.json with empty robustness_cards and exit 0
+                raise
 
     write_training_record(
         args.output_dir,
         training_script=TRAINING_SCRIPT,
         dataset_versions=dataset_versions,
+        robustness_cards=robustness_cards,
         hyperparameters=HYPERPARAMETERS,
+        conformal_calibration=conformal_cal,
+        feature_bounds=bounds,
     )
 
     print(f"Model trained on {len(cmdlines)} benign examples -> {args.output_dir}")

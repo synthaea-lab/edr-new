@@ -1,0 +1,19 @@
+name: log-clear
+platform: linux
+script: log-clear.sh
+simulates: >
+  A log file under /var/log/ deleted outright (T1070.002, Indicator Removal: Clear
+  Logs) — the anti-forensics step nearly every serious intrusion or ransomware run
+  takes before or after its real payload. The scenario only touches a throwaway file
+  it creates itself; no real system log is modified.
+expected_detections:
+  - technique: "T1070.002"
+    rule: check_log_file_delete   # crates/rules/src/stateless.rs — LOG_PATH_PATTERNS
+                                   # substring match on /var/log/
+    min_count: 1
+    tolerance: 0
+notes: >
+  Exec-side sibling check_log_clear_exec (journalctl --vacuum, wevtutil cl, the macOS
+  unified-log erase) is not exercised here: none of its patterns apply on a
+  systemd-less distro like Alpine (no journalctl binary). Validate that half on a
+  systemd-based row of the matrix (Ubuntu/Debian) instead.

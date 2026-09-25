@@ -6,9 +6,12 @@
 //! once at startup and passes it here so schema timestamps are epoch nanoseconds.
 
 use schema::{
-    ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent,
-    FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent,
-    FileWriteEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
+    BpfEvent, CapSetEvent, ConnectEvent, ContainerContext, Event, EventMeta, ExecEvent,
+    FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent, FileRemovexattrEvent,
+    FileRenameEvent, FileSetxattrEvent, FileWriteEvent, IdentityChangeEvent, IdentityChangeKind,
+    KernelModuleAction, KernelModuleEvent, MemfdCreateEvent, MountEvent, NamespaceEvent,
+    NamespaceSyscall, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, SignalEvent,
+    SocketAcceptEvent, SocketBindEvent, SocketListenEvent, UdpSendEvent, User,
 };
 use sensor_linux_wire as wire;
 
@@ -48,7 +51,38 @@ use sensor_linux_wire as wire;
 /// mapping functions `file_setxattr`/`file_removexattr` below, same path-decoding
 /// shape as `file_chmod`/`file_chown` plus a second nul-padded field (the xattr
 /// `name`); no existing mapping changed shape.
-const _: () = assert!(wire::WIRE_VERSION == 12);
+///
+/// v13 (#362 and #264, originally claimed as v12 — see that constant's doc) added
+/// `MountEvent`/`SignalEvent` and `KernelModuleEvent`/`BpfEvent`. `mount` turns
+/// zero-length `source`/`fs_type` (umount2(2) has neither) into `None`, matching
+/// how the macOS producer reports them absent. `signal` takes `target_image_path`
+/// from the caller rather than the wire event — the probe filters to the agent's
+/// own pid (v1 scope), which the sensor already knows its own exe path for
+/// without a `/proc/<pid>/exe` readlink per event. `kernel_module` turns the wire
+/// struct's `action: u8` discriminant into `schema::KernelModuleAction` and its
+/// always-populated `fd`/`image_len` sentinels (`-1`/`0` when not applicable to
+/// the action) into `Option`s. No existing mapping changed shape.
+///
+/// v14 (#265, originally claimed as v12 — see that constant's doc) added
+/// `PtraceEvent`, `ProcessVmReadEvent`, `ProcessVmWriteEvent`, `MemfdCreateEvent`
+/// — new `ptrace`/`process_vm_read`/`process_vm_write`/`memfd_create` mapping
+/// functions below; no existing mapping changed shape.
+///
+/// v15 (#266, originally claimed as v12 — see that constant's doc) added
+/// `IdentityChangeEvent`/`CapSetEvent`/`NamespaceEvent` — new
+/// `identity_change`/`cap_set`/`namespace` mapping functions below.
+/// `identity_change` turns the wire struct's `kind: u8` discriminant into
+/// `schema::IdentityChangeKind` and only surfaces `effective`/`saved` as
+/// `Some` for the two `SetRes*` kinds (never from the wire value itself,
+/// which is always populated — see that struct's doc). `namespace` does the
+/// same `syscall: u8` → enum conversion and surfaces `fd` as `Some` only for
+/// `setns`. No existing mapping changed shape.
+///
+/// v16 (#267 Phase 1, originally claimed as v12 — see that constant's doc)
+/// added `GetAddrInfoEvent` — not imported here either (the DNS uprobe pair
+/// lives in `sensor-linux-uprobes`, not this crate's tracepoint-only
+/// surface); no existing mapping changed shape.
+const _: () = assert!(wire::WIRE_VERSION == 16);
 
 /// Same, but an empty buffer means "not captured" rather than the empty string —
 /// the probe leaves `pcomm` zeroed when the fork-lineage map had no entry.
@@ -87,12 +121,16 @@ fn meta(
 /// space-joined rendering of `argv` for display and Sigma matching; consumers that
 /// need the exact tokens use `argv` (or `ExecEvent::ml_cmdline`). `parent_comm` is the
 /// fork-lineage entry, or `None` when the parent predated the probe and priming
-/// missed it.
+/// missed it. `env_security` is passed in by the caller the same way as `argv` — the
+/// Linux sensor reads it from `/proc/<pid>/environ` when it drains the event (issue
+/// #363; same drain-time-read tradeoffs as `argv`, see `read_proc_environ_security`),
+/// already filtered to the security-relevant allowlist.
 #[must_use]
 pub fn exec(
     event: &wire::ExecEvent,
     boot_epoch_offset_ns: u64,
     argv: Vec<String>,
+    env_security: Vec<(String, String)>,
     container: Option<ContainerContext>,
 ) -> Event {
     let image_raw = &event.image[..(event.image_len as usize).min(wire::MAX_PATH_LEN)];
@@ -112,6 +150,7 @@ pub fn exec(
         parent_image_path: None,
         sha256: None,
         signature: None,
+        env_security,
     })
 }
 
@@ -356,6 +395,207 @@ pub fn socket_accept(
     })
 }
 
+#[must_use]
+pub fn mount(
+    event: &wire::MountEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let mp_raw = &event.mount_point[..(event.mount_point_len as usize).min(wire::MAX_PATH_LEN)];
+    let mp_end = mp_raw.iter().position(|&b| b == 0).unwrap_or(mp_raw.len());
+    let source = (event.source_len > 0).then(|| {
+        let raw = &event.source[..(event.source_len as usize).min(wire::MAX_PATH_LEN)];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    });
+    let fs_type = (event.fs_type_len > 0).then(|| {
+        let raw = &event.fs_type[..(event.fs_type_len as usize).min(wire::MAX_FS_TYPE_LEN)];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        String::from_utf8_lossy(&raw[..end]).into_owned()
+    });
+    Event::Mount(MountEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        mount_point: String::from_utf8_lossy(&mp_raw[..mp_end]).into_owned(),
+        source,
+        fs_type,
+        readonly: event.readonly,
+        mounted: event.mounted,
+    })
+}
+
+/// `target_image_path` is the caller's, not the wire event's — see this module's
+/// `WIRE_VERSION` v12 changelog for why.
+#[must_use]
+pub fn signal(
+    event: &wire::SignalEvent,
+    boot_epoch_offset_ns: u64,
+    target_image_path: Option<String>,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::Signal(SignalEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        signal: event.signal,
+        target_pid: event.target_pid,
+        target_image_path,
+    })
+}
+
+#[must_use]
+pub fn kernel_module(
+    event: &wire::KernelModuleEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let action = match event.action {
+        1 => KernelModuleAction::LoadFd,
+        2 => KernelModuleAction::Unload,
+        _ => KernelModuleAction::Load,
+    };
+    let name = if event.name_len > 0 {
+        let raw = &event.name[..(event.name_len as usize).min(wire::MAX_MODULE_NAME_LEN)];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        Some(String::from_utf8_lossy(&raw[..end]).into_owned())
+    } else {
+        None
+    };
+    Event::KernelModule(KernelModuleEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        action,
+        name,
+        fd: (event.fd >= 0).then_some(event.fd),
+        image_len: (event.image_len > 0).then_some(event.image_len),
+    })
+}
+
+#[must_use]
+pub fn bpf_operation(
+    event: &wire::BpfEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::BpfOperation(BpfEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        cmd: event.cmd,
+    })
+}
+
+#[must_use]
+pub fn ptrace(
+    event: &wire::PtraceEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::Ptrace(PtraceEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        request: event.request,
+        target_pid: event.target_pid,
+        addr: event.addr,
+        data: event.data,
+    })
+}
+
+#[must_use]
+pub fn process_vm_read(
+    event: &wire::ProcessVmReadEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::ProcessVmRead(ProcessVmReadEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        target_pid: event.target_pid,
+        local_iov_count: event.local_iov_count,
+        remote_iov_count: event.remote_iov_count,
+        remote_iov_len: event.remote_iov_len,
+    })
+}
+
+#[must_use]
+pub fn process_vm_write(
+    event: &wire::ProcessVmWriteEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::ProcessVmWrite(ProcessVmWriteEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        target_pid: event.target_pid,
+        local_iov_count: event.local_iov_count,
+        remote_iov_count: event.remote_iov_count,
+        remote_iov_len: event.remote_iov_len,
+    })
+}
+
+#[must_use]
+pub fn memfd_create(
+    event: &wire::MemfdCreateEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let raw = &event.name[..(event.name_len as usize).min(wire::MAX_PATH_LEN)];
+    let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+    Event::MemfdCreate(MemfdCreateEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        name: String::from_utf8_lossy(&raw[..end]).into_owned(),
+        flags: event.flags,
+    })
+}
+
+#[must_use]
+pub fn identity_change(
+    event: &wire::IdentityChangeEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let (kind, is_res) = match event.kind {
+        1 => (IdentityChangeKind::SetGid, false),
+        2 => (IdentityChangeKind::SetResUid, true),
+        3 => (IdentityChangeKind::SetResGid, true),
+        4 => (IdentityChangeKind::SetFsUid, false),
+        5 => (IdentityChangeKind::SetFsGid, false),
+        _ => (IdentityChangeKind::SetUid, false),
+    };
+    Event::IdentityChange(IdentityChangeEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        kind,
+        real: event.real,
+        effective: is_res.then_some(event.effective),
+        saved: is_res.then_some(event.saved),
+    })
+}
+
+#[must_use]
+pub fn cap_set(
+    event: &wire::CapSetEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    Event::CapSet(CapSetEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        target_pid: event.target_pid,
+        effective: event.effective,
+        permitted: event.permitted,
+        inheritable: event.inheritable,
+    })
+}
+
+#[must_use]
+pub fn namespace(
+    event: &wire::NamespaceEvent,
+    boot_epoch_offset_ns: u64,
+    container: Option<ContainerContext>,
+) -> Event {
+    let is_setns = event.syscall == 0;
+    Event::Namespace(NamespaceEvent {
+        meta: meta(&event.meta, boot_epoch_offset_ns, container),
+        syscall: if is_setns {
+            NamespaceSyscall::SetNs
+        } else {
+            NamespaceSyscall::Unshare
+        },
+        fd: is_setns.then_some(event.fd),
+        flags: event.flags,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,7 +634,13 @@ mod tests {
     #[test]
     fn exec_keeps_argv_and_joins_cmdline() {
         let event = wire_exec(b"/usr/bin/curl", b"bash");
-        let Event::Exec(e) = exec(&event, 500, argv(&["curl", "-o", "/tmp/x"]), None) else {
+        let Event::Exec(e) = exec(
+            &event,
+            500,
+            argv(&["curl", "-o", "/tmp/x"]),
+            Vec::new(),
+            None,
+        ) else {
             panic!("wrong variant")
         };
         assert_eq!(e.argv, ["curl", "-o", "/tmp/x"]);
@@ -415,7 +661,8 @@ mod tests {
     fn exec_image_path_ignores_spoofed_argv0() {
         // execve("/tmp/evil", {"/usr/sbin/sshd", ...}, ...)
         let event = wire_exec(b"/tmp/evil", b"bash");
-        let Event::Exec(e) = exec(&event, 0, argv(&["/usr/sbin/sshd", "-D"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["/usr/sbin/sshd", "-D"]), Vec::new(), None)
+        else {
             panic!("wrong variant")
         };
         assert_eq!(
@@ -432,7 +679,7 @@ mod tests {
     fn exec_empty_argv_when_process_already_exited() {
         // /proc/<pid>/cmdline gone by drain time — image_path still authoritative.
         let event = wire_exec(b"/bin/sh", b"bash");
-        let Event::Exec(e) = exec(&event, 0, Vec::new(), None) else {
+        let Event::Exec(e) = exec(&event, 0, Vec::new(), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert!(e.argv.is_empty());
@@ -441,9 +688,28 @@ mod tests {
     }
 
     #[test]
+    fn exec_carries_security_env_when_present() {
+        let event = wire_exec(b"/usr/bin/ls", b"bash");
+        let env = vec![("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string())];
+        let Event::Exec(e) = exec(&event, 0, argv(&["ls"]), env.clone(), None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.env_security, env);
+    }
+
+    #[test]
+    fn exec_security_env_empty_for_plain_exec() {
+        let event = wire_exec(b"/usr/bin/ls", b"bash");
+        let Event::Exec(e) = exec(&event, 0, argv(&["ls"]), Vec::new(), None) else {
+            panic!("wrong variant")
+        };
+        assert!(e.env_security.is_empty());
+    }
+
+    #[test]
     fn exec_parent_comm_absent_when_lineage_missed() {
         let event = wire_exec(b"/bin/sh", b"");
-        let Event::Exec(e) = exec(&event, 0, argv(&["sh"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["sh"]), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert_eq!(e.parent_comm, None);
@@ -458,7 +724,7 @@ mod tests {
             image: None,
             name: None,
         };
-        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Some(ctx)) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Vec::new(), Some(ctx)) else {
             panic!("wrong variant")
         };
         let container = e.meta.container.expect("container attributed");
@@ -475,7 +741,7 @@ mod tests {
             image: Some("nginx:1.27".to_string()),
             name: Some("web1".to_string()),
         };
-        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Some(ctx)) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["nginx"]), Vec::new(), Some(ctx)) else {
             panic!("wrong variant")
         };
         let container = e.meta.container.expect("container attributed");
@@ -486,7 +752,7 @@ mod tests {
     #[test]
     fn bare_metal_process_has_no_container() {
         let event = wire_exec(b"/usr/bin/curl", b"bash");
-        let Event::Exec(e) = exec(&event, 0, argv(&["curl"]), None) else {
+        let Event::Exec(e) = exec(&event, 0, argv(&["curl"]), Vec::new(), None) else {
             panic!("wrong variant")
         };
         assert_eq!(e.meta.container, None);
@@ -815,5 +1081,273 @@ mod tests {
         assert_eq!(e.accepted_fd, 7);
         assert_eq!(e.peer_addr.to_string(), "203.0.113.42");
         assert_eq!(e.peer_port, 54321);
+    }
+
+    fn packed_str<const N: usize>(s: &[u8]) -> ([u8; N], u16) {
+        let mut buf = [0u8; N];
+        buf[..s.len()].copy_from_slice(s);
+        (buf, s.len() as u16)
+    }
+
+    #[test]
+    fn mount_carries_source_and_fs_type() {
+        let (mount_point, mount_point_len) = packed_str::<{ wire::MAX_PATH_LEN }>(b"/mnt/x");
+        let (source, source_len) = packed_str::<{ wire::MAX_PATH_LEN }>(b"/");
+        let (fs_type, fs_type_len) = packed_str::<{ wire::MAX_FS_TYPE_LEN }>(b"ext4");
+        let event = wire::MountEvent {
+            meta: wire_meta(b"mount"),
+            mount_point,
+            mount_point_len,
+            source,
+            source_len,
+            fs_type,
+            fs_type_len: fs_type_len as u8,
+            readonly: false,
+            mounted: true,
+        };
+        let Event::Mount(e) = mount(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.mount_point, "/mnt/x");
+        assert_eq!(e.source.as_deref(), Some("/"));
+        assert_eq!(e.fs_type.as_deref(), Some("ext4"));
+        assert!(e.mounted);
+        assert!(!e.readonly);
+    }
+
+    #[test]
+    fn mount_readonly_bind_remount_is_flagged() {
+        let (mount_point, mount_point_len) = packed_str::<{ wire::MAX_PATH_LEN }>(b"/");
+        let event = wire::MountEvent {
+            meta: wire_meta(b"mount"),
+            mount_point,
+            mount_point_len,
+            source: [0; wire::MAX_PATH_LEN],
+            source_len: 0,
+            fs_type: [0; wire::MAX_FS_TYPE_LEN],
+            fs_type_len: 0,
+            readonly: true,
+            mounted: true,
+        };
+        let Event::Mount(e) = mount(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert!(e.readonly);
+        assert_eq!(e.source, None, "no source arg on this call shape");
+        assert_eq!(e.fs_type, None);
+    }
+
+    #[test]
+    fn unmount_has_no_source_or_fs_type() {
+        let (mount_point, mount_point_len) = packed_str::<{ wire::MAX_PATH_LEN }>(b"/mnt/x");
+        let event = wire::MountEvent {
+            meta: wire_meta(b"umount"),
+            mount_point,
+            mount_point_len,
+            source: [0; wire::MAX_PATH_LEN],
+            source_len: 0,
+            fs_type: [0; wire::MAX_FS_TYPE_LEN],
+            fs_type_len: 0,
+            readonly: false,
+            mounted: false,
+        };
+        let Event::Mount(e) = mount(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert!(!e.mounted);
+        assert_eq!(e.source, None);
+        assert_eq!(e.fs_type, None);
+    }
+
+    #[test]
+    fn signal_meta_is_the_sender_not_the_target() {
+        let event = wire::SignalEvent {
+            meta: wire_meta(b"bash"),
+            signal: 9,
+            target_pid: 400,
+        };
+        let Event::Signal(e) = signal(
+            &event,
+            0,
+            Some("/usr/local/bin/synthaea-agent".to_string()),
+            None,
+        ) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.signal, 9);
+        assert_eq!(e.target_pid, 400);
+        assert_eq!(e.meta.comm, "bash", "meta must stay the sender");
+        assert_eq!(
+            e.target_image_path.as_deref(),
+            Some("/usr/local/bin/synthaea-agent")
+        );
+    }
+
+    fn wire_kernel_module(name: &[u8]) -> wire::KernelModuleEvent {
+        let mut name_buf = [0u8; wire::MAX_MODULE_NAME_LEN];
+        name_buf[..name.len()].copy_from_slice(name);
+        wire::KernelModuleEvent {
+            meta: wire_meta(b"rmmod"),
+            name: name_buf,
+            name_len: name.len() as u16,
+            fd: -1,
+            image_len: 0,
+            flags: 0,
+            action: 2,
+        }
+    }
+
+    #[test]
+    fn kernel_module_unload_carries_the_name() {
+        let event = wire_kernel_module(b"evil_rootkit");
+        let Event::KernelModule(e) = kernel_module(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.action, KernelModuleAction::Unload);
+        assert_eq!(e.name.as_deref(), Some("evil_rootkit"));
+        assert_eq!(e.fd, None);
+        assert_eq!(e.image_len, None);
+    }
+
+    #[test]
+    fn kernel_module_load_has_no_name_but_has_image_len() {
+        let mut event = wire_kernel_module(b"");
+        event.action = 0;
+        event.image_len = 4096;
+        let Event::KernelModule(e) = kernel_module(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.action, KernelModuleAction::Load);
+        assert_eq!(e.name, None);
+        assert_eq!(e.fd, None);
+        assert_eq!(e.image_len, Some(4096));
+    }
+
+    #[test]
+    fn kernel_module_load_fd_carries_the_fd_not_a_name() {
+        let mut event = wire_kernel_module(b"");
+        event.action = 1;
+        event.fd = 5;
+        let Event::KernelModule(e) = kernel_module(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.action, KernelModuleAction::LoadFd);
+        assert_eq!(e.name, None);
+        assert_eq!(e.fd, Some(5));
+        assert_eq!(e.image_len, None);
+    }
+
+    #[test]
+    fn bpf_operation_carries_the_raw_cmd() {
+        let event = wire::BpfEvent {
+            meta: wire_meta(b"evil_loader"),
+            cmd: 5, // BPF_PROG_LOAD
+        };
+        let Event::BpfOperation(e) = bpf_operation(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.cmd, 5);
+    }
+
+    #[test]
+    fn identity_change_setuid_has_only_real() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 0,
+            real: 1000,
+            effective: 0,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetUid);
+        assert_eq!(e.real, 1000);
+        assert_eq!(e.effective, None);
+        assert_eq!(e.saved, None);
+    }
+
+    #[test]
+    fn identity_change_setresuid_carries_all_three() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 2,
+            real: 1000,
+            effective: 1000,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetResUid);
+        assert_eq!(e.real, 1000);
+        assert_eq!(e.effective, Some(1000));
+        assert_eq!(e.saved, Some(0));
+    }
+
+    #[test]
+    fn identity_change_setfsgid_has_only_real() {
+        let event = wire::IdentityChangeEvent {
+            meta: wire_meta(b"su"),
+            kind: 5,
+            real: 1000,
+            effective: 0,
+            saved: 0,
+        };
+        let Event::IdentityChange(e) = identity_change(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.kind, IdentityChangeKind::SetFsGid);
+        assert_eq!(e.effective, None);
+        assert_eq!(e.saved, None);
+    }
+
+    #[test]
+    fn cap_set_carries_the_low_word_bits() {
+        let event = wire::CapSetEvent {
+            meta: wire_meta(b"evil"),
+            target_pid: 0,
+            effective: 1 << 21,
+            permitted: 1 << 21,
+            inheritable: 0,
+        };
+        let Event::CapSet(e) = cap_set(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.target_pid, 0);
+        assert_eq!(e.effective, 1 << 21);
+        assert_eq!(e.permitted, 1 << 21);
+    }
+
+    #[test]
+    fn namespace_setns_carries_the_fd() {
+        let event = wire::NamespaceEvent {
+            meta: wire_meta(b"nsenter"),
+            syscall: 0,
+            fd: 3,
+            flags: 0x4000_0000,
+        };
+        let Event::Namespace(e) = namespace(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.syscall, NamespaceSyscall::SetNs);
+        assert_eq!(e.fd, Some(3));
+        assert_eq!(e.flags, 0x4000_0000);
+    }
+
+    #[test]
+    fn namespace_unshare_has_no_fd() {
+        let event = wire::NamespaceEvent {
+            meta: wire_meta(b"unshare"),
+            syscall: 1,
+            fd: -1,
+            flags: 0x0002_0000,
+        };
+        let Event::Namespace(e) = namespace(&event, 0, None) else {
+            panic!("wrong variant")
+        };
+        assert_eq!(e.syscall, NamespaceSyscall::Unshare);
+        assert_eq!(e.fd, None);
+        assert_eq!(e.flags, 0x0002_0000);
     }
 }

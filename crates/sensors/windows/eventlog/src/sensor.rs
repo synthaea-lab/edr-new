@@ -66,14 +66,30 @@ const USER_ACCOUNT_MGMT_AUDIT_SUBCATEGORY_GUID: &str = "{0CCE9235-69AE-11D9-BED3
 /// process rather than leaving it blank.
 const LSASS_COMM: &str = "lsass.exe";
 
-fn wevtutil(args: &[&str]) -> String {
-    match Command::new("wevtutil").args(args).output() {
-        Ok(output) => String::from_utf8_lossy(&output.stdout).into_owned(),
-        Err(e) => {
-            tracing::warn!(error = %e, ?args, "wevtutil invocation failed");
-            String::new()
-        }
+/// Runs `wevtutil` and returns its stdout, or why the call failed.
+///
+/// A non-zero exit is a failure even though stdout is empty either way:
+/// `wevtutil qe` exits 0 with empty output when nothing matches, and *also*
+/// prints nothing on stdout when it is refused — exit 5
+/// (`ERROR_ACCESS_DENIED`, e.g. reading Security without admin rights,
+/// observed on a dev host). Folding both into `""` made a blinded channel
+/// indistinguishable from a quiet one (#388).
+fn wevtutil(args: &[&str]) -> Result<String, String> {
+    let output = Command::new("wevtutil")
+        .args(args)
+        .output()
+        .map_err(|e| format!("wevtutil could not be spawned: {e}"))?;
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map_or_else(|| "no exit code".to_string(), |c| c.to_string());
+        return Err(format!(
+            "wevtutil exited with {code}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
     }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 // ── The shared poll pipeline ─────────────────────────────────────────────────
@@ -89,31 +105,40 @@ fn wevtutil(args: &[&str]) -> String {
 /// What [`PollTarget::parse_block`] yields for one `<Event>` XML block.
 /// `None`: not even parseable. `Some((record_id, None))`: parsed but skipped
 /// as unusable. `Some((record_id, Some(event)))`: a normalized event.
-type ParsedBlock = Option<(u64, Option<Event>)>;
+pub(crate) type ParsedBlock = Option<(u64, Option<Event>)>;
 
 /// One poll target: a channel + `EventID` filter, and how its raw XML blocks
-/// become normalized events.
-struct PollTarget {
+/// become normalized events. Reused as-is by the push-based `subscribe`
+/// transport (`subscribe.rs`) — same channel, same filter, same parser: only
+/// the delivery mechanism differs between the two transports.
+pub(crate) struct PollTarget {
     /// Names the poll thread in logs.
-    label: &'static str,
+    pub(crate) label: &'static str,
+    /// Names this target's silence heartbeat (`cli health`, T1562 alerts) —
+    /// see [`EventLogSensor::liveness`].
+    heartbeat: &'static str,
     /// `wevtutil` channel (`System` / `Security`).
-    channel: &'static str,
+    pub(crate) channel: &'static str,
     /// The `EventID=...` predicate, without the surrounding `*[System[...]]`.
-    id_filter: &'static str,
+    pub(crate) id_filter: &'static str,
     /// Which volume counter this target increments.
-    counter: fn(&EventLogCounters) -> &AtomicU64,
+    pub(crate) counter: fn(&EventLogCounters) -> &AtomicU64,
     /// Parses one `<Event>` XML block — see [`ParsedBlock`] for the three
     /// outcomes. An unparseable block does not advance the record cursor; a
     /// parsed-but-unusable one advances it without counting (a block missing
     /// required fields is noise the sensor filtered out, not volume).
-    parse_block: fn(&str) -> ParsedBlock,
+    pub(crate) parse_block: fn(&str) -> ParsedBlock,
     /// `auditpol` enablement to run once before polling starts, for targets
     /// whose audit subcategory may be off (see each target's enable fn doc).
-    enable_audit: Option<fn()>,
+    pub(crate) enable_audit: Option<fn()>,
+    /// Which [`EventLogConfig`] switch gates this target. Carried by the
+    /// target itself so adding one is a single entry in [`TARGETS`], with no
+    /// parallel array to keep in step (several targets may share a switch).
+    enabled: fn(&EventLogConfig) -> bool,
 }
 
 /// `EventRecordID` of the newest matching event already in the channel.
-fn last_known_record_id(target: &PollTarget) -> u64 {
+fn last_known_record_id(target: &PollTarget) -> Result<u64, String> {
     let query = format!("/q:*[System[({})]]", target.id_filter);
     let xml_out = wevtutil(&[
         "qe",
@@ -122,49 +147,101 @@ fn last_known_record_id(target: &PollTarget) -> u64 {
         "/rd:true",
         "/f:xml",
         query.as_str(),
-    ]);
-    xml::split_event_blocks(&xml_out)
+    ])?;
+    Ok(xml::split_event_blocks(&xml_out)
         .first()
         .and_then(|block| (target.parse_block)(block))
-        .map(|(record_id, _)| record_id)
-        .unwrap_or(0)
+        .map_or(0, |(record_id, _)| record_id))
 }
 
 /// Parsed blocks newer than `since_record_id` (exclusive), oldest to newest.
-fn new_blocks(target: &PollTarget, since_record_id: u64) -> Vec<(u64, Option<Event>)> {
+fn new_blocks(
+    target: &PollTarget,
+    since_record_id: u64,
+) -> Result<Vec<(u64, Option<Event>)>, String> {
     let query = format!(
         "/q:*[System[({}) and (EventRecordID>{since_record_id})]]",
         target.id_filter
     );
-    let xml_out = wevtutil(&["qe", target.channel, "/rd:false", "/f:xml", query.as_str()]);
-    xml::split_event_blocks(&xml_out)
+    let xml_out = wevtutil(&["qe", target.channel, "/rd:false", "/f:xml", query.as_str()])?;
+    Ok(xml::split_event_blocks(&xml_out)
         .into_iter()
         .filter_map(|block| (target.parse_block)(block))
-        .collect()
+        .collect())
 }
 
+/// One poll tick: establishes the startup cursor if there is none yet,
+/// otherwise forwards everything newer than it. Returns the new cursor.
+fn poll_once(
+    target: &PollTarget,
+    cursor: Option<u64>,
+    sink: &dyn EventSink,
+    counters: &EventLogCounters,
+) -> Result<u64, String> {
+    let Some(since) = cursor else {
+        return last_known_record_id(target);
+    };
+    let mut newest = since;
+    for (record_id, event) in new_blocks(target, since)? {
+        newest = newest.max(record_id);
+        if let Some(event) = event {
+            (target.counter)(counters).fetch_add(1, Ordering::Relaxed);
+            sink.on_event(event);
+        }
+    }
+    Ok(newest)
+}
+
+/// Runs one target's poll loop on its own thread. `liveness` is incremented
+/// once per tick that succeeded — events found or not — and never on a failed
+/// one (see [`EventLogSensor::liveness`]).
 fn poll(
     target: &'static PollTarget,
     sink: Arc<dyn EventSink>,
     stop: Arc<AtomicBool>,
     counters: Arc<EventLogCounters>,
+    liveness: Arc<AtomicU64>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
-        let mut last_id = last_known_record_id(target);
-        tracing::info!(
-            target = target.label,
-            last_record_id = last_id,
-            "poll started"
-        );
+        // `None` until the startup cursor is read. A channel unreadable at
+        // startup must not fall back to record 0 — that would replay its whole
+        // history the moment it becomes readable — so the cursor read is
+        // retried every tick instead.
+        let mut cursor: Option<u64> = None;
+        // Warn once per failure streak, not every `POLL_INTERVAL`.
+        let mut failing = false;
+        tracing::info!(target = target.label, "poll started");
         while !stop.load(Ordering::SeqCst) {
-            std::thread::sleep(POLL_INTERVAL);
-            for (record_id, event) in new_blocks(target, last_id) {
-                last_id = last_id.max(record_id);
-                if let Some(event) = event {
-                    (target.counter)(&counters).fetch_add(1, Ordering::Relaxed);
-                    sink.on_event(event);
+            match poll_once(target, cursor, sink.as_ref(), &counters) {
+                Ok(newest) => {
+                    if cursor.is_none() {
+                        tracing::info!(
+                            target = target.label,
+                            last_record_id = newest,
+                            "poll cursor established"
+                        );
+                    }
+                    cursor = Some(newest);
+                    liveness.fetch_add(1, Ordering::Relaxed);
+                    if failing {
+                        tracing::info!(target = target.label, "poll recovered");
+                        failing = false;
+                    }
+                }
+                Err(error) => {
+                    if !failing {
+                        tracing::warn!(
+                            target = target.label,
+                            channel = target.channel,
+                            %error,
+                            "poll failed — this channel reports nothing until it recovers, \
+                             and its silence heartbeat stops"
+                        );
+                        failing = true;
+                    }
                 }
             }
+            std::thread::sleep(POLL_INTERVAL);
         }
         tracing::info!(target = target.label, "poll stopped");
     })
@@ -245,12 +322,14 @@ fn normalize_service_install(block: &str) -> ParsedBlock {
 
 static SERVICE_INSTALLS: PollTarget = PollTarget {
     label: "service-install",
+    heartbeat: "windows-eventlog:service-install",
     channel: "System",
     id_filter: "EventID=7045",
     counter: |c| &c.service_installs,
     parse_block: normalize_service_install,
     // 7045 lands in the System log unconditionally — nothing to enable.
     enable_audit: None,
+    enabled: |c| c.service_installs_enabled,
 };
 
 // ── Event 4698 — scheduled task creation (T1053.005) ─────────────────────────
@@ -277,25 +356,28 @@ fn normalize_scheduled_task(block: &str) -> ParsedBlock {
     if task.task_name.is_empty() {
         return Some((record_id, None));
     }
-    let Some(action_path) = xml::task_action_path(&task.task_content) else {
-        return Some((record_id, None));
+    // A task whose action we cannot read is still a persistence artifact: report
+    // it with a placeholder path instead of dropping it (#422).
+    let (path, flags) = match xml::task_actions_display(&task.task_content) {
+        Some(actions) => (actions, FLAG_PERSISTENCE_TASK_ARTIFACT),
+        None => (
+            xml::TASK_ACTION_UNKNOWN.to_string(),
+            FLAG_PERSISTENCE_TASK_ARTIFACT | schema::FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN,
+        ),
     };
-    let event = persistence_file_open(
-        task.pid,
-        xml::task_leaf_name(&task.task_name),
-        action_path,
-        FLAG_PERSISTENCE_TASK_ARTIFACT,
-    );
+    let event = persistence_file_open(task.pid, xml::task_leaf_name(&task.task_name), path, flags);
     Some((record_id, Some(event)))
 }
 
 static SCHEDULED_TASKS: PollTarget = PollTarget {
     label: "scheduled-task",
+    heartbeat: "windows-eventlog:scheduled-task",
     channel: "Security",
     id_filter: "EventID=4698",
     counter: |c| &c.scheduled_tasks,
     parse_block: normalize_scheduled_task,
     enable_audit: Some(enable_scheduled_task_audit),
+    enabled: |c| c.scheduled_tasks_enabled,
 };
 
 // ── Events 4624/4625/4648/4672 — logon/session (#94) ─────────────────────────
@@ -320,6 +402,7 @@ fn normalize_logon(block: &str) -> ParsedBlock {
 
 static LOGON_EVENTS: PollTarget = PollTarget {
     label: "logon",
+    heartbeat: "windows-eventlog:logon",
     channel: "Security",
     // One query across all four IDs (they share the Security channel's single
     // `EventRecordID` sequence), rather than four separate polls hammering the
@@ -328,6 +411,7 @@ static LOGON_EVENTS: PollTarget = PollTarget {
     counter: |c| &c.logon_events,
     parse_block: normalize_logon,
     enable_audit: Some(enable_logon_audit),
+    enabled: |c| c.logon_events_enabled,
 };
 
 /// Maps a parsed [`LogonEvent`] to the normalized [`Event::Auth`], or `None`
@@ -437,11 +521,13 @@ fn normalize_account_created(block: &str) -> ParsedBlock {
 
 static ACCOUNT_CREATIONS: PollTarget = PollTarget {
     label: "account-creation",
+    heartbeat: "windows-eventlog:account-creation",
     channel: "Security",
     id_filter: "EventID=4720",
     counter: |c| &c.account_creations,
     parse_block: normalize_account_created,
     enable_audit: Some(enable_account_creation_audit),
+    enabled: |c| c.account_creations_enabled,
 };
 
 // ── Event 8004 — `AppLocker` EXE/DLL block (Microsoft-Windows-AppLocker/EXE and DLL) ───
@@ -465,24 +551,34 @@ fn applocker_leaf_name(path: &str) -> String {
 
 /// An 8004 without a `FilePath` cannot carry a persistence artifact — nothing
 /// to hand to the sink. Skip, advancing the cursor.
+///
+/// The path is expanded from `AppLocker`'s path variables
+/// (`%OSDRIVE%\USERS\...` → `C:\USERS\...`) so path-based rules can match
+/// it, and the blocked user's SID lands in `meta.user` (#427). Still a
+/// `FileOpenEvent` for now; the move to `PolicyDenialEvent` is #427's
+/// schema step.
 fn normalize_applocker_block(block: &str) -> ParsedBlock {
-    let ev = xml::parse_applocker_block(block)?;
+    let ev = xml::parse_applocker_event(block)?;
     let record_id = ev.record_id;
     if ev.file_path.is_empty() {
         return Some((record_id, None));
     }
-    let comm = applocker_leaf_name(&ev.file_path);
-    let event = persistence_file_open(
-        ev.target_process_id,
-        comm,
-        ev.file_path,
-        FLAG_APPLICATION_BLOCKED,
-    );
+    let path = xml::expand_applocker_path(&ev.file_path, |name| std::env::var(name).ok());
+    let comm = applocker_leaf_name(&path);
+    let mut event =
+        persistence_file_open(ev.target_process_id, comm, path, FLAG_APPLICATION_BLOCKED);
+    if let (Event::FileOpen(open), Some(sid)) = (&mut event, ev.target_user) {
+        open.meta.user = User::Windows {
+            sid,
+            integrity_level: None,
+        };
+    }
     Some((record_id, Some(event)))
 }
 
 static APPLOCKER_BLOCKS: PollTarget = PollTarget {
     label: "applocker-block",
+    heartbeat: "windows-eventlog:applocker-block",
     channel: "Microsoft-Windows-AppLocker/EXE and DLL",
     id_filter: "EventID=8004",
     counter: |c| &c.applocker_blocks,
@@ -493,6 +589,7 @@ static APPLOCKER_BLOCKS: PollTarget = PollTarget {
     // deployment (a disabled channel is a policy decision, not an oversight
     // the sensor should override on its own).
     enable_audit: None,
+    enabled: |c| c.applocker_blocks_enabled,
 };
 
 // ── Event 106 — TaskScheduler Operational "task registered" ─────────────────
@@ -523,12 +620,14 @@ fn normalize_task_scheduler_op_registered(block: &str) -> ParsedBlock {
 
 static TASK_SCHEDULER_OP: PollTarget = PollTarget {
     label: "task-scheduler-op",
+    heartbeat: "windows-eventlog:task-scheduler-op",
     channel: "Microsoft-Windows-TaskScheduler/Operational",
     id_filter: "EventID=106",
     counter: |c| &c.task_scheduler_op,
     parse_block: normalize_task_scheduler_op_registered,
     // Operational channel, always on — nothing to enable.
     enable_audit: None,
+    enabled: |c| c.task_scheduler_op_enabled,
 };
 
 // ── Policy-configurable allowlist and volume counters (#94) ─────────────────
@@ -543,8 +642,53 @@ static TASK_SCHEDULER_OP: PollTarget = PollTarget {
 /// disabled group is never even queried — not filtered after the fact — so a
 /// host that, say, disables logon-event polling pays no `wevtutil` cost for it
 /// either.
+/// Which transport the sensor uses to receive Event Log records from the OS
+/// (issue #322). Both transports produce identical normalized `Event`s
+/// through the same [`PollTarget`] parsers and update the same
+/// [`EventLogCounters`] — only the delivery mechanism differs.
+///
+/// - [`Polling`](EventLogTransport::Polling) — the default. One thread per
+///   enabled target runs a `wevtutil qe` loop on `POLL_INTERVAL` cadence,
+///   filters by `EventRecordID > last_seen`, and parses each returned XML
+///   block. Adds up to `POLL_INTERVAL` of latency and one child-process
+///   spawn per tick per channel, in exchange for zero Windows API surface
+///   beyond what `wevtutil` already exposes — the safe fallback if a host's
+///   `EvtSubscribe` behavior is ever in doubt.
+///
+/// - [`Subscribe`](EventLogTransport::Subscribe) — one `EvtSubscribe` call
+///   per enabled target, callback delivery from the OS the moment an event
+///   lands in the channel. No polling latency, no subprocess churn.
+///
+/// The default is [`Polling`](EventLogTransport::Polling): opt-in for
+/// `Subscribe` at the config layer, so a deployment picks it host-by-host
+/// after validation rather than the whole fleet flipping on merge. See
+/// `docs/adr/0004-windows-persistence-detection-via-eventlog-polling.md` for
+/// the original polling-vs-subscribe investigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLogTransport {
+    /// Default `wevtutil`-based poll loop, one thread per enabled target.
+    Polling,
+    /// `EvtSubscribe`-based push delivery via a Windows callback, one
+    /// subscription per enabled target.
+    Subscribe,
+}
+
+impl Default for EventLogTransport {
+    /// [`Polling`](EventLogTransport::Polling), matching the pre-#322
+    /// behavior — the sensor's transport does not change on a mere upgrade;
+    /// it changes when an operator explicitly says so.
+    fn default() -> Self {
+        Self::Polling
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EventLogConfig {
+    /// Which OS-facing transport the sensor uses to receive channel events.
+    /// See [`EventLogTransport`] for the trade-offs; defaults to
+    /// [`Polling`](EventLogTransport::Polling) so a deployment does not
+    /// change delivery mechanism on a mere version bump.
+    pub transport: EventLogTransport,
     /// Event 7045 (T1543.003 — service install persistence).
     pub service_installs_enabled: bool,
     /// Event 4698 (T1053.005 — scheduled task persistence). Reads the Security
@@ -563,11 +707,23 @@ pub struct EventLogConfig {
     pub task_scheduler_op_enabled: bool,
 }
 
+/// Every poll target. Adding one = one entry here: its switch, heartbeat name
+/// and liveness counter all follow from it.
+static TARGETS: &[&PollTarget] = &[
+    &SERVICE_INSTALLS,
+    &SCHEDULED_TASKS,
+    &ACCOUNT_CREATIONS,
+    &LOGON_EVENTS,
+    &APPLOCKER_BLOCKS,
+    &TASK_SCHEDULER_OP,
+];
+
 impl Default for EventLogConfig {
     /// Every group enabled — this crate's behavior before `EventLogConfig`
     /// existed.
     fn default() -> Self {
         Self {
+            transport: EventLogTransport::default(),
             service_installs_enabled: true,
             scheduled_tasks_enabled: true,
             account_creations_enabled: true,
@@ -604,6 +760,8 @@ pub struct EventLogSensor {
     stop: Arc<AtomicBool>,
     config: EventLogConfig,
     counters: Arc<EventLogCounters>,
+    /// One per [`TARGETS`] entry, same order — see [`Self::liveness`].
+    liveness: Vec<Arc<AtomicU64>>,
 }
 
 impl EventLogSensor {
@@ -620,6 +778,10 @@ impl EventLogSensor {
             stop: Arc::new(AtomicBool::new(false)),
             config,
             counters: Arc::new(EventLogCounters::default()),
+            liveness: TARGETS
+                .iter()
+                .map(|_| Arc::new(AtomicU64::new(0)))
+                .collect(),
         }
     }
 
@@ -635,6 +797,33 @@ impl EventLogSensor {
     #[must_use]
     pub fn counters(&self) -> Arc<EventLogCounters> {
         Arc::clone(&self.counters)
+    }
+
+    /// One liveness counter per **enabled** poll target, named for a silence
+    /// monitor (`windows-eventlog:<target>`). Each is incremented once per poll
+    /// tick that actually succeeded (`wevtutil` exited 0), whether or not it
+    /// found events: a quiet channel stays live, a refused or broken one goes
+    /// dark. Per target rather than per sensor, because one shared counter would
+    /// let a healthy System poll mask a Security channel that stopped answering.
+    /// A disabled target is omitted — it never polls, so it must never be
+    /// watched for silence.
+    ///
+    /// Empty under [`EventLogTransport::Subscribe`]: a push subscription has
+    /// no poll tick, so a counter would never move on a quiet channel and a
+    /// silence monitor would raise a false T1562 on a healthy target. Until
+    /// that transport has a liveness signal of its own, it is simply not
+    /// watched (issues #403, #423).
+    #[must_use]
+    pub fn liveness(&self) -> Vec<(&'static str, Arc<AtomicU64>)> {
+        if self.config.transport == EventLogTransport::Subscribe {
+            return Vec::new();
+        }
+        TARGETS
+            .iter()
+            .zip(&self.liveness)
+            .filter(|(target, _)| (target.enabled)(&self.config))
+            .map(|(target, counter)| (target.heartbeat, Arc::clone(counter)))
+            .collect()
     }
 }
 
@@ -665,38 +854,83 @@ impl Sensor for EventLogSensor {
         self.stop.store(false, Ordering::SeqCst);
         let sink: Arc<dyn EventSink> = Arc::from(sink);
 
-        let mut handles = Vec::new();
-
-        let targets = [
-            (self.config.service_installs_enabled, &SERVICE_INSTALLS),
-            (self.config.scheduled_tasks_enabled, &SCHEDULED_TASKS),
-            (self.config.account_creations_enabled, &ACCOUNT_CREATIONS),
-            (self.config.logon_events_enabled, &LOGON_EVENTS),
-            (self.config.applocker_blocks_enabled, &APPLOCKER_BLOCKS),
-            (self.config.task_scheduler_op_enabled, &TASK_SCHEDULER_OP),
-        ];
-        for (enabled, target) in targets {
-            if !enabled {
+        // Audit-subcategory enablement is transport-independent: whether
+        // events land in the channel does not depend on whether we read them
+        // via `wevtutil` or `EvtSubscribe`. So we run each target's
+        // `enable_audit` (if any) once up front, regardless of transport.
+        for target in TARGETS {
+            if !(target.enabled)(&self.config) {
                 continue;
             }
             if let Some(enable_audit) = target.enable_audit {
                 enable_audit();
             }
-            handles.push(poll(
-                target,
-                Arc::clone(&sink),
-                Arc::clone(&self.stop),
-                Arc::clone(&self.counters),
-            ));
         }
 
+        // Two kinds of "hold this alive while we run" objects, kept in
+        // separate vectors so their types stay concrete and their drops fire
+        // in the correct order on the way out (subscriptions before threads,
+        // via the natural reverse-declaration order of local drops).
+        let mut poll_handles: Vec<std::thread::JoinHandle<()>> = Vec::new();
+        #[cfg(windows)]
+        let mut subscriptions: Vec<crate::subscribe::SubscriptionHandle> = Vec::new();
+
+        match self.config.transport {
+            EventLogTransport::Polling => {
+                for (target, liveness) in TARGETS.iter().zip(&self.liveness) {
+                    if !(target.enabled)(&self.config) {
+                        continue;
+                    }
+                    poll_handles.push(poll(
+                        target,
+                        Arc::clone(&sink),
+                        Arc::clone(&self.stop),
+                        Arc::clone(&self.counters),
+                        Arc::clone(liveness),
+                    ));
+                }
+            }
+            EventLogTransport::Subscribe => {
+                #[cfg(windows)]
+                {
+                    for target in TARGETS {
+                        if !(target.enabled)(&self.config) {
+                            continue;
+                        }
+                        // `subscribe` returns `None` on `EvtSubscribe`
+                        // failure (channel disabled, denied, invalid XPath).
+                        // The failure is logged inside `subscribe`; we
+                        // continue with the other targets — one channel
+                        // degraded is not a sensor-wide crash.
+                        if let Some(handle) = crate::subscribe::subscribe(
+                            target,
+                            Arc::clone(&sink),
+                            Arc::clone(&self.counters),
+                            Arc::clone(&self.stop),
+                        ) {
+                            subscriptions.push(handle);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Same idle loop for both transports: the subscribe transport does
+        // its own delivery on OS-managed callback threads, we only wait for
+        // the stop signal here.
         while !self.stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_millis(200));
         }
 
-        for handle in handles {
+        // Under `Polling`, threads exit on their own once `stop` is
+        // observed; join to reclaim them. Under `Subscribe`, the
+        // `subscriptions` vec is dropped when this function returns, which
+        // calls `EvtClose` on each handle (see `SubscriptionHandle::Drop`).
+        for handle in poll_handles {
             let _ = handle.join();
         }
+        // `subscriptions` drops here (natural scope end), tearing down each
+        // `EvtSubscribe` before we return.
         Ok(())
     }
 
@@ -721,8 +955,33 @@ mod config_tests {
     }
 
     #[test]
+    fn default_transport_is_polling() {
+        // Contract for #322: default MUST be Polling so a mere version bump
+        // does not silently change delivery mechanism on any host. Subscribe
+        // is opt-in at the config layer, exercised host-by-host after
+        // validation.
+        assert_eq!(
+            EventLogConfig::default().transport,
+            EventLogTransport::Polling
+        );
+    }
+
+    #[test]
+    fn subscribe_transport_selectable() {
+        let cfg = EventLogConfig {
+            transport: EventLogTransport::Subscribe,
+            ..Default::default()
+        };
+        assert_eq!(cfg.transport, EventLogTransport::Subscribe);
+        // Toggling transport does not touch the per-channel enable flags.
+        assert!(cfg.service_installs_enabled);
+        assert!(cfg.logon_events_enabled);
+    }
+
+    #[test]
     fn capabilities_reflect_disabled_groups() {
         let sensor = EventLogSensor::with_config(EventLogConfig {
+            transport: EventLogTransport::default(),
             service_installs_enabled: false,
             scheduled_tasks_enabled: false,
             account_creations_enabled: false,
@@ -738,6 +997,7 @@ mod config_tests {
     #[test]
     fn capabilities_stay_true_if_any_file_group_enabled() {
         let sensor = EventLogSensor::with_config(EventLogConfig {
+            transport: EventLogTransport::default(),
             service_installs_enabled: true,
             scheduled_tasks_enabled: false,
             account_creations_enabled: false,
@@ -757,6 +1017,7 @@ mod config_tests {
             logon_events_enabled: false,
             applocker_blocks_enabled: true,
             task_scheduler_op_enabled: false,
+            transport: EventLogTransport::default(),
         });
         assert!(sensor.capabilities().file_events);
     }
@@ -770,6 +1031,7 @@ mod config_tests {
             logon_events_enabled: false,
             applocker_blocks_enabled: false,
             task_scheduler_op_enabled: true,
+            transport: EventLogTransport::default(),
         });
         assert!(sensor.capabilities().file_events);
     }
@@ -784,5 +1046,172 @@ mod config_tests {
         assert_eq!(counters.logon_events.load(Ordering::Relaxed), 0);
         assert_eq!(counters.applocker_blocks.load(Ordering::Relaxed), 0);
         assert_eq!(counters.task_scheduler_op.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn liveness_covers_every_target_by_default_with_distinct_names() {
+        let names: Vec<_> = EventLogSensor::new()
+            .liveness()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "windows-eventlog:service-install",
+                "windows-eventlog:scheduled-task",
+                "windows-eventlog:account-creation",
+                "windows-eventlog:logon",
+                "windows-eventlog:applocker-block",
+                "windows-eventlog:task-scheduler-op",
+            ]
+        );
+    }
+
+    #[test]
+    fn liveness_omits_disabled_targets() {
+        let sensor = EventLogSensor::with_config(EventLogConfig {
+            service_installs_enabled: false,
+            scheduled_tasks_enabled: true,
+            account_creations_enabled: false,
+            logon_events_enabled: true,
+            applocker_blocks_enabled: false,
+            task_scheduler_op_enabled: false,
+            transport: EventLogTransport::Polling,
+        });
+        let names: Vec<_> = sensor.liveness().into_iter().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            ["windows-eventlog:scheduled-task", "windows-eventlog:logon"]
+        );
+    }
+
+    #[test]
+    fn subscribe_transport_exposes_no_liveness_counters() {
+        let sensor = EventLogSensor::with_config(EventLogConfig {
+            transport: EventLogTransport::Subscribe,
+            ..EventLogConfig::default()
+        });
+        assert!(
+            sensor.liveness().is_empty(),
+            "a push subscription has no poll tick: watching it would raise false T1562"
+        );
+    }
+
+    #[test]
+    fn every_target_has_a_distinct_heartbeat_name() {
+        let mut names: Vec<_> = TARGETS.iter().map(|t| t.heartbeat).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), TARGETS.len(), "two targets share a heartbeat");
+        assert!(names.iter().all(|n| n.starts_with("windows-eventlog:")));
+    }
+
+    #[test]
+    fn liveness_handles_share_the_sensor_counters() {
+        let sensor = EventLogSensor::new();
+        let (_, first) = &sensor.liveness()[0];
+        first.fetch_add(1, Ordering::Relaxed);
+        assert_eq!(sensor.liveness()[0].1.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[cfg(test)]
+mod wevtutil_tests {
+    use super::*;
+
+    #[test]
+    fn a_query_matching_nothing_is_a_success_with_empty_output() {
+        let out = wevtutil(&[
+            "qe",
+            "System",
+            "/c:1",
+            "/f:xml",
+            "/q:*[System[(EventID=99999)]]",
+        ])
+        .expect("an empty result is not a failure");
+        assert!(out.trim().is_empty());
+    }
+
+    #[test]
+    fn a_failing_query_is_an_error_not_an_empty_result() {
+        let err = wevtutil(&["qe", "Synthaea-No-Such-Channel", "/c:1"])
+            .expect_err("an unknown channel must not look like a quiet one");
+        assert!(err.contains("exited with"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod scheduled_task_tests {
+    use super::*;
+
+    /// Minimal 4698 block: only the fields `parse_scheduled_task_block` reads.
+    fn block_4698(task_content_escaped: &str) -> String {
+        format!(
+            "<Event><System><EventID>4698</EventID><EventRecordID>42</EventRecordID></System><EventData><Data Name='TaskName'>\\HiddenTask</Data><Data Name='TaskContent'>{task_content_escaped}</Data><Data Name='ClientProcessId'>1234</Data></EventData></Event>"
+        )
+    }
+
+    #[test]
+    fn task_with_no_readable_action_is_still_reported() {
+        let block = block_4698(
+            "&lt;Task&gt;&lt;Actions&gt;&lt;ComHandler/&gt;&lt;/Actions&gt;&lt;/Task&gt;",
+        );
+        let Some((42, Some(Event::FileOpen(event)))) = normalize_scheduled_task(&block) else {
+            panic!("a 4698 must never be dropped (#422)");
+        };
+        assert_eq!(event.path, xml::TASK_ACTION_UNKNOWN);
+        assert_eq!(
+            event.flags,
+            FLAG_PERSISTENCE_TASK_ARTIFACT | schema::FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN
+        );
+        assert_eq!(event.meta.comm, "HiddenTask");
+        assert_eq!(event.meta.pid, 1234);
+    }
+
+    #[test]
+    fn task_with_several_actions_reports_all_of_them() {
+        let block = block_4698(
+            "&lt;Actions&gt;&lt;Exec&gt;&lt;Command&gt;a.exe&lt;/Command&gt;&lt;/Exec&gt;&lt;ComHandler&gt;&lt;ClassId&gt;{X}&lt;/ClassId&gt;&lt;/ComHandler&gt;&lt;/Actions&gt;",
+        );
+        let Some((42, Some(Event::FileOpen(event)))) = normalize_scheduled_task(&block) else {
+            panic!("expected a FileOpen event");
+        };
+        assert_eq!(event.path, "a.exe | com:{X}");
+        assert_eq!(event.flags, FLAG_PERSISTENCE_TASK_ARTIFACT);
+    }
+}
+
+#[cfg(test)]
+mod applocker_tests {
+    use super::*;
+
+    #[test]
+    fn applocker_block_carries_the_expanded_path_and_the_blocked_user() {
+        let block = "<Event><System><EventID>8004</EventID><EventRecordID>7</EventRecordID></System>\
+            <UserData><RuleAndFileData><PolicyName>EXE</PolicyName>\
+            <TargetUser>S-1-5-21-1-2-3-1001</TargetUser><TargetProcessId>42</TargetProcessId>\
+            <FilePath>%OSDRIVE%\\USERS\\X\\EVIL.EXE</FilePath></RuleAndFileData></UserData></Event>";
+        let (record_id, event) = normalize_applocker_block(block).expect("should parse");
+        assert_eq!(record_id, 7);
+        let Some(Event::FileOpen(open)) = event else {
+            panic!("expected a FileOpen event");
+        };
+        assert!(
+            !open.path.starts_with('%'),
+            "path variable left unexpanded: {}",
+            open.path
+        );
+        assert!(open.path.ends_with("\\USERS\\X\\EVIL.EXE"), "{}", open.path);
+        assert_eq!(open.meta.comm, "evil.exe");
+        assert_eq!(open.meta.pid, 42);
+        assert_eq!(open.flags, FLAG_APPLICATION_BLOCKED);
+        assert_eq!(
+            open.meta.user,
+            User::Windows {
+                sid: "S-1-5-21-1-2-3-1001".into(),
+                integrity_level: None,
+            }
+        );
     }
 }

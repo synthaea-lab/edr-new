@@ -9,14 +9,16 @@
 use std::net::IpAddr;
 
 use schema::{
-    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, Event,
-    EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
-    GatekeeperVerdictEvent, ImageLoadEvent, ListenPortEvent, MountEvent, NetworkFlowEvent,
-    POLICY_MECHANISM_SELINUX, PolicyDenialEvent, ReadlineInputEvent, RegistrySetEvent,
-    ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
-    SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType,
-    UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
+    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, CapSetEvent, ConnectEvent,
+    DnsQueryEvent, Event, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent,
+    FileOpenEvent, FileQuarantineEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent,
+    FileWriteEvent, GatekeeperVerdictEvent, IdentityChangeEvent, IdentityChangeKind,
+    ImageLoadEvent, KernelModuleAction, KernelModuleEvent, ListenPortEvent, MemfdCreateEvent,
+    MountEvent, NamespaceEvent, NamespaceSyscall, NetworkFlowEvent, POLICY_MECHANISM_SELINUX,
+    PolicyDenialEvent, ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent,
+    RegistrySetEvent, ScriptBlockEvent, ShellType, SignalEvent, SmbConnectEvent, SocketAcceptEvent,
+    SocketBindEvent, SocketListenEvent, TccDecisionEvent, TlsCaptureEvent, TlsDirection,
+    TlsLibraryType, UdpSendEvent, User, WmiActivityEvent, XpcConnectEvent,
     detection::{Detection, DetectionSource, ScoreAttribution, Severity},
 };
 
@@ -67,8 +69,37 @@ fn exec_unix_golden() {
             parent_image_path: None,
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         }),
         "exec",
+    );
+}
+
+#[test]
+fn exec_ld_preload_golden() {
+    // #363: the loader-hijack allowlist capture, present on the wire only when the
+    // sensor actually found one of the five security-relevant names in the process's
+    // environment at exec time.
+    assert_golden(
+        &Event::Exec(ExecEvent {
+            meta: EventMeta {
+                pid: 9001,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_007_000_000_000,
+                comm: "ls".into(),
+                container: None,
+            },
+            image_path: "/usr/bin/ls".into(),
+            cmdline: "ls -la".into(),
+            argv: ["ls", "-la"].map(String::from).into(),
+            parent_comm: None,
+            parent_image_path: None,
+            sha256: None,
+            signature: None,
+            env_security: vec![("LD_PRELOAD".into(), "/tmp/evil.so".into())],
+        }),
+        "exec_ld_preload",
     );
 }
 
@@ -94,6 +125,7 @@ fn exec_windows_golden() {
             parent_image_path: None,
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         }),
         "exec_windows",
     );
@@ -125,6 +157,7 @@ fn exec_lineage_golden() {
             ),
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         }),
         "exec_lineage",
     );
@@ -175,6 +208,7 @@ fn detection_ml_golden() {
             parent_image_path: None,
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         })],
     };
     let serialized = serde_json::to_value(&detection).unwrap();
@@ -479,6 +513,7 @@ fn exec_enriched_golden() {
             parent_image_path: None,
             sha256: Some("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".into()),
             signature: Some(schema::Signature::Unsigned),
+            env_security: Vec::new(),
         }),
         "exec_enriched",
     );
@@ -509,6 +544,7 @@ fn exec_container_golden() {
             parent_image_path: None,
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         }),
         "exec_container",
     );
@@ -1002,7 +1038,7 @@ fn socket_accept_golden() {
 
 #[test]
 fn policy_denial_golden() {
-    // v22 (#297): a SELinux AVC denial — httpd blocked (enforcing mode) from
+    // v23 (#297): a SELinux AVC denial — httpd blocked (enforcing mode) from
     // reading a file labeled for a user's home directory, the classic
     // web-shell-reading-secrets shape. `action` is absent: the AVC parser
     // doesn't yet recover the requested permission set, see the type's doc.
@@ -1028,6 +1064,210 @@ fn policy_denial_golden() {
 }
 
 #[test]
+fn kernel_module_golden() {
+    // v24 (#264): `delete_module(2)` unloading a module by name — the classic
+    // rootkit-installation/removal primitive. `fd`/`image_len` are omitted
+    // (skip_serializing_if), not null: only `finit_module`/`init_module`
+    // populate those.
+    assert_golden(
+        &Event::KernelModule(KernelModuleEvent {
+            meta: EventMeta {
+                pid: 9005,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_023_000_000_000,
+                comm: "rmmod".into(),
+                container: None,
+            },
+            action: KernelModuleAction::Unload,
+            name: Some("evil_rootkit".into()),
+            fd: None,
+            image_len: None,
+        }),
+        "kernel_module",
+    );
+}
+
+#[test]
+fn bpf_operation_golden() {
+    // v24 (#264): a filtered `bpf(2)` command — BPF_PROG_LOAD (5) here, the
+    // eBPF-based defense-evasion primitive. BPF_MAP_LOOKUP_ELEM/UPDATE_ELEM and
+    // every other command never reach this event stream (filtered in-kernel).
+    assert_golden(
+        &Event::BpfOperation(BpfEvent {
+            meta: EventMeta {
+                pid: 9006,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_024_000_000_000,
+                comm: "evil_loader".into(),
+                container: None,
+            },
+            cmd: 5, // BPF_PROG_LOAD
+        }),
+        "bpf_operation",
+    );
+}
+
+#[test]
+fn ptrace_golden() {
+    // v25 (#265): PTRACE_ATTACH against a foreign process — the classic
+    // debugger-based injection/credential-dumping pattern.
+    assert_golden(
+        &Event::Ptrace(PtraceEvent {
+            meta: EventMeta {
+                pid: 9001,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_019_000_000_000,
+                comm: "gdb".into(),
+                container: None,
+            },
+            request: 16, // PTRACE_ATTACH
+            target_pid: 4242,
+            addr: 0,
+            data: 0,
+        }),
+        "ptrace",
+    );
+}
+
+#[test]
+fn identity_change_golden() {
+    // v26 (#266): setresuid(2) dropping from root to an unprivileged uid —
+    // the "effective"/"saved" fields only apply to the SetRes* kinds.
+    assert_golden(
+        &Event::IdentityChange(IdentityChangeEvent {
+            meta: EventMeta {
+                pid: 9007,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_025_000_000_000,
+                comm: "su".into(),
+                container: None,
+            },
+            kind: IdentityChangeKind::SetResUid,
+            real: 1000,
+            effective: Some(1000),
+            saved: Some(0),
+        }),
+        "identity_change",
+    );
+}
+
+#[test]
+fn process_vm_read_golden() {
+    // v25 (#265): reading another process's memory directly — the
+    // credential-dumping/memory-scraping primitive on Linux.
+    assert_golden(
+        &Event::ProcessVmRead(ProcessVmReadEvent {
+            meta: EventMeta {
+                pid: 9002,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_020_000_000_000,
+                comm: "scraper".into(),
+                container: None,
+            },
+            target_pid: 4242,
+            local_iov_count: 1,
+            remote_iov_count: 1,
+            remote_iov_len: 4096,
+        }),
+        "process_vm_read",
+    );
+}
+
+#[test]
+fn cap_set_golden() {
+    // v26 (#266): a process granting itself CAP_SYS_ADMIN (bit 21) — the
+    // capability-abuse primitive.
+    assert_golden(
+        &Event::CapSet(CapSetEvent {
+            meta: EventMeta {
+                pid: 9008,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_026_000_000_000,
+                comm: "evil".into(),
+                container: None,
+            },
+            target_pid: 0,
+            effective: 1 << 21,
+            permitted: 1 << 21,
+            inheritable: 0,
+        }),
+        "cap_set",
+    );
+}
+
+#[test]
+fn process_vm_write_golden() {
+    // v25 (#265): writing into another process's memory — shellcode injection
+    // without ptrace's word-at-a-time POKEDATA interface.
+    assert_golden(
+        &Event::ProcessVmWrite(ProcessVmWriteEvent {
+            meta: EventMeta {
+                pid: 9003,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_021_000_000_000,
+                comm: "injector".into(),
+                container: None,
+            },
+            target_pid: 4242,
+            local_iov_count: 1,
+            remote_iov_count: 1,
+            remote_iov_len: 256,
+        }),
+        "process_vm_write",
+    );
+}
+
+#[test]
+fn memfd_create_golden() {
+    // v25 (#265): anonymous in-memory file — the fileless-execution primitive
+    // (memfd_create + write + execveat(fd, "", AT_EMPTY_PATH)).
+    assert_golden(
+        &Event::MemfdCreate(MemfdCreateEvent {
+            meta: EventMeta {
+                pid: 9004,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_022_000_000_000,
+                comm: "dropper".into(),
+                container: None,
+            },
+            name: "payload".into(),
+            flags: 1, // MFD_CLOEXEC
+        }),
+        "memfd_create",
+    );
+}
+
+#[test]
+fn namespace_golden() {
+    // v26 (#266): setns(2) joining a host network namespace from inside a
+    // container — the container-escape primitive.
+    assert_golden(
+        &Event::Namespace(NamespaceEvent {
+            meta: EventMeta {
+                pid: 9009,
+                ppid: 1,
+                user: User::Unix { uid: 0, gid: 0 },
+                timestamp_ns: 1_756_900_027_000_000_000,
+                comm: "nsenter".into(),
+                container: None,
+            },
+            syscall: NamespaceSyscall::SetNs,
+            fd: Some(3),
+            flags: 0x4000_0000, // CLONE_NEWNET
+        }),
+        "namespace",
+    );
+}
+
+#[test]
 fn unbounded_cmdline_survives() {
     // Audit F-4: multi-kilobyte encoded command lines must round-trip untouched.
     let long = format!("powershell.exe -EncodedCommand {}", "A".repeat(8 * 1024));
@@ -1047,6 +1287,7 @@ fn unbounded_cmdline_survives() {
         parent_image_path: None,
         sha256: None,
         signature: None,
+        env_security: Vec::new(),
     });
     let back: Event = serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
     match &back {
@@ -1077,6 +1318,7 @@ fn ml_cmdline_is_the_canonical_nul_joined_form() {
         parent_image_path: None,
         sha256: None,
         signature: None,
+        env_security: Vec::new(),
     };
 
     // Linux execve: argv present → NUL-joined, ignoring the space-joined `cmdline`.
@@ -1103,6 +1345,12 @@ fn ml_cmdline_is_the_canonical_nul_joined_form() {
         mk("", &["sh", "-c", "chmod +x x"]).ml_cmdline(),
         "sh\0-c\0chmod +x x\0",
     );
+    // `env_security` (#363) never reaches the ML input: the captured linker
+    // environment is rule evidence, not a model feature, and must not leak into
+    // what the scorer tokenizes (or into training data exported from it).
+    let mut preloaded = mk("ls", &["ls"]);
+    preloaded.env_security = vec![("LD_PRELOAD".into(), "/tmp/x.so".into())];
+    assert_eq!(preloaded.ml_cmdline(), "ls\0");
 }
 
 #[test]
@@ -1125,6 +1373,7 @@ fn meta_accessor_covers_all_variants() {
             parent_image_path: None,
             sha256: None,
             signature: None,
+            env_security: Vec::new(),
         }),
         Event::FileOpen(FileOpenEvent {
             meta: meta.clone(),
@@ -1321,6 +1570,37 @@ fn meta_accessor_covers_all_variants() {
             object_class: None,
             action: None,
             enforced: false,
+        }),
+        Event::KernelModule(KernelModuleEvent {
+            meta: meta.clone(),
+            action: KernelModuleAction::Load,
+            name: None,
+            fd: None,
+            image_len: None,
+        }),
+        Event::BpfOperation(BpfEvent {
+            meta: meta.clone(),
+            cmd: 0,
+        }),
+        Event::IdentityChange(IdentityChangeEvent {
+            meta: meta.clone(),
+            kind: IdentityChangeKind::SetUid,
+            real: 0,
+            effective: None,
+            saved: None,
+        }),
+        Event::CapSet(CapSetEvent {
+            meta: meta.clone(),
+            target_pid: 0,
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }),
+        Event::Namespace(NamespaceEvent {
+            meta: meta.clone(),
+            syscall: NamespaceSyscall::Unshare,
+            fd: None,
+            flags: 0,
         }),
     ];
     for e in &events {

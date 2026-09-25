@@ -54,12 +54,18 @@ from synthaea_ml.data.manifest import (
     verify_manifest,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Bumped only when a field changes in a way that breaks readers.
 
 Bumped 1 → 2 in ADR-0009 for the addition of ``scenario_replays`` on
 ``TrainingRecord`` and the rename of the on-disk file to
 ``model_record.json``.
+
+Bumped 2 → 3 for issues #45 and #46: added ``robustness_cards`` (adversarial
+evaluation results binding mutations to model versions for evasion cost
+measurement), ``conformal_calibration``, and ``feature_bounds`` (FP-budget
+thresholds and OOD guards). Backward compatible (optional fields with None
+defaults).
 """
 
 MODEL_RECORD_FILENAME = "model_record.json"
@@ -81,6 +87,39 @@ class DatasetVersion:
     name: str
     baseline_sha256: str
     sample_count: int
+
+
+# ── Conformal calibration binding (issue #46, schema v3) ────────────────────
+
+
+@dataclass(frozen=True)
+class ConformalCalibration:
+    """Conformal prediction calibration metadata (issue #46).
+
+    Records the threshold computed from a calibration set to meet a stated FP
+    budget (e.g., ≤5 false positives per endpoint per day). See
+    ``synthaea_ml.calibration.calibrate_conformal`` for the computation.
+    """
+
+    fp_budget_per_endpoint_day: float
+    threshold: float
+    calibration_set_size: int
+    benign_baseline_rate: float
+    calibrated_at: str  # ISO 8601 UTC
+
+
+@dataclass(frozen=True)
+class FeatureBounds:
+    """Per-feature [min, max] bounds for out-of-distribution detection (issue #46).
+
+    Computed from the training set with a margin to avoid false OOD rejections
+    on legitimate edge cases. The Rust scorer validates feature vectors against
+    these bounds before inference.
+    """
+
+    feature_names: list[str]
+    min_values: list[float]
+    max_values: list[float]
 
 
 # ── Scenario replay binding (ADR-0009, schema v2) ───────────────────────────
@@ -178,23 +217,32 @@ class TrainingRecord:
     training_script: str
     dataset_versions: list[DatasetVersion]
     scenario_replays: list[ScenarioReplayResult] = field(default_factory=list)
+    robustness_cards: list[RobustnessCard] = field(default_factory=list)
     hyperparameters: dict[str, object] = field(default_factory=dict)
     extra: dict[str, str] = field(default_factory=dict)
+    conformal_calibration: ConformalCalibration | None = None
+    feature_bounds: FeatureBounds | None = None
 
     def to_dict(self) -> dict[str, object]:
         """Deterministic dict serialisation. Uses explicit per-field packing
         so a nested frozen dataclass with mutable-typed fields (list, dict)
         cannot leak a dataclass-internal representation into the JSON.
         """
-        return {
+        result: dict[str, object] = {
             "schema_version": self.schema_version,
             "trained_at": self.trained_at,
             "training_script": self.training_script,
             "dataset_versions": [asdict(v) for v in self.dataset_versions],
             "scenario_replays": [_scenario_replay_to_dict(r) for r in self.scenario_replays],
+            "robustness_cards": [_robustness_card_to_dict(c) for c in self.robustness_cards],
             "hyperparameters": dict(self.hyperparameters),
             "extra": dict(self.extra),
         }
+        if self.conformal_calibration is not None:
+            result["conformal_calibration"] = asdict(self.conformal_calibration)
+        if self.feature_bounds is not None:
+            result["feature_bounds"] = asdict(self.feature_bounds)
+        return result
 
 
 def _scenario_replay_to_dict(r: ScenarioReplayResult) -> dict[str, object]:
@@ -225,6 +273,76 @@ def _scenario_replay_from_dict(d: dict[str, object]) -> ScenarioReplayResult:
         observed_detections=[ObservedDetection(**o) for o in d["observed_detections"]],  # type: ignore[arg-type,union-attr]
         passed=d["passed"],  # type: ignore[arg-type]
     )
+
+
+def _robustness_card_to_dict(c: RobustnessCard) -> dict[str, object]:
+    """Explicit serialisation for a ``RobustnessCard`` so nested
+    ``MutationTestResult`` dataclasses round-trip as plain dicts."""
+    return {
+        "scenario_name": c.scenario_name,
+        "scenario_yaml_sha256": c.scenario_yaml_sha256,
+        "tested_at": c.tested_at,
+        "mutation_results": [asdict(m) for m in c.mutation_results],
+        "escape_rate": c.escape_rate,
+        "median_score_degradation": c.median_score_degradation,
+        "worst_case_degradation": c.worst_case_degradation,
+    }
+
+
+def _robustness_card_from_dict(d: dict[str, object]) -> RobustnessCard:
+    """Inverse of ``_robustness_card_to_dict`` — round-trips a JSON-decoded
+    dict back into the nested-dataclass form."""
+    return RobustnessCard(
+        scenario_name=d["scenario_name"],  # type: ignore[arg-type]
+        scenario_yaml_sha256=d["scenario_yaml_sha256"],  # type: ignore[arg-type]
+        tested_at=d["tested_at"],  # type: ignore[arg-type]
+        mutation_results=[MutationTestResult(**m) for m in d["mutation_results"]],  # type: ignore[arg-type,union-attr]
+        escape_rate=d["escape_rate"],  # type: ignore[arg-type]
+        median_score_degradation=d["median_score_degradation"],  # type: ignore[arg-type]
+        worst_case_degradation=d["worst_case_degradation"],  # type: ignore[arg-type]
+    )
+
+
+# ── Passing criterion (ADR-0009 § Passing criterion) ────────────────────────
+
+
+@dataclass(frozen=True)
+class MutationTestResult:
+    """One mutation test outcome (original vs mutated score).
+
+    Emitted by the robustness evaluation runner for each combination of
+    (mutator class, intensity, sample). Tracks whether the mutation caused
+    evasion (score drop below threshold).
+    """
+
+    mutation_class: str
+    intensity: str
+    original_score: float
+    mutated_score: float
+    score_delta: float
+    threshold: float
+    escaped: bool
+    seed: int
+
+
+@dataclass(frozen=True)
+class RobustnessCard:
+    """Adversarial evaluation results for one scenario against one model.
+
+    Binds to the source ``lab/scenarios/<scenario_name>.yaml`` by content
+    hash, parallel to ``ScenarioReplayResult``. Captures aggregate metrics
+    (escape rate, degradation percentiles) alongside per-mutation details.
+
+    Generated by ``synthaea_ml.evaluation.robustness.run_robustness_evaluation``.
+    """
+
+    scenario_name: str
+    scenario_yaml_sha256: str
+    tested_at: str  # ISO 8601 UTC, e.g. "2026-09-23T10:15:00Z"
+    mutation_results: list[MutationTestResult]
+    escape_rate: float
+    median_score_degradation: float
+    worst_case_degradation: float
 
 
 # ── Passing criterion (ADR-0009 § Passing criterion) ────────────────────────
@@ -343,9 +461,12 @@ def write_training_record(
     training_script: str,
     dataset_versions: list[DatasetVersion],
     scenario_replays: list[ScenarioReplayResult] | None = None,
+    robustness_cards: list[RobustnessCard] | None = None,
     hyperparameters: dict[str, object] | None = None,
     trained_at: datetime | None = None,
     extra: dict[str, str] | None = None,
+    conformal_calibration: ConformalCalibration | None = None,
+    feature_bounds: FeatureBounds | None = None,
 ) -> TrainingRecord:
     """Write ``model_dir/model_record.json``.
 
@@ -364,12 +485,21 @@ def write_training_record(
             one shot. Empty list is legal (a model without replay validation
             is a model that will not ship under the strict release gate — a
             fact captured by ``verify_provenance``, not here).
+        robustness_cards: Zero or more adversarial evaluation outcomes to bind
+            to this model version. Each is produced by the robustness evaluation
+            runner which fills the yaml hash and aggregated metrics. Empty list
+            is legal (a model without robustness testing may not ship under
+            strict release gate).
         hyperparameters: The knobs the run was configured with. Not
             interpreted here — round-trip only.
         trained_at: Timezone-aware datetime, normalised to UTC. Defaults
             to ``datetime.now(UTC)``.
         extra: Optional ``str`` → ``str`` metadata, namespaced under ``extra``
             so a future typed field cannot collide.
+        conformal_calibration: Optional conformal prediction calibration metadata
+            (issue #46). See ``synthaea_ml.calibration.calibrate_conformal``.
+        feature_bounds: Optional per-feature bounds for OOD detection (issue #46).
+            See ``synthaea_ml.calibration.compute_feature_bounds``.
 
     Returns:
         The ``TrainingRecord`` that was just written.
@@ -394,8 +524,11 @@ def write_training_record(
         training_script=training_script,
         dataset_versions=list(dataset_versions),
         scenario_replays=list(scenario_replays) if scenario_replays else [],
+        robustness_cards=list(robustness_cards) if robustness_cards else [],
         hyperparameters=dict(hyperparameters) if hyperparameters else {},
         extra=dict(extra) if extra else {},
+        conformal_calibration=conformal_calibration,
+        feature_bounds=feature_bounds,
     )
 
     (model_dir / MODEL_RECORD_FILENAME).write_text(
@@ -418,11 +551,22 @@ def load_training_record(model_dir: Path) -> TrainingRecord:
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     schema_version = payload.get("schema_version")
-    if schema_version != SCHEMA_VERSION:
+    # Accept v2 and v3: robustness_cards (v3) is additive with default=[],
+    # so v2 records load cleanly (PR #405 review fix)
+    if schema_version not in (2, SCHEMA_VERSION):
         raise ValueError(
             f"unsupported {MODEL_RECORD_FILENAME} schema_version: {schema_version!r} "
-            f"(this reader knows {SCHEMA_VERSION})"
+            f"(this reader knows 2 and {SCHEMA_VERSION})"
         )
+
+    # Schema v3 fields (backward compatible: None if absent)
+    conformal_cal = None
+    if "conformal_calibration" in payload:
+        conformal_cal = ConformalCalibration(**payload["conformal_calibration"])  # type: ignore[arg-type]
+
+    feature_bounds = None
+    if "feature_bounds" in payload:
+        feature_bounds = FeatureBounds(**payload["feature_bounds"])  # type: ignore[arg-type]
 
     return TrainingRecord(
         schema_version=schema_version,
@@ -432,8 +576,13 @@ def load_training_record(model_dir: Path) -> TrainingRecord:
         scenario_replays=[
             _scenario_replay_from_dict(r) for r in payload.get("scenario_replays", [])
         ],
+        robustness_cards=[
+            _robustness_card_from_dict(c) for c in payload.get("robustness_cards", [])
+        ],
         hyperparameters=dict(payload.get("hyperparameters", {})),
         extra=dict(payload.get("extra", {})),
+        conformal_calibration=conformal_cal,
+        feature_bounds=feature_bounds,
     )
 
 

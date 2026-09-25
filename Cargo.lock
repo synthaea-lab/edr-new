@@ -28,7 +28,9 @@ dependencies = [
  "correlator",
  "ctrlc",
  "enrich",
+ "ipc",
  "libc",
+ "ml",
  "policy",
  "response",
  "rules",
@@ -51,9 +53,11 @@ dependencies = [
  "sinks",
  "store",
  "tamper",
+ "tokio",
  "tracing",
  "tracing-subscriber",
  "transport",
+ "updater",
  "yara",
 ]
 
@@ -1655,6 +1659,7 @@ dependencies = [
  "correlator",
  "ort",
  "schema",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
 ]
@@ -2433,6 +2438,7 @@ version = "0.1.0"
 dependencies = [
  "schema",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

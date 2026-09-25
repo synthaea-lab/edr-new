@@ -3,7 +3,7 @@
 //! Linux the sensor handles it itself).
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, Ordering},
 };
 
@@ -11,6 +11,22 @@ use schema::{
     Event,
     sensor::{EventSink, Sensor as _},
 };
+use tamper::heartbeat::{SensorHeartbeat, SilenceMonitor};
+
+use crate::silence::{PulsingSink, SilenceHealthSource};
+
+/// Silence deadline (#71/#388) for the ETW sensor, pulsed on every event it
+/// forwards. ETW is the high-volume sensor (process, file, registry, DNS...),
+/// so two minutes without a single event is not an idle host. Its own
+/// in-sensor canary (audit F-2) already fails the trace after 30s of total
+/// silence; this is the agent-level, alerting counterpart.
+const ETW_SILENCE_DEADLINE_NS: u64 = 120_000_000_000; // 120s
+
+/// Silence deadline for each Event Log poll target. These pulse on every
+/// *successful* poll tick (`POLL_INTERVAL` = 2s in the sensor), not per event,
+/// so a quiet channel stays live; 60s is ~30 consecutive failed ticks, generous
+/// for a `wevtutil` process spawn per tick.
+const EVENTLOG_SILENCE_DEADLINE_NS: u64 = 60_000_000_000; // 60s
 
 /// Windows equivalent: pid → comm via `tasklist` (carried over from the old agent —
 /// no extra API surface; the sensor keeps its own richer store independently).
@@ -44,6 +60,9 @@ fn seeded_rule_state() -> rules::RuleState {
         }
         Err(e) => tracing::warn!(error = %e, "socket snapshot for listener baseline failed"),
     }
+    // Issue #403: without this, the Event Log sensor's own wevtutil.exe/auditpol.exe
+    // poll-loop children trip SELF-SPAWN on the agent itself.
+    rule_state.seed_own_pid(std::process::id());
     rule_state
 }
 
@@ -101,6 +120,13 @@ impl EventSink for SharedSink {
 /// them. See `docs/adr/0006-eventlog-channel-allowlist-and-volume-counters.md`.
 fn eventlog_config(policy: &policy::EventLogPolicy) -> sensor_windows_eventlog::EventLogConfig {
     sensor_windows_eventlog::EventLogConfig {
+        // Not yet policy-configurable (issue #322 v1): the transport defaults
+        // to Polling — the pre-#322 behavior — so a version bump does not
+        // silently change delivery mechanism on any host. A follow-up (same
+        // ADR-0006 cross-crate rewiring as the per-channel toggles) will
+        // surface `transport` through `policy::EventLogPolicy` for host-by-host
+        // rollout of `Subscribe`.
+        transport: sensor_windows_eventlog::EventLogTransport::Polling,
         service_installs_enabled: policy.service_installs_enabled,
         scheduled_tasks_enabled: policy.scheduled_tasks_enabled,
         account_creations_enabled: policy.account_creations_enabled,
@@ -157,7 +183,13 @@ fn hold_after_primary(
 /// down process/network/file detection with it. The converse also holds — an ETW
 /// failure degrades the run to the supplementary sensors instead of ending it
 /// (see [`hold_after_primary`]); the ETW error is still the run's exit result.
-fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
+///
+/// `silence`: when given (`agent run`, not the `capture-*` commands), each
+/// sensor's heartbeat is registered on it — see [`register_heartbeats`].
+fn run_windows_sensors(
+    sink: Box<dyn EventSink>,
+    silence: Option<&Mutex<SilenceMonitor>>,
+) -> anyhow::Result<()> {
     let sink: Arc<dyn EventSink> = Arc::from(sink);
 
     let mut etw_sensor = sensor_windows::WindowsSensor::new();
@@ -172,6 +204,11 @@ fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
     let mut eventlog_sensor =
         sensor_windows_eventlog::EventLogSensor::with_config(eventlog_config(&eventlog_policy));
     let eventlog_stop = eventlog_sensor.stop_handle();
+
+    // Registered before the ETW session starts (#388): if ETW fails straight
+    // away, `hold_after_primary` keeps the run alive and the never-pulsed
+    // `windows-etw` heartbeat turns into a T1562 silence alert.
+    let etw_heartbeat = silence.map(|monitor| register_heartbeats(monitor, &eventlog_sensor));
 
     // Set by Ctrl-C only; also the socket poller's stop flag.
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -200,10 +237,14 @@ fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
         std::thread::spawn(move || eventlog_sensor.run(Box::new(SharedSink(sink))))
     };
 
+    let etw_sink: Box<dyn EventSink> = match etw_heartbeat {
+        Some(heartbeat) => Box::new(PulsingSink::new(SharedSink(sink), heartbeat)),
+        None => Box::new(SharedSink(sink)),
+    };
     let etw_result = hold_after_primary(
         || {
             etw_sensor
-                .run(Box::new(SharedSink(sink)))
+                .run(etw_sink)
                 .map_err(|e| anyhow::anyhow!("ETW sensor failed: {e}"))
         },
         &shutdown,
@@ -235,6 +276,32 @@ fn run_windows_sensors(sink: Box<dyn EventSink>) -> anyhow::Result<()> {
     etw_result
 }
 
+/// Registers the Windows sensors on the silence monitor (#71/#388) and returns
+/// the ETW heartbeat for the caller to pulse. ETW is pulsed per forwarded event
+/// (`PulsingSink`); each *enabled* Event Log target has its own heartbeat, fed
+/// by the sensor's per-target liveness counter — pulsed per successful poll,
+/// so a quiet channel is not mistaken for a blinded one, and one target that
+/// stops answering (e.g. Security access denied) is not masked by the others.
+fn register_heartbeats(
+    monitor: &Mutex<SilenceMonitor>,
+    eventlog: &sensor_windows_eventlog::EventLogSensor,
+) -> SensorHeartbeat {
+    let etw = SensorHeartbeat::new("windows-etw");
+    let now_ns = schema::time::now_ns();
+    let mut monitor = monitor
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    monitor.register(etw.clone(), ETW_SILENCE_DEADLINE_NS, now_ns);
+    for (name, counter) in eventlog.liveness() {
+        monitor.register(
+            SensorHeartbeat::from_counter(name, counter),
+            EVENTLOG_SILENCE_DEADLINE_NS,
+            now_ns,
+        );
+    }
+    etw
+}
+
 /// Windows: administrator privileges are required by the ETW kernel providers.
 pub(crate) fn cmd_status() -> anyhow::Result<()> {
     println!("Synthaea agent — platform: Windows");
@@ -254,7 +321,7 @@ pub(crate) fn cmd_status() -> anyhow::Result<()> {
 /// fully inactive on Windows regardless of these flags. `enable_tls_capture`/
 /// `enable_readline_capture` (issue #90) are Linux-uprobe-specific — ETW would need
 /// its own, unrelated mechanism — so they're accepted for parity only, same as the
-/// response flags.
+/// response flags. `enable_dns_capture` (issue #267) is the same story.
 pub(crate) fn cmd_run(opts: super::RunOptions) -> anyhow::Result<()> {
     let super::RunOptions {
         alerts,
@@ -266,24 +333,45 @@ pub(crate) fn cmd_run(opts: super::RunOptions) -> anyhow::Result<()> {
         // parity and inert here, same as the response flags above.
         enable_tls_capture: _,
         enable_readline_capture: _,
+        enable_dns_capture: _,
         server,
+        ipc_endpoint,
     } = opts;
-    let pipeline = super::common::wire_run_pipeline(seeded_rule_state(), alerts, events, server)?;
-    run_windows_sensors(Box::new(SharedSink(pipeline.sink)))
+    let pipeline = super::common::wire_run_pipeline(
+        seeded_rule_state(),
+        alerts,
+        events,
+        server,
+        ipc_endpoint,
+    )?;
+
+    // Sensor-silence detection (#71/#388): the same monitor feeds T1562
+    // alerts and `cli health`. Heartbeats are registered once the sensors are
+    // built (`run_windows_sensors`); the monitor thread polls an empty list
+    // until then, which is harmless.
+    let silence_monitor = Arc::new(Mutex::new(SilenceMonitor::new()));
+    let _ = pipeline
+        .sensor_health
+        .set(Arc::new(SilenceHealthSource::new(Arc::clone(
+            &silence_monitor,
+        ))));
+    crate::silence::spawn_monitor(Arc::clone(&silence_monitor), Arc::clone(&pipeline.sink));
+
+    run_windows_sensors(Box::new(SharedSink(pipeline.sink)), Some(&silence_monitor))
 }
 
 pub(crate) fn cmd_capture_events(output: &std::path::Path) -> anyhow::Result<()> {
     let sink = sinks::JsonlEventSink::open(output)?;
     eprintln!("Synthaea — raw event capture (Ctrl-C to stop)");
     eprintln!("Output: {}", output.display());
-    run_windows_sensors(Box::new(sink))
+    run_windows_sensors(Box::new(sink), None)
 }
 
 pub(crate) fn cmd_capture_baseline(output: &std::path::Path) -> anyhow::Result<()> {
     let sink = crate::sink::BaselineSink::new(seeded_rule_state(), output)?;
     eprintln!("Synthaea — baseline capture (Ctrl-C to stop)");
     eprintln!("Output: {}", output.display());
-    run_windows_sensors(Box::new(sink))
+    run_windows_sensors(Box::new(sink), None)
 }
 
 #[cfg(test)]

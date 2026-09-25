@@ -14,9 +14,12 @@ use std::{
 
 use policy::ResponsePolicy;
 use schema::{Event, sensor::EventSink};
-use sinks::{AlertRecord, JsonlWriter};
+use sinks::JsonlWriter;
 
-use crate::enrich_queue::EnrichQueue;
+use crate::{
+    alerts::{AlertLog, RECENT_ALERTS_CAPACITY},
+    enrich_queue::EnrichQueue,
+};
 
 /// Wires issue #25's automated response into the sink once `enable_response` sets it
 /// (Linux only for this pass — see `commands::linux::cmd_run`). Held behind
@@ -40,12 +43,19 @@ struct ResponseHooks {
 pub(crate) struct DetectionSink {
     rule_state: Mutex<rules::RuleState>,
     correlator: Mutex<correlator::CorrelationEngine>,
+    /// ML correlation scorer (issue #46 Phase 3, #47 Phase 2): scores behavior over
+    /// the correlator window and feeds the Bayesian belief state. `None` when the
+    /// model is unavailable (missing registry, load error) — the agent works without
+    /// ML (hand-calibrated features still function).
+    ml_scorer: Mutex<Option<ml::CorrelationScorer>>,
     /// Sigma rules from `rules/sigma` (next to the agent executable, falling back
     /// to the working directory) when the folder exists — otherwise the agent runs without a Sigma engine, and that is
     /// not an error (the load failure path IS an error: content present but broken).
     sigma: Option<sigma::SigmaEngine>,
-    /// One alert per line in alerts.ndjson (shared with the YARA scan worker).
-    alert_log: Arc<JsonlWriter>,
+    /// The single alert funnel (issue #388): alerts.ndjson + stderr + the
+    /// in-memory recent-alerts buffer served to `cli detections`. Shared with
+    /// the YARA scan worker and quarantine.
+    alert_log: Arc<AlertLog>,
     /// Budgeted background content scanning; `None` when rules/yara is absent.
     yara: Option<yara::ScanQueue>,
     /// Enrichment (hash + signature) and the high-volume raw-event logging, off the
@@ -73,7 +83,7 @@ impl DetectionSink {
         events_path: &std::path::Path,
         spool: Option<Arc<Mutex<store::EventSpool>>>,
     ) -> std::io::Result<Self> {
-        let alert_log = Arc::new(JsonlWriter::open(alerts_path)?);
+        let alert_log = Arc::new(AlertLog::open(alerts_path, RECENT_ALERTS_CAPACITY)?);
         // The raw event log is written by the enrichment worker, not the drain
         // thread — shared behind an Arc so the worker owns a handle. The spool
         // append rides the same worker for the same #126 reason: it is file
@@ -93,6 +103,7 @@ impl DetectionSink {
         Ok(Self {
             rule_state: Mutex::new(rule_state),
             correlator: Mutex::new(correlator::CorrelationEngine::new()),
+            ml_scorer: Mutex::new(Self::load_correlation_scorer()),
             sigma: load_sigma_rules(),
             yara: start_yara(alert_log.clone(), response.clone()),
             alert_log,
@@ -100,6 +111,58 @@ impl DetectionSink {
             progress: Arc::new(AtomicU64::new(0)),
             response,
         })
+    }
+
+    /// Loads the ML correlation scorer from the registry (issue #46 Phase 3, #47 Phase 2).
+    ///
+    /// Returns `None` when the model is unavailable (missing directory, load error) —
+    /// the agent works without ML (hand-calibrated Bayesian features still function).
+    /// Logs a warning on load failure so the operator sees the degradation.
+    ///
+    /// Model location: `ml/registry/correlation-iforest-{linux,windows}/0.1.0/`
+    /// next to the agent binary (or in the current working directory as fallback).
+    fn load_correlation_scorer() -> Option<ml::CorrelationScorer> {
+        /// Platform-specific model family names.
+        #[cfg(target_os = "linux")]
+        const MODEL_FAMILY: &str = "correlation-iforest-linux";
+        #[cfg(target_os = "windows")]
+        const MODEL_FAMILY: &str = "correlation-iforest-windows";
+        #[cfg(target_os = "macos")]
+        const MODEL_FAMILY: &str = "correlation-iforest-macos";
+
+        let model_dir = std::path::Path::new("ml/registry")
+            .join(MODEL_FAMILY)
+            .join("0.1.0");
+
+        match Self::try_load_scorer(&model_dir) {
+            Ok(scorer) => {
+                tracing::info!(
+                    model_dir = %model_dir.display(),
+                    "ML correlation scorer loaded"
+                );
+                Some(scorer)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    model_dir = %model_dir.display(),
+                    error = %e,
+                    "ML correlation scorer unavailable — agent works without ML"
+                );
+                None
+            }
+        }
+    }
+
+    fn try_load_scorer(
+        model_dir: &std::path::Path,
+    ) -> Result<ml::CorrelationScorer, Box<dyn std::error::Error>> {
+        let model_bytes = std::fs::read(model_dir.join("model.onnx"))?;
+        let meta_bytes = std::fs::read(model_dir.join("model_metadata.json")).ok();
+
+        Ok(ml::CorrelationScorer::from_onnx_bytes_with_metadata(
+            &model_bytes,
+            meta_bytes.as_deref(),
+        )?)
     }
 
     /// Activates issue #25's automated response — process kill on a high-confidence
@@ -145,14 +208,70 @@ impl DetectionSink {
     /// see `correlator::bayes`); the co-occurrence rules carry no confidence field.
     /// Issue #131 (verdict fusion) will give this a principled score to key off
     /// instead of a technique-name check.
+    ///
+    /// ML correlation scorer (issue #46 Phase 3, #47 Phase 2): if available, scores
+    /// the pid's behavior over the correlator window and updates the belief state with
+    /// the resulting log-likelihood ratio. Scoring happens in the correlator lock —
+    /// ONNX inference is fast (~microseconds) and the capture thread is single-threaded.
     fn correlate(&self, event: &Event) {
-        let alerts = self.correlator.lock().unwrap().on_event(event.clone());
+        let mut engine = self.correlator.lock().unwrap();
+        let alerts = engine.on_event(event.clone());
+
+        // ML scoring: score the pid's behavior and update belief with the LLR.
+        // The scorer lock is held briefly (load Option, score if present). Scoring
+        // itself accesses the bus while still holding the correlator lock, which is
+        // acceptable — inference is fast and this is the capture thread.
+        let pid = event.meta().pid;
+        if let Some(ref mut scorer) = *self.ml_scorer.lock().unwrap() {
+            let ml_llr = match scorer.score(engine.bus(), pid) {
+                Ok(Some(score)) => {
+                    // Scored successfully: convert to log-likelihood ratio.
+                    Some(ml::score_to_llr(score))
+                }
+                Ok(None) => {
+                    // Gated: fewer than MIN_EVENT_COUNT events in the window for this pid.
+                    // No score available yet, not an error.
+                    None
+                }
+                Err(ml::ScorerError::FeatureOutOfBounds {
+                    feature,
+                    value,
+                    min,
+                    max,
+                }) => {
+                    // OOD rejection: feature value outside training bounds, score unreliable.
+                    tracing::warn!(
+                        pid = pid,
+                        feature = feature,
+                        value = value,
+                        min = min,
+                        max = max,
+                        "ML scorer OOD rejection"
+                    );
+                    None
+                }
+                Err(e) => {
+                    // Other error (ONNX runtime, model parse): fail open, log and continue.
+                    tracing::error!(pid = pid, error = %e, "ML scorer error");
+                    None
+                }
+            };
+
+            // Update belief with the ML LLR (None = no ML evidence, not "benign").
+            if let Err(()) = engine.update_belief_with_ml(pid, ml_llr) {
+                // No behavior vector available yet for this pid — not enough events.
+                // Silent: this is normal for the first few events of a new pid.
+            }
+        }
+
+        // Emit alerts from co-occurrence rules and Bayesian belief.
         let is_high_confidence = alerts.iter().any(|alert| alert.technique == "BAYES");
+        drop(engine); // Unlock correlator before alert emission (log I/O).
         for alert in &alerts {
             self.emit(alert.technique, &alert.message);
         }
         if is_high_confidence {
-            self.maybe_kill(event.meta().pid);
+            self.maybe_kill(pid);
         }
     }
 
@@ -252,20 +371,25 @@ impl DetectionSink {
         }
     }
 
+    /// `Signal` events: security-process tampering (T1562.001, issue #362).
+    fn detect_signal(&self, event: &schema::SignalEvent) {
+        for alert in rules::evaluate_signal(event) {
+            self.emit(alert.technique, &alert.message);
+        }
+    }
+
     /// Writes one alert to the shared log and highlighted stderr. `pub(crate)`
     /// rather than private: `silence::spawn_monitor` (#71) emits a sensor-silence
     /// verdict through the exact same path as a rule/correlator/Sigma finding —
     /// one alert shape, whatever detected it.
     pub(crate) fn emit(&self, technique: &str, message: &str) {
-        // Alerts go to stderr (stdout carries nothing in run mode; the raw stream
-        // lives in events.jsonl) and are highlighted — an alert must not get lost in
-        // terminal noise.
-        eprintln!("\x1b[1;31m[ALERT] {technique} — {message}\x1b[0m");
-        self.alert_log.write(&AlertRecord {
-            timestamp_ns: schema::time::now_ns(),
-            technique: technique.to_string(),
-            message: message.to_string(),
-        });
+        self.alert_log.record(technique, message.to_string());
+    }
+
+    /// Handle to the alert funnel, for the IPC handler's `recent_detections`
+    /// endpoint (issue #388).
+    pub(crate) fn alert_log(&self) -> Arc<AlertLog> {
+        Arc::clone(&self.alert_log)
     }
 }
 
@@ -307,7 +431,7 @@ fn load_sigma_rules() -> Option<sigma::SigmaEngine> {
 /// trigger quarantine of the matched file through `response`, whenever
 /// `enable_response` set it.
 fn start_yara(
-    alert_log: Arc<JsonlWriter>,
+    alert_log: Arc<AlertLog>,
     response: Arc<Mutex<Option<ResponseHooks>>>,
 ) -> Option<yara::ScanQueue> {
     let dir = content_dir("rules/yara")?;
@@ -318,12 +442,7 @@ fn start_yara(
                 let matched = !outcome.matches.is_empty();
                 for rule in &outcome.matches {
                     let message = format!("yara rule {rule} matched {}", outcome.path.display());
-                    eprintln!("\x1b[1;31m[ALERT] YARA — {message}\x1b[0m");
-                    alert_log.write(&AlertRecord {
-                        timestamp_ns: schema::time::now_ns(),
-                        technique: "YARA".to_string(),
-                        message,
-                    });
+                    alert_log.record("YARA", message);
                 }
                 if matched {
                     quarantine_matched_payload(&response, &outcome.path, &alert_log);
@@ -342,7 +461,7 @@ fn start_yara(
 fn quarantine_matched_payload(
     response: &Mutex<Option<ResponseHooks>>,
     path: &std::path::Path,
-    alert_log: &JsonlWriter,
+    alert_log: &AlertLog,
 ) {
     let guard = response.lock().unwrap();
     let Some(hooks) = guard.as_ref() else {
@@ -379,12 +498,7 @@ fn quarantine_matched_payload(
             )
         }
     };
-    eprintln!("\x1b[1;31m[ALERT] RESPONSE-QUARANTINE — {message}\x1b[0m");
-    alert_log.write(&AlertRecord {
-        timestamp_ns: schema::time::now_ns(),
-        technique: "RESPONSE-QUARANTINE".to_string(),
-        message,
-    });
+    alert_log.record("RESPONSE-QUARANTINE", message);
 }
 
 impl EventSink for DetectionSink {
@@ -400,6 +514,7 @@ impl EventSink for DetectionSink {
             Event::ListenPort(e) => self.detect_listen_port(e),
             Event::Auth(e) => self.detect_auth(e),
             Event::FileDelete(e) => self.detect_file_delete(e),
+            Event::Signal(e) => self.detect_signal(e),
             // New telemetry categories reach the engines as they land; until a rule
             // consumes them, logging below is the whole treatment.
             _ => {}

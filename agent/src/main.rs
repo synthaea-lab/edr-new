@@ -16,6 +16,11 @@
 //! `kill_loudness` attributes who sent a catchable termination signal before the
 //! agent actually dies (#71).
 
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    allow(dead_code)
+)]
+mod alerts;
 mod commands;
 mod enrich_queue;
 mod health;
@@ -31,6 +36,11 @@ mod heartbeat;
 // cross-platform body here to keep alive with an `allow(dead_code)`.
 #[cfg(target_os = "linux")]
 mod integrity;
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "macos", windows)),
+    allow(dead_code)
+)]
+mod ipc_handler;
 #[cfg(target_os = "linux")]
 mod journal_cursor;
 #[cfg(target_os = "linux")]
@@ -97,6 +107,12 @@ enum Command {
         /// by default, redacted. Linux only.
         #[arg(long)]
         enable_readline_capture: bool,
+        /// Enables DNS resolution capture via a `getaddrinfo(3)` uprobe (issue
+        /// #267 Phase 1): query name + first resolved address, for DNS-based
+        /// C2/tunneling/exfiltration visibility. Off by default, sensitive TLDs
+        /// redacted. Linux only.
+        #[arg(long)]
+        enable_dns_capture: bool,
         /// Control-plane base URL (e.g. `https://api.synthaea.example.com`).
         /// When set, every normalized event is spooled next to the alerts file
         /// and uploaded store-and-forward (at-least-once; the spool sheds
@@ -161,6 +177,7 @@ fn main() -> anyhow::Result<()> {
             enable_quarantine,
             enable_tls_capture,
             enable_readline_capture,
+            enable_dns_capture,
             server,
         } => commands::cmd_run(commands::RunOptions {
             alerts: &alerts,
@@ -170,7 +187,9 @@ fn main() -> anyhow::Result<()> {
             enable_quarantine,
             enable_tls_capture,
             enable_readline_capture,
+            enable_dns_capture,
             server: server.as_deref(),
+            ipc_endpoint: &cfg.ipc.endpoint,
         }),
         Command::CaptureBaseline { output } => commands::cmd_capture_baseline(&output),
         Command::CaptureEvents { output } => commands::cmd_capture_events(&output),

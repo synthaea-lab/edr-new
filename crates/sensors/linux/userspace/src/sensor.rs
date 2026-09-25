@@ -9,6 +9,7 @@
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use schema::sensor::{Capabilities, EventSink, Sensor, SensorError};
@@ -17,9 +18,12 @@ use tracing::warn;
 
 use crate::{
     container::{CgroupIdCache, DockerInfoCache, container_context},
-    ebpf::{TRACEPOINTS, attach_tracepoint, err, load_ebpf, prime_proc_lineage},
+    ebpf::{
+        TRACEPOINTS, TamperSlot, attach_tracepoint, clear_tamper_slot, err, load_ebpf_for_run,
+        prime_proc_lineage, read_tamper_slot, take_tamper_slot, write_signal_watch_pid,
+    },
     normalize,
-    proc::read_proc_cmdline,
+    proc::{read_proc_cmdline, read_proc_environ_security},
 };
 
 /// See `sensor_linux_wire::boot_epoch_offset_ns` — computed once at startup.
@@ -28,6 +32,39 @@ use crate::{
 /// again, the same thing happened again.)
 fn boot_epoch_offset_ns() -> u64 {
     sensor_linux_wire::boot_epoch_offset_ns()
+}
+
+/// How often [`sweep_survived_sigkill`] runs.
+const TAMPER_SWEEP_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Age past which a `SIGKILL` recorded against this very process is known not to
+/// have landed. Delivery happens within the sender's `kill(2)` call, microseconds
+/// after the probe fires, so a live agent one second later survived it.
+const SIGKILL_SURVIVED_AFTER_NS: u64 = 1_000_000_000;
+
+/// Clears `SIGNAL_TAMPER_LAST` when it holds a `SIGKILL` aimed at this process
+/// that the process survived (issue #362). The probe fires at syscall entry,
+/// before the permission check, so an unprivileged `kill -9` that fails with
+/// `EPERM` still fills the slot. Left there, the next restart (a clean
+/// `systemctl restart` included) would blame that sender for a kill that never
+/// happened. The live `Event::Signal` from the ring buffer already reported the
+/// attempt itself. Waiting [`SIGKILL_SURVIVED_AFTER_NS`] rather than clearing on
+/// that ring-buffer event keeps a real kill from racing its own record away.
+fn sweep_survived_sigkill(slot: &mut TamperSlot, own_pid: u32, boot_epoch_offset_ns: u64) {
+    let Some(recorded) = read_tamper_slot(slot) else {
+        return;
+    };
+    let recorded_at = recorded
+        .meta
+        .timestamp_ns
+        .saturating_add(boot_epoch_offset_ns);
+    let age = schema::time::now_ns().saturating_sub(recorded_at);
+    if recorded.target_pid == own_pid
+        && age > SIGKILL_SURVIVED_AFTER_NS
+        && let Err(e) = clear_tamper_slot(slot)
+    {
+        warn!(error = %e, "sensor-linux: could not clear a survived SIGKILL record");
+    }
 }
 
 /// Linux sensor (eBPF). `run` blocks until Ctrl-C or [`Sensor::stop`].
@@ -106,8 +143,22 @@ impl LinuxSensor {
     }
 
     async fn run_async(&mut self, sink: Box<dyn EventSink>) -> Result<(), SensorError> {
-        let mut ebpf = load_ebpf()?;
+        let mut ebpf = load_ebpf_for_run()?;
         let offset = boot_epoch_offset_ns();
+        // Computed early (not just for #340's drain-time self-exclusion below) so
+        // `write_signal_watch_pid` can seed `SIGNAL_WATCH_PID` before the
+        // `sys_enter_kill`/`sys_enter_tgkill` probes are attached (issue #362) —
+        // attaching them first would let a signal land before the map holds
+        // anything but its zero-initialized default, which the probe treats as
+        // "watch nothing" and silently drops.
+        let own_pid = std::process::id();
+        write_signal_watch_pid(&mut ebpf, own_pid)?;
+        // The signal filter only ever watches this process (v1 scope), so this is
+        // resolved once rather than per event — see `normalize::signal`'s doc
+        // comment.
+        let self_exe = std::env::current_exe()
+            .ok()
+            .map(|p| p.display().to_string());
 
         match aya_log::EbpfLogger::init(&mut ebpf) {
             Err(e) => {
@@ -176,29 +227,62 @@ impl LinuxSensor {
         let mut socket_accept_ring_buf = ring("SOCKET_ACCEPT_EVENTS")?;
         let mut file_setxattr_ring_buf = ring("FILE_SETXATTR_EVENTS")?;
         let mut file_removexattr_ring_buf = ring("FILE_REMOVEXATTR_EVENTS")?;
+        let mut mount_ring_buf = ring("MOUNT_EVENTS")?;
+        let mut signal_ring_buf = ring("SIGNAL_EVENTS")?;
+        let mut kernel_module_ring_buf = ring("KERNEL_MODULE_EVENTS")?;
+        let mut bpf_ring_buf = ring("BPF_EVENTS")?;
+        let mut ptrace_ring_buf = ring("PTRACE_EVENTS")?;
+        let mut process_vm_read_ring_buf = ring("PROCESS_VM_READ_EVENTS")?;
+        let mut process_vm_write_ring_buf = ring("PROCESS_VM_WRITE_EVENTS")?;
+        let mut memfd_create_ring_buf = ring("MEMFD_CREATE_EVENTS")?;
+        let mut identity_change_ring_buf = ring("IDENTITY_CHANGE_EVENTS")?;
+        let mut capset_ring_buf = ring("CAPSET_EVENTS")?;
+        let mut namespace_ring_buf = ring("NAMESPACE_EVENTS")?;
 
         tracing::info!(
-            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind/chmod/chown/udp_send/listen/accept/setxattr/removexattr events"
+            "sensor-linux: listening for exec/open/connect/write/delete/rename/bind/chmod/chown/udp_send/listen/accept/setxattr/removexattr/mount/signal/kernel_module/bpf/ptrace/process_vm_readv/process_vm_writev/memfd_create/identity_change/capset/namespace events"
         );
 
         let mut container_ids = CgroupIdCache::new();
         let docker_cache: DockerInfoCache = Arc::new(Mutex::new(HashMap::new()));
         // Issue #340: excluded from every drain below so the sensor never re-observes
         // its own syscalls (most visibly its `write(2)`s to `events.jsonl`).
-        let own_pid = std::process::id();
+        // Issue #362: a SIGKILL recorded by the previous agent instance, the one
+        // this process presumably restarted after. Replayed through the normal
+        // `Event::Signal` path, so the tamper rule attributes it like a live one.
+        let mut tamper_slot = take_tamper_slot(&mut ebpf)?;
+        if let Some(previous) = read_tamper_slot(&tamper_slot) {
+            tracing::warn!(
+                sender_pid = previous.meta.pid,
+                target_pid = previous.target_pid,
+                "sensor-linux: the previous agent instance was sent SIGKILL, reporting it"
+            );
+            sink.on_event(normalize::signal(
+                &previous,
+                offset,
+                self_exe.clone(),
+                container_context(previous.meta.cgroup_id, &mut container_ids, &docker_cache),
+            ));
+            clear_tamper_slot(&mut tamper_slot)?;
+        }
+        let mut tamper_sweep = tokio::time::interval(TAMPER_SWEEP_INTERVAL);
         let ctrl_c = tokio::signal::ctrl_c();
         tokio::pin!(ctrl_c);
         loop {
             tokio::select! {
                 _ = &mut ctrl_c => break,
                 _ = self.stop.notified() => break,
+                _ = tamper_sweep.tick() => {
+                    sweep_survived_sigkill(&mut tamper_slot, own_pid, offset);
+                }
                 guard = exec_ring_buf.readable_mut() => {
-                    // One synchronous procfs read per exec event, on this task (see
+                    // Two synchronous procfs reads per exec event, on this task (see
                     // `read_proc_cmdline`'s doc comment on why this hasn't warranted
-                    // `spawn_blocking` yet). Container attribution no longer touches
-                    // `/proc` at all — see `CgroupIdCache`.
+                    // `spawn_blocking` yet — `read_proc_environ_security` is the same
+                    // file family, same tradeoff). Container attribution no longer
+                    // touches `/proc` at all — see `CgroupIdCache`.
                     drain!(guard, sensor_linux_wire::ExecEvent, sink, own_pid, |e: &sensor_linux_wire::ExecEvent| {
-                        normalize::exec(e, offset, read_proc_cmdline(e.meta.pid), container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        normalize::exec(e, offset, read_proc_cmdline(e.meta.pid), read_proc_environ_security(e.meta.pid), container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
                     });
                 }
                 guard = file_open_ring_buf.readable_mut() => {
@@ -277,6 +361,76 @@ impl LinuxSensor {
                     drain!(guard, sensor_linux_wire::FileRemovexattrEvent, sink, own_pid,
                         |e: &sensor_linux_wire::FileRemovexattrEvent| {
                             normalize::file_removexattr(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = mount_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::MountEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::MountEvent| {
+                            normalize::mount(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = signal_ring_buf.readable_mut() => {
+                    // container_context resolves the SENDER's container (meta is
+                    // the sender, same convention as every other event type) —
+                    // relevant for e.g. attributing a container-escape kill attempt
+                    // to the container it came from.
+                    drain!(guard, sensor_linux_wire::SignalEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::SignalEvent| {
+                            normalize::signal(e, offset, self_exe.clone(), container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = kernel_module_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::KernelModuleEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::KernelModuleEvent| {
+                            normalize::kernel_module(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = bpf_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::BpfEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::BpfEvent| {
+                            normalize::bpf_operation(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = ptrace_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::PtraceEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::PtraceEvent| {
+                            normalize::ptrace(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = process_vm_read_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::ProcessVmReadEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::ProcessVmReadEvent| {
+                            normalize::process_vm_read(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = process_vm_write_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::ProcessVmWriteEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::ProcessVmWriteEvent| {
+                            normalize::process_vm_write(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = memfd_create_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::MemfdCreateEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::MemfdCreateEvent| {
+                            normalize::memfd_create(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = identity_change_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::IdentityChangeEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::IdentityChangeEvent| {
+                            normalize::identity_change(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = capset_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::CapSetEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::CapSetEvent| {
+                            normalize::cap_set(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
+                        });
+                }
+                guard = namespace_ring_buf.readable_mut() => {
+                    drain!(guard, sensor_linux_wire::NamespaceEvent, sink, own_pid,
+                        |e: &sensor_linux_wire::NamespaceEvent| {
+                            normalize::namespace(e, offset, container_context(e.meta.cgroup_id, &mut container_ids, &docker_cache))
                         });
                 }
             }

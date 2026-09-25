@@ -28,12 +28,15 @@
 use core::net::{IpAddr, Ipv4Addr};
 
 use crate::{
-    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, ConnectEvent, DnsQueryEvent, EventMeta,
-    ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent, FileOpenEvent,
-    FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent, ImageLoadEvent,
-    ListenPortEvent, NetworkFlowEvent, ReadlineInputEvent, RegistrySetEvent, ScriptBlockEvent,
-    ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent, SocketListenEvent,
-    TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User, WmiActivityEvent,
+    AssemblyLoadEvent, AuthEvent, AuthKind, AuthOutcome, BpfEvent, CapSetEvent, ConnectEvent,
+    DnsQueryEvent, EventMeta, ExecEvent, FileChmodEvent, FileChownEvent, FileDeleteEvent,
+    FileOpenEvent, FileRemovexattrEvent, FileRenameEvent, FileSetxattrEvent, FileWriteEvent,
+    IdentityChangeEvent, IdentityChangeKind, ImageLoadEvent, KernelModuleAction, KernelModuleEvent,
+    ListenPortEvent, MemfdCreateEvent, NamespaceEvent, NamespaceSyscall, NetworkFlowEvent,
+    ProcessVmReadEvent, ProcessVmWriteEvent, PtraceEvent, ReadlineInputEvent, RegistrySetEvent,
+    ScriptBlockEvent, ShellType, SmbConnectEvent, SocketAcceptEvent, SocketBindEvent,
+    SocketListenEvent, TlsCaptureEvent, TlsDirection, TlsLibraryType, UdpSendEvent, User,
+    WmiActivityEvent,
 };
 
 /// The TEST-NET-1 address every address-carrying fixture defaults to.
@@ -64,6 +67,7 @@ pub fn exec() -> ExecEvent {
         parent_image_path: None,
         sha256: None,
         signature: None,
+        env_security: Vec::new(),
     }
 }
 
@@ -336,5 +340,107 @@ pub fn socket_accept() -> SocketAcceptEvent {
         accepted_fd: 0,
         peer_addr: TEST_ADDR,
         peer_port: 0,
+    }
+}
+
+/// Neutral [`KernelModuleEvent`].
+#[must_use]
+pub fn kernel_module() -> KernelModuleEvent {
+    KernelModuleEvent {
+        meta: meta(),
+        action: KernelModuleAction::Load,
+        name: None,
+        fd: None,
+        image_len: None,
+    }
+}
+
+/// Neutral [`BpfEvent`].
+#[must_use]
+pub fn bpf_operation() -> BpfEvent {
+    BpfEvent {
+        meta: meta(),
+        cmd: 0,
+    }
+}
+
+/// Neutral [`PtraceEvent`].
+#[must_use]
+pub fn ptrace() -> PtraceEvent {
+    PtraceEvent {
+        meta: meta(),
+        request: 0,
+        target_pid: 0,
+        addr: 0,
+        data: 0,
+    }
+}
+
+/// Neutral [`ProcessVmReadEvent`].
+#[must_use]
+pub fn process_vm_read() -> ProcessVmReadEvent {
+    ProcessVmReadEvent {
+        meta: meta(),
+        target_pid: 0,
+        local_iov_count: 0,
+        remote_iov_count: 0,
+        remote_iov_len: 0,
+    }
+}
+
+/// Neutral [`ProcessVmWriteEvent`].
+#[must_use]
+pub fn process_vm_write() -> ProcessVmWriteEvent {
+    ProcessVmWriteEvent {
+        meta: meta(),
+        target_pid: 0,
+        local_iov_count: 0,
+        remote_iov_count: 0,
+        remote_iov_len: 0,
+    }
+}
+
+/// Neutral [`MemfdCreateEvent`].
+#[must_use]
+pub fn memfd_create() -> MemfdCreateEvent {
+    MemfdCreateEvent {
+        meta: meta(),
+        name: String::new(),
+        flags: 0,
+    }
+}
+
+/// Neutral [`IdentityChangeEvent`].
+#[must_use]
+pub fn identity_change() -> IdentityChangeEvent {
+    IdentityChangeEvent {
+        meta: meta(),
+        kind: IdentityChangeKind::SetUid,
+        real: 0,
+        effective: None,
+        saved: None,
+    }
+}
+
+/// Neutral [`CapSetEvent`].
+#[must_use]
+pub fn cap_set() -> CapSetEvent {
+    CapSetEvent {
+        meta: meta(),
+        target_pid: 0,
+        effective: 0,
+        permitted: 0,
+        inheritable: 0,
+    }
+}
+
+/// Neutral [`NamespaceEvent`].
+#[must_use]
+pub fn namespace() -> NamespaceEvent {
+    NamespaceEvent {
+        meta: meta(),
+        syscall: NamespaceSyscall::SetNs,
+        fd: None,
+        flags: 0,
     }
 }

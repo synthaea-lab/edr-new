@@ -1,0 +1,173 @@
+// Synthaea Control Plane - PostgreSQL Schema
+// Tenant-first architecture with Row-Level Security
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Tenancy foundation - organization = tenant
+model Tenant {
+  id        String   @id @default(uuid())
+  name      String
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  agents          Agent[]
+  detections      Detection[]
+  cases           Case[]
+  auditLogs       AuditLog[]       @relation("TenantAuditLogs")
+  contentReleases ContentRelease[]
+  corpusVersions  CorpusVersion[]
+  corpusSamples   CorpusSample[]
+
+  @@map("tenants")
+}
+
+// Agent enrollment and heartbeat tracking
+model Agent {
+  id           String   @id @default(uuid())
+  tenantId     String   @map("tenant_id")
+  enrollmentId String   @unique @map("enrollment_id") // mTLS cert subject CN
+  hostname     String?
+  version      String?
+  ring         String   @default("prod") // Canary ring: canary_0, canary_1, canary_2, prod
+  lastSeen     DateTime @map("last_seen")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("agents")
+  @@index([tenantId, lastSeen])
+  @@index([tenantId, ring])
+  @@index([tenantId, ring, lastSeen])
+  @@index([enrollmentId])
+}
+
+// Detection storage - events that triggered rules
+model Detection {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  agentId   String   @map("agent_id")
+  timestamp DateTime
+  technique String   // MITRE ATT&CK technique (e.g., T1059.001)
+  severity  String   // low/medium/high/critical
+
+  // Event data (JSON) - normalized schema::Event
+  event     Json
+  meta      Json
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("detections")
+  @@index([tenantId, timestamp])
+  @@index([agentId, timestamp])
+  @@index([technique])
+}
+
+// Case management - analyst triage workflow
+model Case {
+  id          String   @id @default(uuid())
+  tenantId    String   @map("tenant_id")
+  title       String
+  description String?
+  severity    String   // low/medium/high/critical
+  status      String   // open/investigating/resolved/false_positive
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("cases")
+  @@index([tenantId, status, createdAt])
+  @@index([severity])
+}
+
+// Audit log - all control plane actions
+model AuditLog {
+  id        String   @id @default(uuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id")
+  action    String   // enrollment.create, case.update, policy.deploy, etc.
+  resource  String   // cases/123, agents/456
+  details   Json?
+  timestamp DateTime @default(now())
+
+  tenant Tenant @relation("TenantAuditLogs", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@map("audit_logs")
+  @@index([tenantId, timestamp])
+  @@index([userId, timestamp])
+  @@index([action])
+}
+
+// Content release - tracks content manifest versions per ring
+model ContentRelease {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  ring            String   // canary_0, canary_1, canary_2, prod
+  releaseVersion  Int      @map("release_version") // Monotone counter
+  manifestUrl     String   @map("manifest_url") // Storage URL for manifest JSON
+  manifestSha256  String   @map("manifest_sha256") // SHA-256 of manifest file
+  status          String   @default("active") // active, halted, rolled_back
+  releasedAt      DateTime @map("released_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, ring, releaseVersion])
+  @@map("content_releases")
+  @@index([tenantId, ring, status])
+  @@index([tenantId, ring, releaseVersion])
+}
+
+// Corpus version - versioned snapshot of site-specific benign corpus
+model CorpusVersion {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  version         Int      // Monotone version counter (per tenant)
+  sampleCount     Int      @map("sample_count") // Number of samples in this version
+  exportUrl       String?  @map("export_url") // JSONL export URL (for ML pipeline)
+  exportSha256    String?  @map("export_sha256") // SHA-256 of JSONL export
+  status          String   @default("collecting") // collecting, finalized, archived
+  collectionStart DateTime @map("collection_start") // Start of collection period
+  collectionEnd   DateTime? @map("collection_end") // End of collection period (when finalized)
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant  Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  samples CorpusSample[]
+
+  @@unique([tenantId, version])
+  @@map("corpus_versions")
+  @@index([tenantId, status])
+  @@index([tenantId, version])
+}
+
+// Corpus sample - individual benign telemetry sample for T3 curation
+model CorpusSample {
+  id              String   @id @default(uuid())
+  tenantId        String   @map("tenant_id")
+  corpusVersionId String   @map("corpus_version_id")
+  agentId         String   @map("agent_id") // Source agent for provenance
+  timestamp       DateTime // Event timestamp
+  eventType       String   @map("event_type") // exec, file_open, connect, etc.
+
+  // Event data (JSON) - normalized schema::Event
+  event           Json
+
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  tenant        Tenant        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  corpusVersion CorpusVersion @relation(fields: [corpusVersionId], references: [id], onDelete: Cascade)
+
+  @@map("corpus_samples")
+  @@index([tenantId, corpusVersionId])
+  @@index([agentId, timestamp])
+  @@index([eventType])
+}
