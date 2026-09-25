@@ -75,7 +75,10 @@ jobs:
   linux-ebpf:
     runs-on: ubuntu-latest
     env:
-      BPF_LINKER_VERSION: v0.11.1 # keep in sync with lab/provisioning/linux-toolchain.sh
+      # Keep both in sync with lab/provisioning/linux-toolchain.sh. The hash is the
+      # x86_64 musl tarball's: a replaced release asset must fail here, not run.
+      BPF_LINKER_VERSION: v0.11.1
+      BPF_LINKER_SHA256: e058a6aecc9e65fa4c977b298a8e4b738424d7629769fd352eed409fb57e16e8
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -83,11 +86,12 @@ jobs:
           components: clippy
       - name: nightly + rust-src (aya-build compiles the probes with it)
         run: rustup toolchain install nightly --profile minimal --component rust-src
-      - name: bpf-linker (prebuilt, musl-static, bundled LLVM)
+      - name: bpf-linker (prebuilt, musl-static, bundled LLVM, SHA-256 pinned)
         run: |
-          curl -fsSL --retry 3 --retry-all-errors \
-            "https://github.com/aya-rs/bpf-linker/releases/download/${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst" \
-            | tar --zstd -x -C "$RUNNER_TEMP"
+          curl -fsSL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/bpf-linker.tar.zst" \
+            "https://github.com/aya-rs/bpf-linker/releases/download/${BPF_LINKER_VERSION}/bpf-linker-x86_64-unknown-linux-musl.tar.zst"
+          echo "${BPF_LINKER_SHA256}  $RUNNER_TEMP/bpf-linker.tar.zst" | sha256sum -c -
+          tar --zstd -xf "$RUNNER_TEMP/bpf-linker.tar.zst" -C "$RUNNER_TEMP"
           install -m755 "$(find "$RUNNER_TEMP" -type f -name bpf-linker -print -quit)" "$HOME/.cargo/bin/bpf-linker"
           bpf-linker --version
       - uses: Swatinem/rust-cache@v2
