@@ -371,6 +371,29 @@ fn task_update_pattern_match_is_case_insensitive() {
 }
 
 #[test]
+fn task_update_repointed_through_an_unexpanded_env_var_alerts() {
+    // Task actions keep `%VAR%` as written: `%localappdata%\…` contains none of
+    // the backslash directory patterns (#399 review).
+    for action in [
+        r"%LOCALAPPDATA%\Microsoft\updater.exe",
+        r"%TEMP%\x.exe",
+        r"%Public%\svc.exe",
+    ] {
+        let event = file_open_event_scheduled_task_update("Updater", action);
+        assert!(
+            check_scheduled_task_update_persistence(&event).is_some(),
+            "{action} must alert"
+        );
+    }
+}
+
+#[test]
+fn task_update_with_forward_slashes_alerts() {
+    let event = file_open_event_scheduled_task_update("Updater", "C:/Users/Public/x.exe");
+    assert!(check_scheduled_task_update_persistence(&event).is_some());
+}
+
+#[test]
 fn routine_task_update_under_program_files_stays_silent() {
     // Windows and vendors rewrite their own tasks constantly — a 4702 whose new
     // action is a normal installed binary is churn, not a hijack.

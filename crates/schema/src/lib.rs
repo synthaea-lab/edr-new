@@ -304,7 +304,8 @@ pub const FLAG_APPLICATION_BLOCKED: u32 = 0x0100_0000;
 pub const FLAG_PERSISTENCE_TASK_UPDATE_ARTIFACT: u32 = 0x0080_0000;
 
 /// Every synthetic `FLAG_*` bit above, checked pairwise-disjoint at compile time.
-/// A new flag goes here in the same edit. Lives next to the constants, not in a
+/// A new flag goes here in the same edit (a unit test fails if a `pub const
+/// FLAG_*` is missing). Lives next to the constants, not in a
 /// consumer's test: the first cut of [`FLAG_PERSISTENCE_TASK_UPDATE_ARTIFACT`]
 /// took `0x0200_0000`, already [`FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN`], and the
 /// hardcoded list in `rules`' collision test missed it (#399 review).
@@ -1678,6 +1679,20 @@ impl Event {
             // the defining crate, so a new variant without its arm here is a
             // compile error — the reminder the doc comment above promises.
         }
+    }
+}
+
+#[cfg(test)]
+mod synthetic_flag_tests {
+    #[test]
+    fn every_pub_flag_constant_is_in_synthetic_flags() {
+        // The compile-time disjointness check only sees what the list holds; a
+        // new `pub const FLAG_*` left out of it would skip the check silently.
+        let declared = include_str!("lib.rs")
+            .lines()
+            .filter(|line| line.starts_with("pub const FLAG_"))
+            .count();
+        assert_eq!(declared, super::SYNTHETIC_FLAGS.len());
     }
 }
 

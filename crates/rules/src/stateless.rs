@@ -212,12 +212,25 @@ pub(crate) fn check_scheduled_task_persistence(event: &FileOpenEvent) -> Option<
 /// alert: user-writable staging directories, and script hosts / proxy-execution
 /// binaries a hijacked task is typically repointed at. Uncalibrated against fleet
 /// traffic (first cut, 2026-09-23) — revisit once real 4702 volume is observed.
+///
+/// Matched against the path with `/` normalized to `\`. Task actions are stored
+/// as written, so the directories also appear as their unexpanded `%VAR%` tokens
+/// — the usual shape of a user-level task. The agent runs as SYSTEM and cannot
+/// expand per-user variables reliably, so the tokens are matched as-is (#399
+/// review).
 const TASK_HIJACK_ACTION_PATTERNS: &[&str] = &[
     r"\appdata\",
     r"\temp\",
     r"\downloads\",
     r"\users\public\",
     r"\programdata\",
+    "%temp%",
+    "%tmp%",
+    "%appdata%",
+    "%localappdata%",
+    "%public%",
+    "%userprofile%",
+    "%programdata%",
     "cmd.exe",
     "powershell",
     "pwsh",
@@ -256,7 +269,7 @@ pub(crate) fn check_scheduled_task_update_persistence(event: &FileOpenEvent) -> 
         return None;
     }
     let reason = if event.flags & FLAG_PERSISTENCE_TASK_ACTION_UNKNOWN == 0 {
-        let path_lower = event.path.to_ascii_lowercase();
+        let path_lower = event.path.to_ascii_lowercase().replace('/', r"\");
         *TASK_HIJACK_ACTION_PATTERNS
             .iter()
             .find(|pattern| path_lower.contains(*pattern))?
